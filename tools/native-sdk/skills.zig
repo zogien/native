@@ -130,7 +130,7 @@ fn packageRootFromExecutablePath(allocator: std.mem.Allocator, io: std.Io, execu
         const parent = std.fs.path.dirname(dir) orelse return null;
         if (try hasSkillDirs(allocator, io, parent)) return try allocator.dupe(u8, parent);
 
-        const sibling = try std.fs.path.join(allocator, &.{ parent, "cli" });
+        const sibling = try std.fs.path.join(allocator, &.{ parent, "native" });
         if (try hasSkillDirs(allocator, io, sibling)) return sibling;
         allocator.free(sibling);
         dir = parent;
@@ -422,14 +422,14 @@ test "executable search accepts checkout and flat bundle ancestors" {
 test "executable search finds hoisted sibling main package" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try testCreateDir(&tmp, &.{ "node_modules", "@native-sdk", "cli", "skills" });
-    try testCreateDir(&tmp, &.{ "node_modules", "@native-sdk", "cli-linux-x64-gnu", "bin" });
+    try testCreateDir(&tmp, &.{ "node_modules", "@zogien", "native", "skills" });
+    try testCreateDir(&tmp, &.{ "node_modules", "@zogien", "native-linux-x64-gnu", "bin" });
 
     const root = try testTempRootAlloc(&tmp);
     defer std.testing.allocator.free(root);
-    const main_package = try std.fs.path.join(std.testing.allocator, &.{ root, "node_modules", "@native-sdk", "cli" });
+    const main_package = try std.fs.path.join(std.testing.allocator, &.{ root, "node_modules", "@zogien", "native" });
     defer std.testing.allocator.free(main_package);
-    const executable = try std.fs.path.join(std.testing.allocator, &.{ root, "node_modules", "@native-sdk", "cli-linux-x64-gnu", "bin", "native" });
+    const executable = try std.fs.path.join(std.testing.allocator, &.{ root, "node_modules", "@zogien", "native-linux-x64-gnu", "bin", "native" });
     defer std.testing.allocator.free(executable);
 
     try testExpectResolved(main_package, try packageRootFromExecutablePath(std.testing.allocator, std.testing.io, executable));
@@ -438,14 +438,14 @@ test "executable search finds hoisted sibling main package" {
 test "executable search reaches outer main package from nested optional dependency" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try testCreateDir(&tmp, &.{ "node_modules", "@native-sdk", "cli", "skill-data" });
-    try testCreateDir(&tmp, &.{ "node_modules", "@native-sdk", "cli", "node_modules", "@native-sdk", "cli-linux-x64-gnu", "bin" });
+    try testCreateDir(&tmp, &.{ "node_modules", "@zogien", "native", "skill-data" });
+    try testCreateDir(&tmp, &.{ "node_modules", "@zogien", "native", "node_modules", "@zogien", "native-linux-x64-gnu", "bin" });
 
     const root = try testTempRootAlloc(&tmp);
     defer std.testing.allocator.free(root);
-    const main_package = try std.fs.path.join(std.testing.allocator, &.{ root, "node_modules", "@native-sdk", "cli" });
+    const main_package = try std.fs.path.join(std.testing.allocator, &.{ root, "node_modules", "@zogien", "native" });
     defer std.testing.allocator.free(main_package);
-    const executable = try std.fs.path.join(std.testing.allocator, &.{ main_package, "node_modules", "@native-sdk", "cli-linux-x64-gnu", "bin", "native" });
+    const executable = try std.fs.path.join(std.testing.allocator, &.{ main_package, "node_modules", "@zogien", "native-linux-x64-gnu", "bin", "native" });
     defer std.testing.allocator.free(executable);
 
     try testExpectResolved(main_package, try packageRootFromExecutablePath(std.testing.allocator, std.testing.io, executable));

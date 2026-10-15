@@ -4,8 +4,9 @@
 // packaging CLI sources, and a compiled default TypeScript app.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,14 +24,38 @@ function run(file, args, cwd) {
 try {
   assert.ok(process.env.npm_execpath, 'Run this check with npm run package:check');
   const npm = process.env.npm_execpath;
-  run(process.execPath, [npm, 'pack', '--quiet', '--pack-destination', work], packageRoot);
-  const tarballs = readdirSync(work).filter(name => name.endsWith('.tgz'));
-  assert.equal(tarballs.length, 1, 'Expected exactly one npm tarball');
-  const tarball = join(work, tarballs[0]);
+  function pack(directory, destination) {
+    mkdirSync(destination);
+    run(process.execPath, [npm, 'pack', '--quiet', '--pack-destination', destination], directory);
+    const tarballs = readdirSync(destination).filter(name => name.endsWith('.tgz'));
+    assert.equal(tarballs.length, 1, 'Expected exactly one npm tarball');
+    return join(destination, tarballs[0]);
+  }
+  // Install the local host binary in the same transaction as the main package.
+  // New release versions must be testable before any package is published.
+  const libc = process.platform === 'linux'
+    ? (process.report.getReport().header.glibcVersionRuntime ? '-gnu' : '-musl') : '';
+  const platformKey = process.platform + '-' + process.arch + libc;
+  const platformRoot = join(packageRoot, 'npm', platformKey);
+  const platformMetadata = JSON.parse(readFileSync(join(platformRoot, 'package.json'), 'utf8'));
+  assert.equal(metadata.optionalDependencies[platformMetadata.name], platformMetadata.version);
+  const executable = process.platform === 'win32' ? 'native.exe' : 'native';
+  let binary = join(platformRoot, 'bin', executable);
+  if (!existsSync(binary)) {
+    const prefix = join(work, 'host-cli');
+    run('zig', ['build', 'cli', '-Doptimize=ReleaseSmall', '-j1', '--prefix', prefix], join(packageRoot, '../..'));
+    binary = join(prefix, 'bin', executable);
+  }
+  const staging = join(work, 'platform-package');
+  mkdirSync(join(staging, 'bin'), { recursive: true });
+  copyFileSync(join(platformRoot, 'package.json'), join(staging, 'package.json'));
+  copyFileSync(binary, join(staging, 'bin', executable));
+  const platformTarball = pack(staging, join(work, 'platform-tarball'));
+  const tarball = pack(packageRoot, join(work, 'main-tarball'));
   const installation = join(work, 'installation');
   mkdirSync(installation);
   writeFileSync(join(installation, 'package.json'), '{"private":true}');
-  run(process.execPath, [npm, 'install', tarball, '--no-audit', '--no-fund'], installation);
+  run(process.execPath, [npm, 'install', tarball, platformTarball, '--no-audit', '--no-fund'], installation);
   const sdk = join(installation, 'node_modules', metadata.name);
   for (const path of ['tests', 'examples', 'evals']) {
     assert.equal(existsSync(join(sdk, path)), false, path + ' must remain repository-only');
@@ -64,12 +89,22 @@ try {
   run(join(sdk, 'zig-out/bin', process.platform === 'win32' ? 'native.exe' : 'native'), ['version'], work);
 
   const dispatcher = join(sdk, 'bin/native.js');
+  const installedBinary = createRequire(join(sdk, 'package.json')).resolve(platformMetadata.name + '/bin/' + executable);
+  const version = execFileSync(process.execPath, [dispatcher, 'version'], { cwd: work, env, encoding: 'utf8' });
+  assert.ok(version.startsWith('native ' + metadata.version + ' '), 'Dispatcher must run the locally built release version');
+  // Direct invocation must locate the fork's sibling SDK and skill payloads too.
+  run(installedBinary, ['skills', 'list'], work);
+  const slim = join(work, 'default-app');
+  run(installedBinary, ['init', slim], work);
+  assert.equal(existsSync(join(slim, 'build.zig')), false, 'Default scaffold must use the managed build');
+  run(process.execPath, [dispatcher, 'check'], slim);
+  const platform = process.platform === 'linux' ? ['-Dplatform=null'] : [];
+  run(process.execPath, [dispatcher, 'build', ...platform], slim);
   const app = join(work, 'app');
   run(process.execPath, [dispatcher, 'init', app, '--full'], work);
   run(process.execPath, [dispatcher, 'check'], app);
   // Linux CI needs no GTK development libraries with the headless host.
   // Windows uses its desktop host, which links the compiled core's OS libraries.
-  const platform = process.platform === 'linux' ? ['-Dplatform=null'] : [];
   run('zig', ['build', ...platform, '-Doptimize=ReleaseFast', '-j1'], app);
   console.log('Verified npm package: ' + tarball);
 } catch (error) {

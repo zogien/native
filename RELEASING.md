@@ -1,23 +1,69 @@
-# Releasing
+# Releasing the fork
 
-Releases are manual, single-PR affairs. The maintainer controls the changelog voice and format.
+The public CLI is `@zogien/native`. Its eight binary packages use
+`@zogien/native-<platform>`. The `native` command and the bundled
+`@native-sdk/core` authoring API keep their existing names; the core package is
+included in the CLI payload and is not published separately by this fork.
 
-To prepare a release:
+## Prepare a release
 
-1. Create a branch (e.g. `prepare-v1.2.0`)
-2. Bump the version in `packages/native-sdk/package.json`
-3. Run `npm --prefix packages/native-sdk run version:sync` to update all version references
-4. Review the git history since the previous release and write the complete changelog entry at the top of `CHANGELOG.md`, under a new `## <version>` heading wrapped in `<!-- release:start -->` and `<!-- release:end -->` markers
-5. Populate the entry's `### Contributors` from commit authors and `Co-authored-by` trailers in the release range, using GitHub handles when available; this marked block is also the GitHub release body
-6. Remove the `<!-- release:start -->` and `<!-- release:end -->` markers from the previous release entry; only the latest release should have markers
-7. Open a PR and merge to `main`
+1. Update `packages/native-sdk/package.json` to the next version, starting with
+   `0.11.0-fork.1`. Keep `publishConfig.tag` set to `fork` for fork releases.
+2. Run `npm --prefix packages/native-sdk run version:sync`. The repository's
+   existing shared-version convention also updates the bundled core and the
+   example/test app pins. Platform names and the CLI lockfile are checked by
+   `npm --prefix packages/native-sdk run version:check`.
+3. Run `npm --prefix packages/native-sdk run scripts:check`,
+   `npm --prefix packages/native-sdk run package:check`, and
+   `scripts/gate.sh fast`. Package verification builds or uses a staged local
+   host binary, installs the real platform and main tarballs together, and
+   builds both the default managed app and the `--full` app outside the checkout.
+4. Review and commit the release configuration. Create an annotated tag on that
+   commit, for example `git tag -a fork/v0.11.0-fork.1 -m "Release 0.11.0-fork.1"`.
+5. Push the commit and the specific tag to `origin`. Ordinary `main` pushes do
+   not publish. Never overwrite a published version or move a published tag.
 
-## Writing the changelog
+## GitHub build and publish
 
-Follow the existing format and voice. Group changes under descriptive headings such as `### New Features`, `### Bug Fixes`, and `### Improvements`. Give each bullet a bold lead-in followed by a concise description, and include PR numbers when available. Do not prefix entries with commit hashes.
+`.github/workflows/release.yml` runs when a `fork/v*` tag is pushed. It verifies
+that the tag matches the package version and that package provenance points to
+this repository. A macOS runner cross-compiles all eight CLI targets, verifies
+the installed host packages, and uploads nine npm tarballs plus the binaries as
+Actions artifacts. The publish job uses these exact tarballs, publishes all
+platform packages before the main package, and creates a GitHub prerelease.
+Already-published versions are skipped when rerunning a partially completed job.
 
-The release entry should cover the complete git range since the previous release, including changes whose individual PRs did not touch `CHANGELOG.md`.
+You can also run the workflow manually. Choose `main` to build and download
+artifacts without publishing, or choose the matching `fork/v...` tag to publish.
+The publish job uses the GitHub environment named `Release`.
 
-CI compares the version in `packages/native-sdk/package.json` to what's on npm. If it differs, it cross-builds the CLI for every platform, creates the GitHub release with the binaries, publishes the per-platform binary packages (`packages/native-sdk/npm/*`), and publishes `@native-sdk/cli` last — so the main package only lands once every binary package it pins is live. If npm already has the version but the GitHub release is missing assets, CI recreates the GitHub release from the marked changelog entry.
+### First publication
 
-Publishing uses npm trusted publishing (OIDC) — there is no npm token secret. One-time setup: on npmjs.com, each of the nine packages (`@native-sdk/cli` plus the eight `@native-sdk/cli-*` platform packages under `packages/native-sdk/npm/*`) must have a GitHub Actions trusted publisher configured with repository `vercel-labs/native`, workflow `release.yml`, and environment `Release`. Every publish runs with `--provenance`. If a package is missing its trusted-publisher configuration, `npm publish` fails loudly with an OIDC authentication error for that package.
+For the initial nine packages, either publish the downloaded tarballs manually
+with an npm account that has 2FA enabled, or add a short-lived granular npm write
+token with bypass 2FA enabled as the `NPM_TOKEN` secret in the `Release`
+environment. The token must allow creating packages in the `@zogien` scope.
+Publish platform tarballs first and the main tarball last, always using
+`npm publish <tarball> --access public --tag fork`.
+
+### Subsequent publications
+
+Configure an npm GitHub Actions trusted publisher on each of the nine packages:
+
+- Owner: `zogien`
+- Repository: `native`
+- Workflow filename: `release.yml`
+- Environment: `Release`
+
+After confirming trusted publishing works, remove the bootstrap `NPM_TOKEN`.
+The workflow grants `id-token: write` and publishes with provenance. Trusted
+publishing requires a supported npm version (11.5.1 or newer); the workflow uses
+Node 24. See the [npm trusted publishing guide](https://docs.npmjs.com/trusted-publishers/)
+and [scoped public package publishing](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/).
+
+## Install
+
+```sh
+npm install -g @zogien/native@fork
+native version
+```

@@ -1,13 +1,13 @@
 {
   "name": "@native-sdk/core",
-  "version": "0.11.0",
+  "version": "0.11.0-fork.1",
   "description": "The TypeScript authoring tier: the app-core subset, its checker and contract frontend, the exact-pinned core compiler dependency, and the SDK module cores import",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vercel-labs/native.git",
+    "url": "git+https://github.com/zogien/native.git",
     "directory": "packages/core"
   },
-  "homepage": "https://native-sdk.dev",
+  "homepage": "https://github.com/zogien/native#readme",
   "type": "module",
   "engines": {
     "node": ">=24"

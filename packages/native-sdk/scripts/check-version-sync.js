@@ -46,7 +46,7 @@ for (const entry of readdirSync(npmDir, { withFileTypes: true })) {
     console.error(`Version mismatch: package.json=${expectedVersion}, npm/${entry.name}/package.json=${platformJson.version}`);
     errors++;
   }
-  const expectedName = `@native-sdk/cli-${entry.name}`;
+  const expectedName = `${packageJson.name}-${entry.name}`;
   if (platformJson.name !== expectedName) {
     console.error(`Name mismatch: npm/${entry.name}/package.json is ${platformJson.name}, expected ${expectedName}`);
     errors++;
@@ -54,6 +54,12 @@ for (const entry of readdirSync(npmDir, { withFileTypes: true })) {
   if (!(expectedName in (packageJson.optionalDependencies ?? {}))) {
     console.error(`Missing optionalDependencies pin for ${expectedName} in package.json`);
     errors++;
+  }
+  for (const key of ['access', 'tag', 'registry']) {
+    if (platformJson.publishConfig?.[key] !== packageJson.publishConfig?.[key]) {
+      console.error('Publish config mismatch: npm/' + entry.name + '/package.json ' + key);
+      errors++;
+    }
   }
   const expectedRepositoryUrl = packageJson.repository?.url;
   if (platformJson.repository?.url !== expectedRepositoryUrl) {
@@ -76,6 +82,10 @@ for (const [name, pin] of Object.entries(packageJson.optionalDependencies ?? {})
 const cliLock = JSON.parse(readFileSync(join(projectRoot, 'package-lock.json'), 'utf-8'));
 if (cliLock.version !== expectedVersion || cliLock.packages?.['']?.version !== expectedVersion) {
   console.error(`Version mismatch: packages/native-sdk/package-lock.json=${cliLock.version}/${cliLock.packages?.['']?.version}, expected ${expectedVersion}`);
+  errors++;
+}
+if (cliLock.name !== packageJson.name || cliLock.packages?.['']?.name !== packageJson.name) {
+  console.error('CLI lockfile package names do not match package.json');
   errors++;
 }
 const lockedPins = cliLock.packages?.['']?.optionalDependencies ?? {};
@@ -114,7 +124,7 @@ if (coreJson.homepage !== packageJson.homepage) {
 }
 // The CLI carries the frontend's TypeScript compiler as a REGULAR
 // dependency via the @typescript/old ALIAS (npm:typescript@X.Y.Z): npm
-// installs it in the same transaction as @native-sdk/cli, so the bundled
+// installs it in the same transaction as @zogien/native, so the bundled
 // packages/core resolves it through node's ancestor node_modules walk
 // with no install step at verb time (offline, read-only-prefix, and
 // production-config safe). Both manifests must pin the alias in the

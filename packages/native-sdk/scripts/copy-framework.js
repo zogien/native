@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // Mirror the SDK payload from the repo root into this package before
-// packing (npm prepack). The published @native-sdk/cli carries everything
+// packing (npm prepack). The published @zogien/native carries everything
 // an app build graph needs from its `native_sdk` path dependency: src/
 // (the SDK modules), build/ + build.zig + build.zig.zon (the dependency's
 // consumer build entry, isolated from repository tests), app.zon, assets/ (files the

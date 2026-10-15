@@ -4,7 +4,7 @@
 // the source of truth, and this script stamps it into the CLI source
 // (tools/native-sdk/main.zig), every per-platform binary package under
 // npm/, and the main package's own optionalDependencies pins. The pins
-// are exact so a given @native-sdk/cli always installs the binary built
+// are exact so a given @zogien/native always installs the binary built
 // from the same commit. The same pass propagates the repo identity
 // fields (repository and homepage) into each platform package, so a
 // repository rename or domain move applied to the main package cannot
@@ -61,6 +61,15 @@ for (const entry of readdirSync(npmDir, { withFileTypes: true })) {
   const platformJsonPath = join(npmDir, entry.name, 'package.json');
   const platformJson = JSON.parse(readFileSync(platformJsonPath, 'utf-8'));
   let changed = false;
+  const expectedName = packageJson.name + '-' + entry.name;
+  if (platformJson.name !== expectedName) {
+    platformJson.name = expectedName;
+    changed = true;
+  }
+  if (JSON.stringify(platformJson.publishConfig) !== JSON.stringify(packageJson.publishConfig)) {
+    platformJson.publishConfig = { ...packageJson.publishConfig };
+    changed = true;
+  }
   if (platformJson.version !== version) {
     platformJson.version = version;
     changed = true;
@@ -158,12 +167,16 @@ if (pinsChanged) {
 const cliLockPath = join(projectRoot, 'package-lock.json');
 const cliLock = JSON.parse(readFileSync(cliLockPath, 'utf-8'));
 const previousLock = JSON.stringify(cliLock);
+const previousOptionalNames = Object.keys(cliLock.packages[''].optionalDependencies ?? {});
+cliLock.name = packageJson.name;
+cliLock.packages[''].name = packageJson.name;
 cliLock.version = version;
 cliLock.packages[''].version = version;
 cliLock.packages[''].optionalDependencies = { ...packageJson.optionalDependencies };
-for (const name of Object.keys(packageJson.optionalDependencies)) {
-  const key = `node_modules/${name}`;
-  if (cliLock.packages[key] && cliLock.packages[key].version !== version) {
+for (const name of new Set([...previousOptionalNames, ...Object.keys(packageJson.optionalDependencies)])) {
+  const key = 'node_modules/' + name;
+  if (cliLock.packages[key] &&
+      (!(name in packageJson.optionalDependencies) || cliLock.packages[key].version !== version)) {
     delete cliLock.packages[key];
   }
 }

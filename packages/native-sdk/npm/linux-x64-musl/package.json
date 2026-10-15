@@ -1,6 +1,6 @@
 {
-  "name": "@native-sdk/cli-linux-x64-musl",
-  "version": "0.11.0",
+  "name": "@zogien/native-linux-x64-musl",
+  "version": "0.11.0-fork.1",
   "description": "The native CLI binary for Linux x64 (musl)",
   "os": [
     "linux"
@@ -17,8 +17,13 @@
   "preferUnplugged": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vercel-labs/native.git"
+    "url": "git+https://github.com/zogien/native.git"
   },
-  "homepage": "https://native-sdk.dev",
-  "license": "Apache-2.0"
+  "homepage": "https://github.com/zogien/native#readme",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public",
+    "tag": "fork",
+    "registry": "https://registry.npmjs.org/"
+  }
 }

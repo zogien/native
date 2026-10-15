@@ -2,7 +2,7 @@
 
 // Dispatcher for the `native` CLI: finds the prebuilt binary for this
 // platform and execs it. The binary ships in a per-platform package
-// (@native-sdk/cli-<platform>, an optionalDependency of this package),
+// (@zogien/native-<platform>, an optionalDependency of this package),
 // so npm downloads exactly one Native SDK binary. The package install
 // script separately prepares the checksum-verified scriptc toolchain.
 //
@@ -33,7 +33,7 @@ function isMusl() {
   }
 }
 
-// -> { pkg: "@native-sdk/cli-<platform>", legacy: "native-sdk-<platform>[.exe]" }
+// -> { pkg: "@zogien/native-<platform>", legacy: "native-sdk-<platform>[.exe]" }
 // legacy is the flat bin/ name used by scripts/copy-native.js for repo-local
 // development packs.
 function platformTarget() {
@@ -51,14 +51,14 @@ function platformTarget() {
 
   switch (os) {
     case 'darwin':
-      return { pkg: `@native-sdk/cli-darwin-${archKey}`, legacy: `native-sdk-darwin-${archKey}`, exe: '' };
+      return { pkg: `@zogien/native-darwin-${archKey}`, legacy: `native-sdk-darwin-${archKey}`, exe: '' };
     case 'linux': {
       const libc = isMusl() ? 'musl' : 'gnu';
       const legacyOs = isMusl() ? 'linux-musl' : 'linux';
-      return { pkg: `@native-sdk/cli-linux-${archKey}-${libc}`, legacy: `native-sdk-${legacyOs}-${archKey}`, exe: '' };
+      return { pkg: `@zogien/native-linux-${archKey}-${libc}`, legacy: `native-sdk-${legacyOs}-${archKey}`, exe: '' };
     }
     case 'win32':
-      return { pkg: `@native-sdk/cli-win32-${archKey}`, legacy: `native-sdk-win32-${archKey}.exe`, exe: '.exe' };
+      return { pkg: `@zogien/native-win32-${archKey}`, legacy: `native-sdk-win32-${archKey}.exe`, exe: '.exe' };
     default:
       return null;
   }
@@ -95,7 +95,7 @@ function main() {
     console.error('');
     console.error('This usually means install ran with --no-optional or --omit=optional.');
     console.error('Reinstall with optional dependencies enabled:');
-    console.error('  npm install -g @native-sdk/cli');
+    console.error('  npm install -g @zogien/native');
     process.exit(1);
   }
 
