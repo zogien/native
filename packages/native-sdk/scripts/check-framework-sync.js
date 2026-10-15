@@ -12,7 +12,7 @@ const mirrors = [
   { source: 'src', target: 'src' },
   { source: 'build', target: 'build' },
   { source: 'assets', target: 'assets' },
-  { source: 'build.zig', target: 'build.zig' },
+  { source: 'build.package.zig', target: 'build.zig' },
   { source: 'build.zig.zon', target: 'build.zig.zon' },
   { source: 'app.zon', target: 'app.zon' },
   { source: 'LICENSE', target: 'LICENSE' },
@@ -24,6 +24,7 @@ const mirrors = [
   // corewire: the mirror/facade/profile generator every TypeScript-core
   // build compiles from the dependency.
   { source: 'tools/corewire', target: 'tools/corewire' },
+  { source: 'tools/native-sdk', target: 'tools/native-sdk' },
   // The @native-sdk/core closure TypeScript app builds resolve from the
   // installed package: the frontend, the SDK library modules (also the
   // editor package), the external-compile staging surface and its
