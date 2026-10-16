@@ -570,7 +570,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             }
             try WindowViewMethods.reserveWebView(self, WindowViewMethods.allocateViewId(
                 self,
-            ), window_id, label, null, url, webview_frame, webview_frame, layer, transparent, bridge_enabled);
+            ), window_id, label, null, url, webview_frame, webview_frame, layer, transparent, bridge_enabled, false);
             reserved = true;
             return writeWebViewJson(self.webviews[self.webview_count - 1], output);
         }

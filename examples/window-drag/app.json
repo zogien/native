@@ -1,0 +1,45 @@
+{
+  "id": "dev.native_sdk.window_drag",
+  "name": "window-drag",
+  "display_name": "Window Drag Contract",
+  "version": "0.1.0",
+  "platforms": [
+    "windows",
+    "macos",
+    "linux"
+  ],
+  "capabilities": [
+    "webview"
+  ],
+  "web_engine": "system",
+  "security": {
+    "navigation": {
+      "allowed_origins": [
+        "zero://app"
+      ],
+      "external_links": {
+        "action": "deny"
+      }
+    }
+  },
+  "windows": [
+    {
+      "label": "main",
+      "title": "Native SDK Window Drag",
+      "width": 1040,
+      "height": 640,
+      "titlebar": "hidden_inset_tall",
+      "window_drag_regions": true
+    },
+    {
+      "label": "secondary",
+      "title": "Native SDK Secondary Drag",
+      "width": 640,
+      "height": 480,
+      "x": 120,
+      "y": 120,
+      "titlebar": "standard",
+      "window_drag_regions": true
+    }
+  ]
+}

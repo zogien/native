@@ -2444,6 +2444,7 @@ fn runnerZig() []const u8 {
     \\            info.main_window.click_through = manifestShellStartupBool("click_through", false);
     \\            info.main_window.activate_on_show = manifestShellStartupBool("activate_on_show", true);
     \\            info.main_window.allows_fullscreen = manifestShellStartupBool("allows_fullscreen", true);
+    \\            info.main_window.window_drag_regions = manifestShellStartupBool("window_drag_regions", false);
     \\            // Min-size floors ride the create call like the titlebar:
     \\            // the scene re-applies size/title later, but the window's
     \\            // enforced floor is host state from the first frame on.
@@ -2607,6 +2608,7 @@ fn runnerZig() []const u8 {
     \\        .click_through = windowBool(window, "click_through", false),
     \\        .activate_on_show = windowBool(window, "activate_on_show", true),
     \\        .allows_fullscreen = windowBool(window, "allows_fullscreen", true),
+    \\        .window_drag_regions = windowBool(window, "window_drag_regions", false),
     \\        .min_width = windowMinSize(window, "min_width"),
     \\        .min_height = windowMinSize(window, "min_height"),
     \\        .close_policy = windowClosePolicy(window),

@@ -243,6 +243,7 @@
     "windowBase": {
       "type": "object",
       "properties": {
+        "window_drag_regions": { "type": "boolean", "default": false },
         "label": { "type": "string", "default": "main" },
         "title": { "type": "string" },
         "width": { "type": "number", "exclusiveMinimum": 0, "default": 720 },
@@ -317,6 +318,7 @@
       "additionalProperties": false,
       "required": ["label", "kind"],
       "properties": {
+        "window_drag_regions": { "type": "boolean", "default": false },
         "label": { "type": "string", "minLength": 1 },
         "kind": {
           "enum": [

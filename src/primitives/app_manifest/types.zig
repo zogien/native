@@ -348,6 +348,7 @@ pub const WindowClosePolicy = enum {
 };
 
 pub const Window = struct {
+    window_drag_regions: bool = false,
     label: []const u8 = "main",
     title: ?[]const u8 = null,
     width: f32 = 720,
@@ -447,6 +448,7 @@ pub const ShellAxis = enum {
 };
 
 pub const ShellView = struct {
+    window_drag_regions: bool = false,
     label: []const u8,
     kind: ViewKind,
     parent: ?[]const u8 = null,
@@ -487,6 +489,7 @@ pub const ShellView = struct {
 };
 
 pub const ShellWindow = struct {
+    window_drag_regions: bool = false,
     label: []const u8 = "main",
     title: ?[]const u8 = null,
     width: f32 = 720,

@@ -1,0 +1,6 @@
+body {margin:0;font:16px system-ui;color:#182333;background:#f3f5f7}
+header {height:80px;box-sizing:border-box;padding:30px 160px 0 80px;background:#dbe8fb}
+main {padding:24px;width:620px;box-sizing:border-box}
+.handle {padding:20px;margin:20px 0;background:#cfebdd;border:2px solid #25704b}
+button,input,a {font:inherit;margin:6px;padding:8px}
+output {display:block;margin-top:20px;white-space:pre-wrap}

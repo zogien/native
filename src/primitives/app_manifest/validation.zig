@@ -225,6 +225,7 @@ fn validateShellViews(views: []const ShellView) ValidationError!void {
     for (views, 0..) |view, index| {
         if (view.label.len == 0 or view.label.len > max_view_label_bytes) return error.InvalidName;
         try validateName(view.label);
+        if (view.window_drag_regions and (view.kind != .webview or std.mem.eql(u8, view.label, "main"))) return error.InvalidLayout;
         for (views[0..index]) |previous| {
             if (std.mem.eql(u8, previous.label, view.label)) return error.DuplicateView;
         }

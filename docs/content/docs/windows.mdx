@@ -265,3 +265,38 @@ A menu-bar app's window adds the [close policy](#close-policy):
     .{ .label = "main", .title = "Player", .width = 420, .height = 260, .close_policy = "hide" },
 },
 ```
+
+
+## WebView window drag regions
+
+Enable `window_drag_regions` on a manifest window to let its main WebView declare native window drag surfaces:
+
+```json
+{
+  "windows": [
+    { "label": "main", "titlebar": "hidden_inset_tall", "window_drag_regions": true }
+  ]
+}
+```
+
+The flag defaults to `false`. Child WebViews opt in independently through `WebViewOptions`, `ViewOptions`, or a non-`main` shell WebView declaration. A `main` shell view uses its window's policy; declaring the flag on that view is rejected. The setting applies only to web content and cannot be attached to other native view kinds.
+
+```html
+<header data-native-window-drag>
+  <span>Application</span>
+  <div data-native-window-drag-exclude>
+    <input aria-label="Search" />
+    <button>Settings</button>
+  </div>
+</header>
+```
+
+A drag declaration can appear anywhere in the document. Explicit exclusion subtrees win, including over nested drag declarations. Interactive controls and content drag-and-drop belong inside excluded subtrees; the SDK does not infer them from application-specific selectors. An iframe does not inherit the containing document's window gesture authority. Declare a shadow component's host as draggable or excluded; the SDK does not inspect closed shadow roots.
+
+The region delegates pointer behavior to the native window manager. Applications must not depend on receiving ordinary pointer events inside it. Primary mouse/trackpad dragging follows the system move loop; titlebar double-click follows the desktop preference. Native system menus follow the backend's window-manager behavior. This capability does not expose window handles or arbitrary window targeting.
+
+The explicit opt-in covers this WebView's content under its existing navigation policy. It grants no application Bridge commands and works without `window.zero`. Main and child WebViews do not inherit each other's setting. Navigation, release/cancellation, replacement and destruction revoke unconsumed input. Native events remain owned by the platform, and successful system handoff does not require a subsequent mouse-up.
+
+Windows uses WebView2 non-client regions and checks the installed runtime interface before enabling them. Asynchronous initialization failure is reported through the platform run error boundary rather than silently continuing with an unusable drag surface. macOS CEF consumes engine region updates; WKWebView and WebKitGTK query DOM declarations at the original native press location. Native hosts retain and consume the original event once, rejecting replies after 250ms, release, navigation, geometry/zoom change or loss of ownership. Event timestamps are never compared across clock domains. These paths use neither synthetic native input nor repeated window-position changes.
+
+The independent `examples/window-drag` fixture exercises multiple native windows, an opted-in child WebView, excluded controls, dynamic regions and reload. Run `zig build test-webview-window-drag` for configuration, runtime and input-matching regressions. Successful unit tests and builds do not certify real pointer behavior: validate Windows/WebView2, macOS/WKWebView, macOS/CEF and Linux/WebKitGTK (X11 and Wayland) with real native input, including mixed-DPI and negative-coordinate monitors. Windows Chromium and the Linux headless Chromium tooling host are outside the SDK's supported desktop engine matrix.

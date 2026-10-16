@@ -44,6 +44,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         const Self = @This();
 
         pub fn createView(self: *Runtime, options: platform.ViewOptions) anyerror!platform.ViewInfo {
+            if (options.window_drag_regions and options.kind != .webview) return error.InvalidViewOptions;
             try Self.validateViewParent(self, options.window_id);
             try @import("shell_admission_policy.zig").runtimeView(self.shell_admission_policy, options);
             if (Self.viewLabelExists(self, options.window_id, options.label)) return error.DuplicateViewLabel;
@@ -237,7 +238,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             return writer.buffered();
         }
 
-        pub fn reserveWebView(self: *Runtime, id: platform.ViewId, window_id: platform.WindowId, label: []const u8, parent: ?[]const u8, url: []const u8, local_frame: geometry.RectF, platform_frame: geometry.RectF, layer: i32, transparent: bool, bridge_enabled: bool) !void {
+        pub fn reserveWebView(self: *Runtime, id: platform.ViewId, window_id: platform.WindowId, label: []const u8, parent: ?[]const u8, url: []const u8, local_frame: geometry.RectF, platform_frame: geometry.RectF, layer: i32, transparent: bool, bridge_enabled: bool, window_drag_regions: bool) !void {
             const index = self.webview_count;
             self.webviews[index] = .{
                 .id = id,
@@ -247,6 +248,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 .layer = layer,
                 .transparent = transparent,
                 .bridge_enabled = bridge_enabled,
+                .window_drag_regions = window_drag_regions,
                 .open = true,
             };
             self.webviews[index].label = try copyInto(&self.webviews[index].label_storage, label);
@@ -286,6 +288,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                     .zoom = next.zoom,
                     .transparent = next.transparent,
                     .bridge_enabled = next.bridge_enabled,
+                    .window_drag_regions = next.window_drag_regions,
                     .focused = next.focused,
                     .open = next.open,
                 };
@@ -342,7 +345,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 }
                 self.options.platform.services.closeView(options.window_id, options.label) catch {};
             }
-            try Self.reserveWebView(self, WindowStorageMethods.allocateViewId(self), options.window_id, options.label, options.parent, options.url, options.frame, platform_options.frame, options.layer, options.transparent, options.bridge_enabled);
+            try Self.reserveWebView(self, WindowStorageMethods.allocateViewId(self), options.window_id, options.label, options.parent, options.url, options.frame, platform_options.frame, options.layer, options.transparent, options.bridge_enabled, options.window_drag_regions);
             reserved = true;
             self.invalidateFor(.command, platform_options.frame);
             return viewInfoFromWebView(self.webviews[self.webview_count - 1]);

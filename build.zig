@@ -628,6 +628,24 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run package and framework tests");
+    const window_drag_tests = b.addSystemCommand(&.{ "node", "--test" });
+    window_drag_tests.addFileArg(b.path("scripts/webview-window-drag.test.mjs"));
+    const window_drag_step = b.step("test-webview-window-drag", "Verify WebView drag declarations, configuration and native-authorized hit testing");
+    window_drag_step.dependOn(&window_drag_tests.step);
+    if (b.graph.host.result.os.tag == .windows) {
+        const input_ownership = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File" });
+        input_ownership.addFileArg(b.path("scripts/test-window-drag-input-ownership.ps1"));
+        window_drag_step.dependOn(&input_ownership.step);
+        test_step.dependOn(&input_ownership.step);
+    }
+    window_drag_step.dependOn(&b.addRunArtifact(filteredTestArtifact(b, desktop_mod, "webview-window-drag-runtime-tests", &.{
+        "runtime.shell_view_tests.test.WebView drag opt-in",
+        "runtime.canvas_widget_window_drag_tests.test",
+    })).step);
+    window_drag_step.dependOn(&b.addRunArtifact(filteredTestArtifact(b, tooling_mod, "webview-window-drag-manifest-tests", &.{
+        "manifest.test.window drag declarations",
+    })).step);
+    test_step.dependOn(&window_drag_tests.step);
     b.step("test-ts-canvas-hooks", "Verify canvas declaration validation, ownership, and model accessibility themes").dependOn(&b.addRunArtifact(filteredTestArtifact(b, desktop_mod, "ts-canvas-hook-tests", &.{ "TypeScript canvas", "model accessibility theme" })).step);
     test_step.dependOn(&invalid_import_compile.step);
     test_step.dependOn(&b.addRunArtifact(build_graph_tests).step);

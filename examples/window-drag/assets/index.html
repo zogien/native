@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
+<title>Window drag contract</title><link rel="stylesheet" href="style.css"></head><body>
+<header data-native-window-drag id="header">Native SDK draggable header</header>
+<main><h1>Window drag contract</h1><p>Drag the blue header or green surface. Double-click follows the desktop's titlebar preference.</p>
+<div class="handle" data-native-window-drag id="surface">Draggable content area
+<div data-native-window-drag-exclude><button id="counter">Clicks: 0</button><input id="text" placeholder="Type and select here" value="Select this text"></div>
+</div>
+<button id="dynamic">Add/remove a drag surface</button><button id="reload">Reload</button>
+<div id="dynamic-host"></div><output id="status">The child WebView at the right has its own enabled drag surface. The second window uses the same document with independent native ownership.</output>
+</main><script src="app.js"></script></body></html>

@@ -637,6 +637,8 @@ pub const WindowClosePolicy = enum {
 };
 
 pub const WindowOptions = struct {
+    /// Enable SDK window-drag declarations in this WebView (main for windows).
+    window_drag_regions: bool = false,
     id: WindowId = 1,
     label: []const u8 = "main",
     title: []const u8 = "",
@@ -732,6 +734,8 @@ pub const WindowInfo = struct {
 };
 
 pub const WindowCreateOptions = struct {
+    /// Enable SDK window-drag declarations in this WebView (main for windows).
+    window_drag_regions: bool = false,
     id: WindowId = 0,
     label: []const u8 = "",
     title: []const u8 = "",
@@ -774,6 +778,7 @@ pub const WindowCreateOptions = struct {
             else
                 self.initial_placement,
             .titlebar = self.titlebar,
+            .window_drag_regions = self.window_drag_regions,
             .show = self.show,
             .transparent = self.transparent,
             .always_on_top = self.always_on_top,
@@ -800,6 +805,8 @@ pub const LaunchAtLoginStatus = enum {
 };
 
 pub const WebViewOptions = struct {
+    /// Enable SDK window-drag declarations in this WebView (main for windows).
+    window_drag_regions: bool = false,
     window_id: WindowId = 1,
     label: []const u8,
     url: []const u8,
@@ -970,6 +977,8 @@ pub const GpuSurfaceOptions = struct {
 };
 
 pub const ViewOptions = struct {
+    /// Enable SDK window-drag declarations in this WebView (main for windows).
+    window_drag_regions: bool = false,
     window_id: WindowId = 1,
     label: []const u8,
     kind: ViewKind,
@@ -996,6 +1005,7 @@ pub const ViewOptions = struct {
             .layer = self.layer,
             .transparent = self.transparent,
             .bridge_enabled = self.bridge_enabled,
+            .window_drag_regions = self.window_drag_regions,
         };
     }
 };

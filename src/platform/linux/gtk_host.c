@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include "../webview_window_drag.h"
 
 /* NATIVE_SDK_ALLOW_WEBKITGTK_STUB is the build graph's declaration that
  * this app uses no web layer, and it wins over header visibility: on a
@@ -329,6 +330,7 @@ typedef struct native_sdk_gtk_audio {
 } native_sdk_gtk_audio_t;
 
 typedef struct native_sdk_gtk_window {
+    int window_drag_regions;
     uint64_t id;
     GtkWindow *gtk_window;
     WebKitWebView *web_view;
@@ -1327,25 +1329,29 @@ static void native_sdk_window_begin_interactive_move(native_sdk_gtk_window_t *wi
  * same way the header bar itself would: toggle-maximize by default,
  * minimize/lower as configured, none disables it. The maximize variants
  * all toggle; a non-resizable window never maximizes. */
-static void native_sdk_window_apply_titlebar_double_click(native_sdk_gtk_window_t *win) {
-    if (!win || !win->gtk_window) return;
+static void native_sdk_gtk_apply_titlebar_double_click(GtkWindow *window) {
+    if (!window) return;
     char *configured = NULL;
     GtkSettings *settings = gtk_settings_get_default();
     if (settings) g_object_get(settings, "gtk-titlebar-double-click", &configured, NULL);
     const char *action = configured ? configured : "toggle-maximize";
     if (strncmp(action, "toggle-maximize", strlen("toggle-maximize")) == 0) {
-        if (gtk_window_is_maximized(win->gtk_window)) {
-            gtk_window_unmaximize(win->gtk_window);
-        } else if (gtk_window_get_resizable(win->gtk_window)) {
-            gtk_window_maximize(win->gtk_window);
+        if (gtk_window_is_maximized(window)) {
+            gtk_window_unmaximize(window);
+        } else if (gtk_window_get_resizable(window)) {
+            gtk_window_maximize(window);
         }
     } else if (strcmp(action, "minimize") == 0) {
-        gtk_window_minimize(win->gtk_window);
+        gtk_window_minimize(window);
     } else if (strcmp(action, "lower") == 0) {
-        GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
+        GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
         if (surface && GDK_IS_TOPLEVEL(surface)) gdk_toplevel_lower(GDK_TOPLEVEL(surface));
     }
     g_free(configured);
+}
+
+static void native_sdk_window_apply_titlebar_double_click(native_sdk_gtk_window_t *win) {
+    if (win) native_sdk_gtk_apply_titlebar_double_click(win->gtk_window);
 }
 
 /* A view-local logical point against the runtime-pushed drag mirror:
@@ -2978,6 +2984,140 @@ static void native_sdk_webview_pointer_pressed(GtkGestureClick *gesture, int n_p
     });
 }
 
+
+/* A probe owns its original event and a WebView reference, never the Host's
+ * manually freed window struct. Completion only uses a live matching root. */
+typedef struct native_sdk_web_drag_state {
+    GWeakRef window;
+    uint64_t serial;
+} native_sdk_web_drag_state_t;
+typedef struct native_sdk_web_drag_probe {
+    WebKitWebView *view;
+    GdkEvent *event;
+    uint64_t serial;
+    int click_count;
+    gint64 started_us;
+    double zoom;
+    graphene_rect_t bounds;
+} native_sdk_web_drag_probe_t;
+static void native_sdk_web_drag_state_free(gpointer data) {
+    native_sdk_web_drag_state_t *state = data;
+    g_weak_ref_clear(&state->window);
+    g_free(state);
+}
+static void native_sdk_web_drag_invalidate(GtkWidget *widget, gpointer data) {
+    (void)widget;
+    ++((native_sdk_web_drag_state_t *)data)->serial;
+}
+static void native_sdk_web_drag_navigation(WebKitWebView *view, WebKitLoadEvent event, gpointer data) {
+    (void)view;
+    if (event == WEBKIT_LOAD_STARTED) ++((native_sdk_web_drag_state_t *)data)->serial;
+}
+static void native_sdk_web_drag_window_active(GtkWindow *window, GParamSpec *property, WebKitWebView *view) {
+    (void)property;
+    if (!gtk_window_is_active(window)) {
+        native_sdk_web_drag_state_t *state = g_object_get_data(G_OBJECT(view), "native-sdk-window-drag");
+        if (state) ++state->serial;
+    }
+}
+static void native_sdk_web_drag_finished(GObject *object, GAsyncResult *result, gpointer data) {
+    native_sdk_web_drag_probe_t *probe = data;
+    GError *error = NULL;
+    JSCValue *value = webkit_web_view_call_async_javascript_function_finish(WEBKIT_WEB_VIEW(object), result, &error);
+    native_sdk_web_drag_state_t *state = g_object_get_data(G_OBJECT(probe->view), "native-sdk-window-drag");
+    GtkWindow *window = state ? g_weak_ref_get(&state->window) : NULL;
+    graphene_rect_t bounds;
+    const gint64 elapsed_us = g_get_monotonic_time() - probe->started_us;
+    if (!error && value && jsc_value_is_boolean(value) && jsc_value_to_boolean(value) &&
+        state && state->serial == probe->serial && window && elapsed_us >= 0 && elapsed_us <= 250000 &&
+        gtk_widget_get_root(GTK_WIDGET(probe->view)) == GTK_ROOT(window) &&
+        gtk_widget_get_mapped(GTK_WIDGET(probe->view)) && gtk_window_is_active(window) &&
+        webkit_web_view_get_zoom_level(probe->view) == probe->zoom &&
+        gtk_widget_compute_bounds(GTK_WIDGET(probe->view), GTK_WIDGET(window), &bounds) &&
+        graphene_rect_equal(&bounds, &probe->bounds)) {
+        ++state->serial; /* Consume before system handoff; release is optional. */
+        GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
+        if (surface && GDK_IS_TOPLEVEL(surface)) {
+            if ((probe->click_count % 2) == 0) native_sdk_gtk_apply_titlebar_double_click(window);
+            else {
+                double x = 0, y = 0;
+                gdk_event_get_position(probe->event, &x, &y);
+                gdk_toplevel_begin_move(GDK_TOPLEVEL(surface), gdk_event_get_device(probe->event),
+                    GDK_BUTTON_PRIMARY, x, y, gdk_event_get_time(probe->event));
+            }
+        }
+    }
+    if (window) g_object_unref(window);
+    if (value) g_object_unref(value);
+    if (error) g_error_free(error);
+    gdk_event_unref(probe->event);
+    g_object_unref(probe->view);
+    g_free(probe);
+}
+static void native_sdk_web_drag_pressed(GtkGestureClick *gesture, int count, double x, double y, gpointer data) {
+    native_sdk_web_drag_state_t *state = data;
+    ++state->serial;
+    if (gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)) != GDK_BUTTON_PRIMARY) return;
+    GtkWidget *widget = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
+    GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(gesture));
+    if (!widget || !event || !gdk_event_get_device(event)) return;
+    const double zoom = webkit_web_view_get_zoom_level(WEBKIT_WEB_VIEW(widget));
+    if (!(zoom > 0)) return;
+    // GDK/Wayland timestamps have an undefined origin. Preserve that timestamp
+    // solely for GDK's native handoff; expiry uses our own monotonic clock.
+    const gint64 started_us = g_get_monotonic_time();
+    GtkWindow *window = g_weak_ref_get(&state->window);
+    graphene_rect_t bounds;
+    const gboolean has_bounds = window && gtk_widget_compute_bounds(widget, GTK_WIDGET(window), &bounds);
+    if (window) g_object_unref(window);
+    if (!has_bounds) return;
+    GVariantBuilder arguments;
+    g_variant_builder_init(&arguments, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&arguments, "{sv}", "x", g_variant_new_double(x / zoom));
+    g_variant_builder_add(&arguments, "{sv}", "y", g_variant_new_double(y / zoom));
+    GVariant *values = g_variant_ref_sink(g_variant_builder_end(&arguments));
+    native_sdk_web_drag_probe_t *probe = g_new0(native_sdk_web_drag_probe_t, 1);
+    probe->view = g_object_ref(WEBKIT_WEB_VIEW(widget));
+    probe->event = gdk_event_ref(event);
+    probe->serial = state->serial;
+    probe->click_count = count;
+    probe->started_us = started_us;
+    probe->zoom = zoom;
+    probe->bounds = bounds;
+    webkit_web_view_call_async_javascript_function(probe->view,
+        "return typeof window.__nativeSdkWindowDragProbe === 'function' && window.__nativeSdkWindowDragProbe(x,y);",
+        -1, values, NULL, NULL, NULL, native_sdk_web_drag_finished, probe);
+    g_variant_unref(values);
+}
+static void native_sdk_web_drag_released(GtkGestureClick *gesture, int count, double x, double y, gpointer data) {
+    (void)gesture; (void)count; (void)x; (void)y;
+    ++((native_sdk_web_drag_state_t *)data)->serial;
+}
+static void native_sdk_web_drag_cancel(GtkGesture *gesture, GdkEventSequence *sequence, gpointer data) {
+    (void)gesture; (void)sequence;
+    ++((native_sdk_web_drag_state_t *)data)->serial;
+}
+static void native_sdk_install_webview_window_drag(native_sdk_gtk_window_t *win, WebKitWebView *view) {
+    WebKitUserContentManager *manager = webkit_web_view_get_user_content_manager(view);
+    WebKitUserScript *script = webkit_user_script_new(NATIVE_SDK_WINDOW_DRAG_SOURCE "(false);",
+        WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+    webkit_user_content_manager_add_script(manager, script);
+    webkit_user_script_unref(script);
+    native_sdk_web_drag_state_t *state = g_new0(native_sdk_web_drag_state_t, 1);
+    g_weak_ref_init(&state->window, win->gtk_window);
+    g_object_set_data_full(G_OBJECT(view), "native-sdk-window-drag", state, native_sdk_web_drag_state_free);
+    GtkGesture *click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
+    g_signal_connect(click, "pressed", G_CALLBACK(native_sdk_web_drag_pressed), state);
+    g_signal_connect(click, "released", G_CALLBACK(native_sdk_web_drag_released), state);
+    g_signal_connect(click, "cancel", G_CALLBACK(native_sdk_web_drag_cancel), state);
+    gtk_widget_add_controller(GTK_WIDGET(view), GTK_EVENT_CONTROLLER(click));
+    g_signal_connect_object(win->gtk_window, "notify::is-active", G_CALLBACK(native_sdk_web_drag_window_active), view, 0);
+    g_signal_connect(view, "unmap", G_CALLBACK(native_sdk_web_drag_invalidate), state);
+    g_signal_connect(view, "load-changed", G_CALLBACK(native_sdk_web_drag_navigation), state);
+}
+
 static void native_sdk_watch_webview_pointer_focus(native_sdk_gtk_window_t *win, WebKitWebView *web_view) {
     if (!win || !web_view) return;
     GtkGesture *click = gtk_gesture_click_new();
@@ -3014,6 +3154,7 @@ static WebKitWebView *native_sdk_ensure_main_webview(native_sdk_gtk_window_t *wi
     native_sdk_setup_bridge(win);
     g_signal_connect(wv, "decide-policy", G_CALLBACK(on_decide_policy), win);
     native_sdk_watch_webview_pointer_focus(win, wv);
+    if (win->window_drag_regions) native_sdk_install_webview_window_drag(win, wv);
 
     /* The overlay's main-child slot, where the eager create used to put
      * it: the overlay allocates its main child the full stack area on the
@@ -3144,6 +3285,7 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     win->always_on_top = (window_flags & (1u << 1)) != 0;
     win->click_through = (window_flags & (1u << 2)) != 0;
     win->activate_on_show = (window_flags & (1u << 3)) == 0;
+    win->window_drag_regions = (window_flags & (1u << 5)) != 0;
     win->show_on_first_present = show_policy == 1;
     win->policy_hidden = show_policy == 2;
     if (!win->label || !win->title) {
@@ -4653,7 +4795,7 @@ int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_i
     }
 
     WebKitUserContentManager *manager = webkit_user_content_manager_new();
-    if (bridge_enabled) {
+    if ((bridge_enabled & 1) != 0) {
         g_signal_connect(manager, "script-message-received::nativeSdkBridge", G_CALLBACK(on_bridge_message), win);
         webkit_user_content_manager_register_script_message_handler(manager, "nativeSdkBridge", NULL);
         WebKitUserScript *script = webkit_user_script_new(
@@ -4690,9 +4832,10 @@ int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_i
     webview->height = height;
     webview->layer = layer;
     webview->transparent = transparent != 0;
-    webview->bridge_enabled = bridge_enabled != 0;
+    webview->bridge_enabled = (bridge_enabled & 1) != 0;
     webview->content_manager = manager;
     native_sdk_watch_webview_pointer_focus(win, web_view);
+    if ((bridge_enabled & 2) != 0) native_sdk_install_webview_window_drag(win, web_view);
     native_sdk_apply_webview_frame(webview);
     gtk_overlay_add_overlay(GTK_OVERLAY(win->stack_root), GTK_WIDGET(web_view));
     if (transparent) {

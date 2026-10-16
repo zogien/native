@@ -143,6 +143,7 @@ pub const RawExternalLinks = struct {
 };
 
 pub const RawWindow = struct {
+    window_drag_regions: bool = false,
     label: []const u8 = "main",
     title: ?[]const u8 = null,
     width: f32 = 720,
@@ -186,6 +187,7 @@ pub const RawShellPrimaryAction = struct {
 };
 
 pub const RawShellWindow = struct {
+    window_drag_regions: bool = false,
     label: []const u8 = "main",
     title: ?[]const u8 = null,
     width: f32 = 720,
@@ -209,6 +211,7 @@ pub const RawShellWindow = struct {
 };
 
 pub const RawShellView = struct {
+    window_drag_regions: bool = false,
     label: []const u8,
     kind: []const u8,
     parent: ?[]const u8 = null,

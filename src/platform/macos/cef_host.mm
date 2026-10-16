@@ -18,6 +18,8 @@
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+#include "include/cef_drag_handler.h"
+#include "../webview_window_drag.h"
 #include "include/cef_command_line.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_focus_handler.h"
@@ -28,6 +30,7 @@
 #include "include/wrapper/cef_library_loader.h"
 #include <math.h>
 #include <map>
+#include <vector>
 
 #ifndef NATIVE_SDK_CEF_DIR
 #define NATIVE_SDK_CEF_DIR "third_party/cef/macos"
@@ -167,10 +170,10 @@ private:
     IMPLEMENT_REFCOUNTING(NativeSdkCefBridgeV8Handler);
 };
 
-class NativeSdkCefClient final : public CefClient, public CefLifeSpanHandler, public CefLoadHandler, public CefRequestHandler, public CefFocusHandler {
+class NativeSdkCefClient final : public CefClient, public CefLifeSpanHandler, public CefLoadHandler, public CefRequestHandler, public CefFocusHandler, public CefDragHandler {
 public:
-    explicit NativeSdkCefClient(NativeSdkChromiumHost *host, uint64_t window_id) : host_(host), window_id_(window_id) {}
-    NativeSdkCefClient(NativeSdkChromiumHost *host, uint64_t window_id, std::string webview_key, uint64_t webview_generation, bool bridge_enabled) : host_(host), window_id_(window_id), webview_key_(webview_key), webview_generation_(webview_generation), bridge_enabled_(bridge_enabled) {}
+    explicit NativeSdkCefClient(NativeSdkChromiumHost *host, uint64_t window_id, bool window_drag_regions) : host_(host), window_id_(window_id), window_drag_regions_(window_drag_regions) {}
+    NativeSdkCefClient(NativeSdkChromiumHost *host, uint64_t window_id, std::string webview_key, uint64_t webview_generation, bool bridge_enabled, bool window_drag_regions) : host_(host), window_id_(window_id), webview_key_(webview_key), webview_generation_(webview_generation), bridge_enabled_(bridge_enabled), window_drag_regions_(window_drag_regions) {}
 
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override {
         return this;
@@ -188,6 +191,9 @@ public:
         return this;
     }
 
+    CefRefPtr<CefDragHandler> GetDragHandler() override { return this; }
+    void OnDraggableRegionsChanged(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const std::vector<CefDraggableRegion>& regions) override;
+    bool HandleWindowDragPress(CefRefPtr<CefBrowser> browser, NSEvent *event);
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
     void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
     void OnGotFocus(CefRefPtr<CefBrowser> browser) override;
@@ -206,6 +212,8 @@ private:
     std::string webview_key_;
     uint64_t webview_generation_ = 0;
     bool bridge_enabled_ = true;
+    bool window_drag_regions_ = false;
+    std::vector<CefDraggableRegion> window_drag_regions_cache_;
     IMPLEMENT_REFCOUNTING(NativeSdkCefClient);
 };
 
@@ -230,15 +238,20 @@ public:
             bridge_enabled = extra_info->GetBool(kBridgeEnabledExtraInfo);
         }
         bridge_enabled_by_browser_id_[browser->GetIdentifier()] = bridge_enabled;
+        window_drag_by_browser_id_[browser->GetIdentifier()] = extra_info && extra_info->GetBool("native-sdk-window-drag");
     }
 
     void OnBrowserDestroyed(CefRefPtr<CefBrowser> browser) override {
         if (!browser) return;
         bridge_enabled_by_browser_id_.erase(browser->GetIdentifier());
+        window_drag_by_browser_id_.erase(browser->GetIdentifier());
     }
 
     void OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> context) override {
         if (!frame || !frame->IsMain()) return;
+        if (browser && frame && frame->IsMain() && window_drag_by_browser_id_[browser->GetIdentifier()]) {
+            frame->ExecuteJavaScript(std::string(NATIVE_SDK_WINDOW_DRAG_SOURCE) + "(true);", frame->GetURL(), 0);
+        }
         const auto found = browser ? bridge_enabled_by_browser_id_.find(browser->GetIdentifier()) : bridge_enabled_by_browser_id_.end();
         if (found == bridge_enabled_by_browser_id_.end() || !found->second) return;
         CefRefPtr<CefV8Value> bridge = CefV8Value::CreateObject(nullptr, nullptr);
@@ -249,12 +262,14 @@ public:
 
 private:
     std::map<int, bool> bridge_enabled_by_browser_id_;
+    std::map<int, bool> window_drag_by_browser_id_;
     IMPLEMENT_REFCOUNTING(NativeSdkCefApp);
 };
 
-static CefRefPtr<CefDictionaryValue> NativeSdkCefExtraInfo(bool bridge_enabled) {
+static CefRefPtr<CefDictionaryValue> NativeSdkCefExtraInfo(bool bridge_enabled, bool window_drag_regions) {
     CefRefPtr<CefDictionaryValue> extra_info = CefDictionaryValue::Create();
     extra_info->SetBool(kBridgeEnabledExtraInfo, bridge_enabled);
+    extra_info->SetBool("native-sdk-window-drag", window_drag_regions);
     return extra_info;
 }
 
@@ -697,6 +712,8 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, assign) BOOL pendingPreRunStop;
 @property(nonatomic, assign) BOOL observesApplicationActivation;
 @property(nonatomic, strong) id shortcutEventMonitor;
+@property(nonatomic, strong) id windowDragEventMonitor;
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *windowDragRegionWindows;
 @property(nonatomic, strong) NSArray<NativeSdkChromiumShortcut *> *shortcuts;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkChromiumStatusItemEntry *> *statusItems;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
@@ -750,7 +767,7 @@ static const char *NativeSdkCefBridgeScript() {
 - (BOOL)allowsNavigationURL:(NSURL *)url;
 - (BOOL)openExternalURLIfAllowed:(NSURL *)url;
 - (NSString *)resolvedWebViewURLString:(NSString *)url windowId:(uint64_t)windowId;
-- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
+- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled windowDragRegions:(BOOL)windowDragRegions;
 - (BOOL)setWebViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
 - (BOOL)navigateWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url;
 - (BOOL)setWebViewZoomInWindow:(uint64_t)windowId label:(NSString *)label zoom:(double)zoom;
@@ -931,6 +948,7 @@ static const char *NativeSdkCefBridgeScript() {
     self.aboutDescription = aboutDescription ?: @"";
     [self configureApplication];
     self.windows = [[NSMutableDictionary alloc] init];
+    self.windowDragRegionWindows = [[NSMutableSet alloc] init];
     self.browserContainers = [[NSMutableDictionary alloc] init];
     self.delegates = [[NSMutableDictionary alloc] init];
     self.bridgeOrigins = [[NSMutableDictionary alloc] init];
@@ -1073,6 +1091,10 @@ static const char *NativeSdkCefBridgeScript() {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
     }
+    if (self.windowDragEventMonitor) {
+        [NSEvent removeMonitor:self.windowDragEventMonitor];
+        self.windowDragEventMonitor = nil;
+    }
     delete self.webviewCefClients;
     delete self.webviewBrowsers;
     delete self.cefClients;
@@ -1168,7 +1190,10 @@ static const char *NativeSdkCefBridgeScript() {
     browserContainer.layer.zPosition = 0;
     [stackRoot addSubview:browserContainer positioned:NSWindowAbove relativeTo:nil];
 
-    CefRefPtr<NativeSdkCefClient> client = new NativeSdkCefClient(self, windowId);
+    const bool windowDragRegions = (windowFlags & (1u << 5)) != 0;
+    if (windowDragRegions) [self.windowDragRegionWindows addObject:key];
+    else [self.windowDragRegionWindows removeObject:key];
+    CefRefPtr<NativeSdkCefClient> client = new NativeSdkCefClient(self, windowId, windowDragRegions);
 
     self.windows[key] = window;
     self.browserContainers[key] = browserContainer;
@@ -1312,6 +1337,23 @@ static const char *NativeSdkCefBridgeScript() {
 }
 
 - (void)runWithCallback:(native_sdk_appkit_event_callback_t)callback context:(void *)context {
+    if (!self.windowDragEventMonitor) {
+        __weak NativeSdkChromiumHost *weakSelf = self;
+        self.windowDragEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown handler:^NSEvent *(NSEvent *event) {
+            NativeSdkChromiumHost *host = weakSelf;
+            if (!host) return event;
+            for (const auto &entry : *host.browsers) {
+                auto client = host.cefClients->find(entry.first);
+                if (client != host.cefClients->end() && client->second->HandleWindowDragPress(entry.second, event)) return nil;
+            }
+            for (const auto &entry : *host.webviewBrowsers) {
+                auto client = host.webviewCefClients->find(entry.first);
+                if (client != host.webviewCefClients->end() && client->second->HandleWindowDragPress(entry.second, event)) return nil;
+            }
+            return event;
+        }];
+    }
+
     self.callback = callback;
     self.context = context;
 
@@ -1680,7 +1722,7 @@ static const char *NativeSdkCefBridgeScript() {
     windowInfo.SetAsChild((__bridge void *)container, rect);
     CefBrowserSettings browserSettings;
     CefRefPtr<NativeSdkCefClient> client = (*self.cefClients)[windowId];
-    CefBrowserHost::CreateBrowser(windowInfo, client.get(), std::string(urlString.UTF8String), browserSettings, NativeSdkCefExtraInfo(true), nullptr);
+    CefBrowserHost::CreateBrowser(windowInfo, client.get(), std::string(urlString.UTF8String), browserSettings, NativeSdkCefExtraInfo(true, [self.windowDragRegionWindows containsObject:@(windowId)]), nullptr);
 }
 
 - (NSString *)webViewKeyForWindow:(uint64_t)windowId label:(NSString *)label {
@@ -1697,7 +1739,7 @@ static const char *NativeSdkCefBridgeScript() {
     return NSMakeRect(x, nativeY, width, height);
 }
 
-- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled {
+- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled windowDragRegions:(BOOL)windowDragRegions {
     if (label.length == 0 || url.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
     NSView *container = self.browserContainers[@(windowId)] ?: (windowId == 1 ? self.browserContainer : nil);
     NSView *stackView = [self stackViewForWindowId:windowId];
@@ -1723,13 +1765,13 @@ static const char *NativeSdkCefBridgeScript() {
     [self reorderWebViewsInWindow:windowId];
 
     std::string keyString(key.UTF8String);
-    CefRefPtr<NativeSdkCefClient> client = new NativeSdkCefClient(self, windowId, keyString, generation, bridgeEnabled);
+    CefRefPtr<NativeSdkCefClient> client = new NativeSdkCefClient(self, windowId, keyString, generation, bridgeEnabled, windowDragRegions);
     if (self.webviewCefClients) (*self.webviewCefClients)[keyString] = client;
     CefWindowInfo windowInfo;
     CefRect rect(0, 0, webview.bounds.size.width, webview.bounds.size.height);
     windowInfo.SetAsChild((__bridge void *)webview, rect);
     CefBrowserSettings browserSettings;
-    CefBrowserHost::CreateBrowser(windowInfo, client.get(), std::string(resolvedURL.UTF8String), browserSettings, NativeSdkCefExtraInfo(bridgeEnabled), nullptr);
+    CefBrowserHost::CreateBrowser(windowInfo, client.get(), std::string(resolvedURL.UTF8String), browserSettings, NativeSdkCefExtraInfo(bridgeEnabled, windowDragRegions), nullptr);
     return YES;
 }
 
@@ -2326,6 +2368,41 @@ static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url) 
     return NO;
 }
 
+
+void NativeSdkCefClient::OnDraggableRegionsChanged(CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefFrame> frame, const std::vector<CefDraggableRegion>& regions) {
+    (void)browser;
+    if (!window_drag_regions_ || !frame || !frame->IsMain()) return;
+    // Empty updates revoke the last region; caches never span navigation.
+    window_drag_regions_cache_ = regions;
+}
+
+bool NativeSdkCefClient::HandleWindowDragPress(CefRefPtr<CefBrowser> browser, NSEvent *event) {
+    if (!window_drag_regions_ || !browser || event.type != NSEventTypeLeftMouseDown ||
+        window_drag_regions_cache_.empty()) return false;
+    NSView *view = (__bridge NSView *)browser->GetHost()->GetWindowHandle();
+    NSWindow *window = view.window;
+    if (!view || !window || window != event.window || !window.visible) return false;
+    NSView *hit = [window.contentView hitTest:[window.contentView convertPoint:event.locationInWindow fromView:nil]];
+    if (!hit || (hit != view && ![hit isDescendantOf:view])) return false;
+    NSPoint point = [view convertPoint:event.locationInWindow fromView:nil];
+    if (!view.isFlipped) point.y = NSHeight(view.bounds) - point.y;
+    bool draggable = false;
+    for (const CefDraggableRegion &region : window_drag_regions_cache_) {
+        const CefRect &r = region.bounds;
+        if (point.x < r.x || point.y < r.y || point.x >= r.x+r.width || point.y >= r.y+r.height) continue;
+        if (!region.draggable) return false;
+        draggable = true;
+    }
+    if (!draggable) return false;
+    if ((event.clickCount % 2) == 0) {
+        NSString *action = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleActionOnDoubleClick"] ?: @"Maximize";
+        if ([action isEqualToString:@"Minimize"]) [window performMiniaturize:nil];
+        else if (![action isEqualToString:@"None"]) [window performZoom:nil];
+    } else [window performWindowDragWithEvent:event];
+    return true;
+}
+
 void NativeSdkCefClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     if (!webview_key_.empty()) {
         NSString *key = [[NSString alloc] initWithBytes:webview_key_.data() length:webview_key_.size() encoding:NSUTF8StringEncoding];
@@ -2336,6 +2413,7 @@ void NativeSdkCefClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 }
 
 void NativeSdkCefClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
+    window_drag_regions_cache_.clear();
     (void)browser;
     if (webview_key_.empty()) return;
     NSString *key = [[NSString alloc] initWithBytes:webview_key_.data() length:webview_key_.size() encoding:NSUTF8StringEncoding];
@@ -2371,6 +2449,7 @@ bool NativeSdkCefClient::OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr
     (void)user_gesture;
     (void)is_redirect;
     if (frame && !frame->IsMain()) return false;
+    window_drag_regions_cache_.clear();
     std::string url = request ? request->GetURL().ToString() : std::string();
     NSString *urlString = [[NSString alloc] initWithBytes:url.data() length:url.size() encoding:NSUTF8StringEncoding] ?: @"";
     NSURL *nsURL = [NSURL URLWithString:urlString];
@@ -2880,7 +2959,7 @@ int native_sdk_appkit_create_webview(native_sdk_appkit_host_t *host, uint64_t wi
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *urlString = url ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createWebViewInWindow:window_id label:labelString ?: @"" url:urlString ?: @"" x:x y:y width:width height:height layer:layer transparent:transparent != 0 bridgeEnabled:bridge_enabled != 0] ? 1 : 0;
+    return [object createWebViewInWindow:window_id label:labelString ?: @"" url:urlString ?: @"" x:x y:y width:width height:height layer:layer transparent:transparent != 0 bridgeEnabled:(bridge_enabled & 1) != 0 windowDragRegions:(bridge_enabled & 2) != 0] ? 1 : 0;
 }
 
 int native_sdk_appkit_set_webview_frame(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height) {

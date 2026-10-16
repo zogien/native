@@ -1528,6 +1528,7 @@ pub const NullPlatform = struct {
         webview.layer = options.layer;
         webview.transparent = options.transparent;
         webview.bridge_enabled = options.bridge_enabled;
+        webview.window_drag_regions = options.window_drag_regions;
         webview.zoom = 1.0;
         webview.open = true;
         @memcpy(webview.label_storage[0..options.label.len], options.label);
@@ -3421,6 +3422,7 @@ pub const NullPlatform = struct {
 };
 
 pub const NullWebView = struct {
+    window_drag_regions: bool = false,
     window_id: WindowId = 1,
     label: []const u8 = "",
     url: []const u8 = "",

@@ -1,4 +1,5 @@
 #import "appkit_host.h"
+#include "../webview_window_drag.h"
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -401,6 +402,9 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @end
 
 @interface NativeSdkWebView : WKWebView <NSDraggingDestination>
+@property(nonatomic, assign) BOOL windowDragRegions;
+@property(nonatomic, assign) uint64_t dragPressSequence;
+- (void)probeWindowDrag:(NSEvent *)event;
 @property(nonatomic, strong) NSArray<NSValue *> *coveredMouseRects;
 @property(nonatomic, assign) NativeSdkAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
@@ -822,6 +826,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSWindow *> *windows;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, WKWebView *> *webViews;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkWindowDelegate *> *delegates;
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *windowDragRegionWindows;
+@property(nonatomic, weak) NativeSdkWebView *pendingWindowDragView;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkBridgeScriptHandler *> *bridgeScriptHandlers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkAssetSchemeHandler *> *assetSchemeHandlers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *windowLabels;
@@ -1108,7 +1114,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (BOOL)viewIsAdoptedSurfaceDescendant:(NSView *)view;
 - (void)installAdoptedSurfaceClickMonitor;
 - (BOOL)releaseViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label;
-- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
+- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled windowDragRegions:(BOOL)windowDragRegions;
 - (BOOL)setNativeViewCursorInWindow:(uint64_t)windowId label:(NSString *)label cursor:(NSInteger)cursor;
 - (BOOL)setWebViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
 - (BOOL)navigateWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url;
@@ -1279,6 +1285,14 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
     [self.host scheduleFrame];
 }
 
+- (void)windowDidResignKey:(NSNotification *)notification {
+    NativeSdkWebView *pending = self.host.pendingWindowDragView;
+    if (pending.window == notification.object) {
+        ++pending.dragPressSequence;
+        self.host.pendingWindowDragView = nil;
+    }
+}
+
 // The tall-titlebar toolbar is pure geometry (it exists only to get the
 // unified band height and centered traffic lights), but in fullscreen
 // the system keeps an attached toolbar VISIBLE as a blank band covering
@@ -1431,6 +1445,7 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
     [self.host.deferredShowWindows removeObjectForKey:key];
     [self.host.windowClearColors removeObjectForKey:key];
     [self.host.windowClosePolicies removeObjectForKey:key];
+    [self.host.windowDragRegionWindows removeObject:key];
     [self.host.passiveShowWindows removeObject:key];
     if (self.host.windows.count == 0) {
         [self.host emitShutdown];
@@ -1455,6 +1470,38 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 @end
 
 @implementation NativeSdkWebView
+
+- (void)probeWindowDrag:(NSEvent *)event {
+    if (!self.windowDragRegions || event.type != NSEventTypeLeftMouseDown) return;
+    const uint64_t sequence = ++self.dragPressSequence;
+    NSWindow *originalWindow = self.window;
+    const NSRect originalFrame = self.frame;
+    const NSRect originalWindowFrame = originalWindow.frame;
+    const double started = NSProcessInfo.processInfo.systemUptime;
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    if (!self.isFlipped) point.y = NSHeight(self.bounds) - point.y;
+    const double zoom = self.pageZoom;
+    if (!originalWindow || !(zoom > 0)) return;
+    __weak NativeSdkWebView *weakView = self;
+    [self callAsyncJavaScript:@"return typeof window.__nativeSdkWindowDragProbe === 'function' && window.__nativeSdkWindowDragProbe(x,y);"
+        arguments:@{@"x": @(point.x / zoom), @"y": @(point.y / zoom)}
+        inFrame:nil inContentWorld:WKContentWorld.pageWorld
+        completionHandler:^(id result, NSError *error) {
+            NativeSdkWebView *view = weakView;
+            if (!view || view.dragPressSequence != sequence || error ||
+                ![result isKindOfClass:NSNumber.class] || ![result boolValue]) return;
+            if (view.window != originalWindow || !view.superview ||
+                !NSEqualRects(view.frame, originalFrame) || !NSEqualRects(originalWindow.frame, originalWindowFrame) ||
+                view.pageZoom != zoom || NSProcessInfo.processInfo.systemUptime - started > 0.250 ||
+                !NSApp.active || !originalWindow.visible || !originalWindow.keyWindow || (NSEvent.pressedMouseButtons & 1) == 0) return;
+            ++view.dragPressSequence; // Consume before AppKit takes over; mouse-up is optional.
+            if ((event.clickCount % 2) == 0) {
+                NSString *action = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleActionOnDoubleClick"] ?: @"Maximize";
+                if ([action isEqualToString:@"Minimize"]) [originalWindow performMiniaturize:nil];
+                else if (![action isEqualToString:@"None"]) [originalWindow performZoom:nil];
+            } else [originalWindow performWindowDragWithEvent:event];
+        }];
+}
 
 - (BOOL)pointIsCovered:(NSPoint)point {
     for (NSValue *value in self.coveredMouseRects) {
@@ -8124,6 +8171,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.deferredShowWindows = [[NSMutableDictionary alloc] init];
     self.windowClearColors = [[NSMutableDictionary alloc] init];
     self.windowClosePolicies = [[NSMutableDictionary alloc] init];
+    self.windowDragRegionWindows = [[NSMutableSet alloc] init];
     self.passiveShowWindows = [[NSMutableSet alloc] init];
     self.policyHiddenWindows = [[NSMutableSet alloc] init];
     self.childWebViews = [[NSMutableDictionary alloc] init];
@@ -8225,6 +8273,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     if ((windowFlags & (1u << 1)) != 0) window.level = NSFloatingWindowLevel;
     if ((windowFlags & (1u << 2)) != 0) window.ignoresMouseEvents = YES;
     if ((windowFlags & (1u << 3)) != 0) [self.passiveShowWindows addObject:key];
+    if ((windowFlags & (1u << 5)) != 0) [self.windowDragRegionWindows addObject:key];
     if ((windowFlags & (1u << 4)) != 0) {
         NSWindowCollectionBehavior behavior = window.collectionBehavior;
         behavior &= ~(NSWindowCollectionBehaviorFullScreenPrimary | NSWindowCollectionBehaviorFullScreenAuxiliary);
@@ -8641,6 +8690,9 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
                                                         injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                                                      forMainFrameOnly:YES];
     [userContentController addUserScript:bridgeScript];
+    if ([self.windowDragRegionWindows containsObject:@(windowId)]) {
+        [userContentController addUserScript:[[WKUserScript alloc] initWithSource:@NATIVE_SDK_WINDOW_DRAG_SOURCE @"(false);" injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
+    }
     configuration.userContentController = userContentController;
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
         [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
@@ -8649,6 +8701,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     ((NativeSdkWebView *)webView).host = self;
     ((NativeSdkWebView *)webView).windowId = windowId;
     ((NativeSdkWebView *)webView).viewLabel = @"main";
+    ((NativeSdkWebView *)webView).windowDragRegions = [self.windowDragRegionWindows containsObject:@(windowId)];
     [webView registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     webView.wantsLayer = YES;
     webView.layer.zPosition = 0;
@@ -9297,7 +9350,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     return YES;
 }
 
-- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled {
+- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled windowDragRegions:(BOOL)windowDragRegions {
     if (label.length == 0 || url.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
     if (!window || !window.contentView) return NO;
@@ -9329,10 +9382,14 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
     }
 
+    if (windowDragRegions) {
+        [configuration.userContentController addUserScript:[[WKUserScript alloc] initWithSource:@NATIVE_SDK_WINDOW_DRAG_SOURCE @"(false);" injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
+    }
     WKWebView *webview = [[NativeSdkWebView alloc] initWithFrame:[self webViewFrameForWindow:window x:x y:y width:width height:height] configuration:configuration];
     ((NativeSdkWebView *)webview).host = self;
     ((NativeSdkWebView *)webview).windowId = windowId;
     ((NativeSdkWebView *)webview).viewLabel = label;
+    ((NativeSdkWebView *)webview).windowDragRegions = windowDragRegions;
     [webview registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     webview.wantsLayer = YES;
     webview.layer.zPosition = layer;
@@ -10572,9 +10629,14 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
     if (!self.viewFocusEventMonitor) {
         __weak NativeSdkAppKitHost *weakSelf = self;
         self.viewFocusEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
-            (NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown)
+            (NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown | NSEventMaskLeftMouseUp)
             handler:^NSEvent *(NSEvent *event) {
                 NativeSdkAppKitHost *strongSelf = weakSelf;
+                if (strongSelf && (event.type == NSEventTypeLeftMouseDown || event.type == NSEventTypeLeftMouseUp)) {
+                    ++strongSelf.pendingWindowDragView.dragPressSequence;
+                    strongSelf.pendingWindowDragView = nil;
+                    if (event.type == NSEventTypeLeftMouseUp) return event;
+                }
                 NSView *content = event.window.contentView;
                 if (!strongSelf || !content) return event;
                 NSPoint point = [content convertPoint:event.locationInWindow fromView:nil];
@@ -10584,6 +10646,10 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
                 }
                 if (![hit isKindOfClass:[NativeSdkWebView class]]) return event;
                 NativeSdkWebView *webView = (NativeSdkWebView *)hit;
+                if (event.type == NSEventTypeLeftMouseDown && webView.windowDragRegions) {
+                    strongSelf.pendingWindowDragView = webView;
+                    [webView probeWindowDrag:event];
+                }
                 const char *label = webView.viewLabel.UTF8String ?: "";
                 [strongSelf emitEvent:(native_sdk_appkit_event_t){
                     .kind = NATIVE_SDK_APPKIT_EVENT_VIEW_FOCUSED,
@@ -10762,6 +10828,8 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
 
 - (void)applicationDidResignActive:(NSNotification *)notification {
     (void)notification;
+    ++self.pendingWindowDragView.dragPressSequence;
+    self.pendingWindowDragView = nil;
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_APP_DEACTIVATED }];
 }
 
@@ -12636,6 +12704,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    if (navigationAction.targetFrame.mainFrame && [webView isKindOfClass:NativeSdkWebView.class]) ++((NativeSdkWebView *)webView).dragPressSequence;
     NSURL *url = navigationAction.request.URL;
     if (!navigationAction.targetFrame || navigationAction.targetFrame.isMainFrame) {
         if ([self allowsNavigationURL:url]) {
@@ -13680,7 +13749,7 @@ int native_sdk_appkit_create_webview(native_sdk_appkit_host_t *host, uint64_t wi
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *urlString = url ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createWebViewInWindow:window_id label:labelString ?: @"" url:urlString ?: @"" x:x y:y width:width height:height layer:layer transparent:transparent != 0 bridgeEnabled:bridge_enabled != 0] ? 1 : 0;
+    return [object createWebViewInWindow:window_id label:labelString ?: @"" url:urlString ?: @"" x:x y:y width:width height:height layer:layer transparent:transparent != 0 bridgeEnabled:(bridge_enabled & 1) != 0 windowDragRegions:(bridge_enabled & 2) != 0] ? 1 : 0;
 }
 
 int native_sdk_appkit_set_webview_frame(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height) {

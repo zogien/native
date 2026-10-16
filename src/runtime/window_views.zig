@@ -326,6 +326,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 .min_width = shell_window.min_width,
                 .min_height = shell_window.min_height,
                 .close_policy = shell_layout.shellClosePolicy(shell_window.close_policy),
+                .window_drag_regions = shell_window.window_drag_regions,
                 .source = source,
             }, source_reloads_from_app, source_policy);
             errdefer Self.closeWindow(self, info.id) catch {};
@@ -365,6 +366,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             var native_view_count: usize = 0;
             var child_webview_count: usize = 0;
             for (views, 0..) |view, index| {
+                if (view.window_drag_regions and (view.kind != .webview or isMainWebViewLabel(view.label))) return error.InvalidLayout;
                 if (self.shell_coordination_policy) |policy| {
                     var duplicate = false;
                     for (views[0..index]) |previous| {

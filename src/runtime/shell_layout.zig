@@ -301,6 +301,7 @@ pub fn shellViewOptionsWithFrame(window_id: platform.WindowId, view: app_manifes
         .command = view.command orelse "",
         .url = view.url orelse "",
         .bridge_enabled = view.kind == .webview,
+        .window_drag_regions = view.window_drag_regions,
         .gpu_surface = shellGpuSurfaceOptions(view),
     };
 }

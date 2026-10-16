@@ -228,3 +228,8 @@ try {
   console.error(error.code, error.message);
 }
 ```
+
+
+## WebView window dragging
+
+Set `window_drag_regions = true` on a window for its main WebView, or independently on a child `WebViewOptions` / `ViewOptions`. JSON manifests use the same boolean key. Mark regions with `data-native-window-drag` and interactive subtrees with `data-native-window-drag-exclude`. Main shell views use the window declaration; other native view kinds reject the flag. Existing navigation policy still applies, and no application Bridge is required. The SDK owns native input and system window movement; do not pass native handles, synthesize mouse-down events or implement dragging by setting window positions. Regions reserve pointer behavior for the window manager, so do not attach application pointer interactions to their backgrounds. See the windows documentation and `examples/window-drag` for the complete contract and acceptance matrix.

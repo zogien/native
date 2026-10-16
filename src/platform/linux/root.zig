@@ -893,6 +893,7 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (options.click_through) flags |= 1 << 2;
     if (!options.activate_on_show) flags |= 1 << 3;
     if (!options.allows_fullscreen) flags |= 1 << 4;
+    if (options.window_drag_regions) flags |= 1 << 5;
     return flags;
 }
 
@@ -1222,7 +1223,7 @@ fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) any
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine == .chromium) return error.UnsupportedChildWebViews;
     const frame = options.frame;
-    if (native_sdk_gtk_create_webview(self.host, options.window_id, options.label.ptr, options.label.len, options.url.ptr, options.url.len, frame.x, frame.y, frame.width, frame.height, options.layer, if (options.transparent) 1 else 0, if (options.bridge_enabled) 1 else 0) == 0) return error.CreateFailed;
+    if (native_sdk_gtk_create_webview(self.host, options.window_id, options.label.ptr, options.label.len, options.url.ptr, options.url.len, frame.x, frame.y, frame.width, frame.height, options.layer, if (options.transparent) 1 else 0, (if (options.bridge_enabled) @as(c_int, 1) else 0) | (if (options.window_drag_regions) @as(c_int, 2) else 0)) == 0) return error.CreateFailed;
 }
 
 fn setWebViewFrame(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, frame: geometry.RectF) anyerror!void {

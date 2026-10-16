@@ -1,0 +1,5 @@
+# SDK-owned text uses LF in the index and working tree on every host.
+* text=auto eol=lf
+
+# Preserve the vendored Microsoft header exactly as distributed upstream.
+/third_party/webview2/include/WebView2.h -text

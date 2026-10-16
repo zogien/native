@@ -14,6 +14,7 @@ pub const Error = error{
     CloseFailed,
     UnsupportedWindowClosePolicy,
     UnsupportedWindowTransparency,
+    WebViewWindowDragInitializationFailed,
 };
 
 const WindowsHost = opaque {};
@@ -153,6 +154,7 @@ extern fn native_sdk_windows_set_security_policy(host: *WindowsHost, allowed_ori
 extern fn native_sdk_windows_set_menus(host: *WindowsHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) c_int;
 extern fn native_sdk_windows_set_shortcuts(host: *WindowsHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
 extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) c_int;
+extern fn native_sdk_windows_window_drag_failed(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_start_window_drag(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_drag_regions(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_windows_window_chrome(host: *WindowsHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
@@ -585,6 +587,7 @@ pub const WindowsPlatform = struct {
         };
         native_sdk_windows_set_bridge_callback(self.host, windowsBridgeCallback, &self.state);
         native_sdk_windows_run(self.host, windowsCallback, &self.state);
+        if (native_sdk_windows_window_drag_failed(self.host) != 0) return error.WebViewWindowDragInitializationFailed;
         if (self.state.failed) return error.CallbackFailed;
     }
 
@@ -975,6 +978,7 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (options.click_through) flags |= 1 << 2;
     if (!options.activate_on_show) flags |= 1 << 3;
     if (!options.allows_fullscreen) flags |= 1 << 4;
+    if (options.window_drag_regions) flags |= 1 << 5;
     return flags;
 }
 
@@ -1402,7 +1406,7 @@ fn showContextMenu(context: ?*anyopaque, request: platform_mod.ContextMenuReques
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     const frame = options.frame;
-    if (native_sdk_windows_create_webview(self.host, options.window_id, options.label.ptr, options.label.len, options.url.ptr, options.url.len, frame.x, frame.y, frame.width, frame.height, options.layer, if (options.transparent) 1 else 0, if (options.bridge_enabled) 1 else 0) == 0) return error.CreateFailed;
+    if (native_sdk_windows_create_webview(self.host, options.window_id, options.label.ptr, options.label.len, options.url.ptr, options.url.len, frame.x, frame.y, frame.width, frame.height, options.layer, if (options.transparent) 1 else 0, (if (options.bridge_enabled) @as(c_int, 1) else 0) | (if (options.window_drag_regions) @as(c_int, 2) else 0)) == 0) return error.CreateFailed;
 }
 
 fn setWebViewFrame(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, frame: geometry.RectF) anyerror!void {

@@ -87,6 +87,7 @@ fn shellWindowFrom(comptime window: anytype) types.ShellWindow {
     if (@hasField(@TypeOf(window), "activate_on_show")) out.activate_on_show = window.activate_on_show;
     if (@hasField(@TypeOf(window), "initially_hidden")) out.initially_hidden = window.initially_hidden;
     if (@hasField(@TypeOf(window), "allows_fullscreen")) out.allows_fullscreen = window.allows_fullscreen;
+    if (@hasField(@TypeOf(window), "window_drag_regions")) out.window_drag_regions = window.window_drag_regions;
     if (@hasField(@TypeOf(window), "min_width")) out.min_width = window.min_width;
     if (@hasField(@TypeOf(window), "min_height")) out.min_height = window.min_height;
     if (@hasField(@TypeOf(window), "close_policy")) {
@@ -127,6 +128,7 @@ fn shellViewFrom(comptime view: anytype) types.ShellView {
     if (@hasField(@TypeOf(view), "role")) out.role = view.role;
     if (@hasField(@TypeOf(view), "accessibility_label")) out.accessibility_label = view.accessibility_label;
     if (@hasField(@TypeOf(view), "url")) out.url = view.url;
+    if (@hasField(@TypeOf(view), "window_drag_regions")) out.window_drag_regions = view.window_drag_regions;
     if (@hasField(@TypeOf(view), "text")) out.text = view.text;
     if (@hasField(@TypeOf(view), "command")) out.command = view.command;
     if (@hasField(@TypeOf(view), "gpu_backend")) out.gpu_backend = enumField(types.GpuSurfaceBackend, view.gpu_backend, "gpu_backend");

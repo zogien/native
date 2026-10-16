@@ -604,3 +604,33 @@ test "runtime rejects unsupported GPU surface configuration" {
     });
     try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.premultiplied, transparent.gpu_alpha_mode);
 }
+
+test "WebView drag opt-in reaches only the selected child and survives sibling removal" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "drag", .kind = .webview, .url = "zero://app/drag.html", .frame = geometry.RectF.init(0, 0, 240, 80), .window_drag_regions = true });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "plain", .kind = .webview, .url = "zero://app/plain.html", .frame = geometry.RectF.init(0, 80, 240, 80) });
+    try std.testing.expect(harness.runtime.webviews[0].window_drag_regions);
+    try std.testing.expect(!harness.runtime.webviews[1].window_drag_regions);
+    try std.testing.expect(harness.null_platform.webviews[0].window_drag_regions);
+    try std.testing.expect(!harness.null_platform.webviews[1].window_drag_regions);
+    try harness.runtime.closeView(1, "plain");
+    try std.testing.expect(harness.runtime.webviews[0].window_drag_regions);
+    try std.testing.expectError(error.InvalidViewOptions, harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "invalid",
+        .kind = .label,
+        .window_drag_regions = true,
+    }));
+}
+
+test "WebView drag opt-in rejects main shell view and non-webview declarations before creation" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
+    const bounds = geometry.RectF.init(0, 0, 800, 600);
+    try std.testing.expectError(error.InvalidLayout, harness.runtime.createShellViews(1, &.{.{ .label = "main", .kind = .webview, .url = "zero://app", .fill = true, .window_drag_regions = true }}, bounds));
+    try std.testing.expectError(error.InvalidLayout, harness.runtime.createShellViews(1, &.{.{ .label = "native", .kind = .label, .window_drag_regions = true }}, bounds));
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.webview_count);
+}

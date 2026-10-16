@@ -251,6 +251,7 @@ pub const BridgeCommandMetadata = struct {
 };
 
 pub const WindowMetadata = struct {
+    window_drag_regions: bool = false,
     label: []const u8 = "main",
     title: ?[]const u8 = null,
     width: f32 = 720,
@@ -294,6 +295,7 @@ pub const ShellPrimaryActionMetadata = struct {
 };
 
 pub const ShellWindowMetadata = struct {
+    window_drag_regions: bool = false,
     label: []const u8 = "main",
     title: ?[]const u8 = null,
     width: f32 = 720,
@@ -317,6 +319,7 @@ pub const ShellWindowMetadata = struct {
 };
 
 pub const ShellViewMetadata = struct {
+    window_drag_regions: bool = false,
     label: []const u8,
     kind: []const u8,
     parent: ?[]const u8 = null,
@@ -968,6 +971,7 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
             .activate_on_show = window.activate_on_show,
             .initially_hidden = window.initially_hidden,
             .allows_fullscreen = window.allows_fullscreen,
+            .window_drag_regions = window.window_drag_regions,
             .min_width = window.min_width,
             .min_height = window.min_height,
             .close_policy = try allocator.dupe(u8, window.close_policy),
@@ -1027,6 +1031,7 @@ fn convertRawShellWindows(allocator: std.mem.Allocator, windows: []const RawShel
             .activate_on_show = window.activate_on_show,
             .initially_hidden = window.initially_hidden,
             .allows_fullscreen = window.allows_fullscreen,
+            .window_drag_regions = window.window_drag_regions,
             .min_width = window.min_width,
             .min_height = window.min_height,
             .close_policy = try allocator.dupe(u8, window.close_policy),
@@ -1042,6 +1047,7 @@ fn convertRawShellViews(allocator: std.mem.Allocator, views: []const RawShellVie
     for (views, 0..) |view, index| {
         converted[index] = .{
             .label = try allocator.dupe(u8, view.label),
+            .window_drag_regions = view.window_drag_regions,
             .kind = try allocator.dupe(u8, view.kind),
             .parent = try duplicateOptionalString(allocator, view.parent),
             .edge = try duplicateOptionalString(allocator, view.edge),
@@ -1233,6 +1239,7 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
             .activate_on_show = window.activate_on_show,
             .initially_hidden = window.initially_hidden,
             .allows_fullscreen = window.allows_fullscreen,
+            .window_drag_regions = window.window_drag_regions,
             .min_width = try parseWindowMinSize(window.min_width),
             .min_height = try parseWindowMinSize(window.min_height),
             .close_policy = try parseClosePolicy(window.close_policy),
@@ -1279,6 +1286,7 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
             .activate_on_show = window.activate_on_show,
             .initially_hidden = window.initially_hidden,
             .allows_fullscreen = window.allows_fullscreen,
+            .window_drag_regions = window.window_drag_regions,
             .min_width = min_width,
             .min_height = min_height,
             .close_policy = close_policy,
@@ -1316,6 +1324,7 @@ fn parseShellViews(allocator: std.mem.Allocator, values: []const ShellViewMetada
     for (values, 0..) |view, index| {
         views[index] = .{
             .label = view.label,
+            .window_drag_regions = view.window_drag_regions,
             .kind = try parseViewKind(view.kind),
             .parent = view.parent,
             .edge = if (view.edge) |edge| try parseShellEdge(edge) else null,
@@ -3924,5 +3933,36 @@ test "font manifests enforce permanent ids, bundled paths and the native slot bo
         const source = try std.fmt.allocPrint(allocator, "{{\"id\":\"dev.test.fonts\",\"name\":\"fonts\",\"version\":\"0.1.0\",\"assets\":{{\"fonts\":{s}}}}}", .{case.fonts});
         defer allocator.free(source);
         try std.testing.expectError(case.err, parseJsonText(allocator, source));
+    }
+}
+
+test "window drag declarations survive JSON and ZON configuration conversions" {
+    const json_source =
+        \\{"id":"com.example.drag","name":"drag","version":"1.0.0",
+        \\ "windows":[{"label":"main","window_drag_regions":true},{"label":"other"}],
+        \\ "shell":{"windows":[{"label":"main","window_drag_regions":true,"views":[
+        \\ {"label":"child","kind":"webview","url":"zero://app/index.html","window_drag_regions":true}]}]}}
+    ;
+    const zon_source =
+        \\.{ .id = "com.example.drag", .name = "drag", .version = "1.0.0",
+        \\ .windows = .{ .{ .label = "main", .window_drag_regions = true }, .{ .label = "other" } },
+        \\ .shell = .{ .windows = .{ .{ .label = "main", .window_drag_regions = true, .views = .{
+        \\ .{ .label = "child", .kind = "webview", .url = "zero://app/index.html", .window_drag_regions = true },
+        \\ } } } } }
+    ;
+    for ([_]struct { path: []const u8, source: []const u8 }{
+        .{ .path = "app.json", .source = json_source },
+        .{ .path = "app.zon", .source = zon_source },
+    }) |input| {
+        const metadata = try parseTextForPath(std.testing.allocator, input.path, input.source);
+        defer metadata.deinit(std.testing.allocator);
+        const windows = try convertWindows(std.testing.allocator, metadata.windows);
+        defer std.testing.allocator.free(windows);
+        try std.testing.expect(windows[0].window_drag_regions);
+        try std.testing.expect(!windows[1].window_drag_regions);
+        const shell = try parseShell(std.testing.allocator, metadata.shell);
+        defer deinitParsedShell(std.testing.allocator, shell);
+        try std.testing.expect(shell.windows[0].window_drag_regions);
+        try std.testing.expect(shell.windows[0].views[0].window_drag_regions);
     }
 }

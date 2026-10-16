@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "gpu_surface_renderer.h"
+#include "../webview_window_drag.h"
 
 /* NATIVE_SDK_ALLOW_WEBVIEW2_STUB is the build graph's declaration that
  * this app uses no web layer, and it wins over header visibility: on a
@@ -377,6 +378,7 @@ struct Window {
      * tray icon, the Win32 tray-player shape). Applied right after
      * create via native_sdk_windows_set_window_close_policy. */
     int close_policy = 0;
+    bool window_drag_regions = false;
     /* True while the .hide policy has this window off the glass; the
      * hwnd stays live and the map entry stays owned. */
     bool policy_hidden = false;
@@ -396,6 +398,8 @@ struct DragRegionRect {
 };
 
 struct ChildWebView {
+    bool window_drag_script_ready = false;
+    uint64_t window_drag_generation = 0;
     uint64_t window_id = 1;
     HWND hwnd = nullptr;
     std::string label;
@@ -415,6 +419,7 @@ struct ChildWebView {
     uint64_t creation_order = 0;
     bool transparent = false;
     bool bridge_enabled = false;
+    bool window_drag_regions = false;
     bool frame_explicit = true;
 #if NATIVE_SDK_HAS_WEBVIEW2
     ComPtr<ICoreWebView2Controller> controller;
@@ -692,6 +697,8 @@ struct PendingContextMenu {
 };
 
 struct Host {
+    bool window_drag_initialization_failed = false;
+    uint64_t next_window_drag_generation = 1;
     HINSTANCE instance = GetModuleHandleW(nullptr);
     std::string app_name;
     std::string window_title;
@@ -4971,6 +4978,9 @@ static const GUID kNativeSdkIID_WebResourceRequestedHandler = {0xab00b74c, 0x15f
 static const GUID kNativeSdkIID_NavigationStartingHandler = {0x9adbe429, 0xf36d, 0x432b, {0x9d, 0xdc, 0xf8, 0x88, 0x1f, 0xbd, 0x76, 0xe3}};
 
 template <typename Interface> struct WebView2HandlerIid;
+template <> struct WebView2HandlerIid<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler> {
+    static const GUID &value() { return IID_ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler; }
+};
 template <> struct WebView2HandlerIid<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler> {
     static const GUID &value() { return kNativeSdkIID_EnvironmentCompletedHandler; }
 };
@@ -5248,7 +5258,7 @@ static ComPtr<ICoreWebView2WebResourceResponse> assetWebResourceResponse(ICoreWe
 }
 
 static void loadWebViewSource(ChildWebView &webview) {
-    if (!webview.webview) return;
+    if (!webview.webview || (webview.window_drag_regions && !webview.window_drag_script_ready)) return;
     if (webview.source_kind == 0) {
         std::wstring html = widen(webview.source);
         webview.webview->NavigateToString(html.c_str());
@@ -5277,28 +5287,39 @@ static void cleanupPendingChildWebView(Host *host, const std::string &key) {
     host->webviews.erase(found);
 }
 
+static void failWindowDragInitialization(Host *host, const std::string &key, HRESULT result) {
+    auto found = host->webviews.find(key);
+    if (found != host->webviews.end() && found->second.window_drag_regions) {
+        fprintf(stderr, "native-sdk: window-drag WebView initialization failed for %s (0x%08lx)\n",
+            key.c_str(), static_cast<unsigned long>(result));
+        host->window_drag_initialization_failed = true;
+    }
+}
+
 static bool createChildWebView(Host *host, const std::string &key) {
     auto factory = webView2Factory();
     if (!factory) return false;
     auto found = host->webviews.find(key);
     if (found == host->webviews.end() || !found->second.hwnd) return false;
     HWND parent = found->second.hwnd;
+    const uint64_t generation = found->second.window_drag_generation;
     std::weak_ptr<HostLifetime> lifetime = host->lifetime;
     HRESULT hr = factory(nullptr, nullptr, nullptr, Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-        [host, key, parent, lifetime](HRESULT result, ICoreWebView2Environment *environment) -> HRESULT {
+        [host, key, parent, lifetime, generation](HRESULT result, ICoreWebView2Environment *environment) -> HRESULT {
             auto token = lifetime.lock();
             if (!token) return S_OK;
             std::lock_guard<std::recursive_mutex> guard(token->mutex);
             if (!token->alive) return S_OK;
             auto found = host->webviews.find(key);
-            if (found == host->webviews.end() || found->second.hwnd != parent || !IsWindow(parent)) return S_OK;
+            if (found == host->webviews.end() || found->second.hwnd != parent || found->second.window_drag_generation != generation || !IsWindow(parent)) return S_OK;
             if (FAILED(result) || !environment) {
+                failWindowDragInitialization(host, key, FAILED(result) ? result : E_FAIL);
                 cleanupPendingChildWebView(host, key);
                 return result;
             }
             ComPtr<ICoreWebView2Environment> environment_ref = environment;
-            return environment->CreateCoreWebView2Controller(parent, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                [host, key, lifetime, environment_ref](HRESULT controller_result, ICoreWebView2Controller *controller) -> HRESULT {
+            HRESULT controller_request = environment->CreateCoreWebView2Controller(parent, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                [host, key, lifetime, environment_ref, generation](HRESULT controller_result, ICoreWebView2Controller *controller) -> HRESULT {
                     auto token = lifetime.lock();
                     if (!token) {
                         if (controller) controller->Close();
@@ -5309,17 +5330,23 @@ static bool createChildWebView(Host *host, const std::string &key) {
                         if (controller) controller->Close();
                         return S_OK;
                     }
-                    if (FAILED(controller_result) || !controller) {
-                        cleanupPendingChildWebView(host, key);
-                        return controller_result;
-                    }
                     auto found = host->webviews.find(key);
-                    if (found == host->webviews.end()) {
-                        controller->Close();
+                    if (found == host->webviews.end() || found->second.window_drag_generation != generation) {
+                        if (controller) controller->Close();
                         return S_OK;
                     }
+                    if (FAILED(controller_result) || !controller) {
+                        failWindowDragInitialization(host, key, FAILED(controller_result) ? controller_result : E_FAIL);
+                        cleanupPendingChildWebView(host, key);
+                        return FAILED(controller_result) ? controller_result : E_FAIL;
+                    }
                     found->second.controller = controller;
-                    controller->get_CoreWebView2(&found->second.webview);
+                    HRESULT core_result = controller->get_CoreWebView2(&found->second.webview);
+                    if (FAILED(core_result) || !found->second.webview) {
+                        failWindowDragInitialization(host, key, FAILED(core_result) ? core_result : E_NOINTERFACE);
+                        cleanupPendingChildWebView(host, key);
+                        return FAILED(core_result) ? core_result : E_NOINTERFACE;
+                    }
                     RECT bounds = webViewRect(found->second);
                     controller->put_Bounds(bounds);
                     controller->put_ZoomFactor(found->second.zoom);
@@ -5342,6 +5369,51 @@ static bool createChildWebView(Host *host, const std::string &key) {
                             return S_OK;
                         }).Get(), &focus_token);
                     if (found->second.webview) {
+                        if (found->second.window_drag_regions) {
+                            ComPtr<ICoreWebView2Settings> settings;
+                            ComPtr<ICoreWebView2Settings9> regions;
+                            HRESULT drag_result = found->second.webview->get_Settings(&settings);
+                            if (SUCCEEDED(drag_result) && settings)
+                                drag_result = settings->QueryInterface(IID_ICoreWebView2Settings9,
+                                    reinterpret_cast<void **>(regions.GetAddressOf()));
+                            if (SUCCEEDED(drag_result) && regions)
+                                drag_result = regions->put_IsNonClientRegionSupportEnabled(TRUE);
+                            if (FAILED(drag_result) || !regions) {
+                                fprintf(stderr, "native-sdk: window-drag initialization failed for %s (0x%08lx)\n",
+                                    key.c_str(), static_cast<unsigned long>(drag_result));
+                                host->window_drag_initialization_failed = true;
+                                cleanupPendingChildWebView(host, key);
+                                return FAILED(drag_result) ? drag_result : E_NOINTERFACE;
+                            }
+                            // Navigation waits for successful registration: document-start
+                            // installation must include the very first document.
+                            const std::wstring drag_script = widen(NATIVE_SDK_WINDOW_DRAG_SOURCE "(true);");
+                            const uint64_t drag_generation = found->second.window_drag_generation;
+                            HRESULT script_result = found->second.webview->AddScriptToExecuteOnDocumentCreated(
+                                drag_script.c_str(), Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
+                                    [host, key, lifetime, drag_generation](HRESULT result, LPCWSTR) -> HRESULT {
+                                        auto token = lifetime.lock();
+                                        if (!token) return S_OK;
+                                        std::lock_guard<std::recursive_mutex> guard(token->mutex);
+                                        if (!token->alive) return S_OK;
+                                        auto current = host->webviews.find(key);
+                                        if (current == host->webviews.end() || current->second.window_drag_generation != drag_generation) return S_OK;
+                                        if (FAILED(result)) {
+                                            fprintf(stderr, "native-sdk: window-drag script registration failed for %s\n", key.c_str());
+                                            host->window_drag_initialization_failed = true;
+                                            cleanupPendingChildWebView(host, key);
+                                        } else {
+                                            current->second.window_drag_script_ready = true;
+                                            loadWebViewSource(current->second);
+                                        }
+                                        return S_OK;
+                                    }).Get());
+                            if (FAILED(script_result)) {
+                                host->window_drag_initialization_failed = true;
+                                cleanupPendingChildWebView(host, key);
+                                return script_result;
+                            }
+                        }
                         if (found->second.bridge_enabled) {
                             found->second.webview->AddScriptToExecuteOnDocumentCreated(nativeSdkBridgeScript(), nullptr);
                             EventRegistrationToken bridge_token = {};
@@ -5447,10 +5519,15 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 args->put_Cancel(TRUE);
                                 return S_OK;
                             }).Get(), &token);
-                        loadWebViewSource(found->second);
+                        if (!found->second.window_drag_regions) loadWebViewSource(found->second);
                     }
                     return S_OK;
                 }).Get());
+            if (FAILED(controller_request)) {
+                failWindowDragInitialization(host, key, controller_request);
+                cleanupPendingChildWebView(host, key);
+            }
+            return controller_request;
         }).Get());
     return SUCCEEDED(hr);
 }
@@ -6174,6 +6251,7 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.always_on_top = (window_flags & (1u << 1)) != 0;
     window.click_through = (window_flags & (1u << 2)) != 0;
     window.activate_on_show = (window_flags & (1u << 3)) == 0;
+    window.window_drag_regions = (window_flags & (1u << 5)) != 0;
     window.show_on_first_present = show_policy == 1;
     window.policy_hidden = show_policy == 2;
     host->windows[window.id] = window;
@@ -6226,7 +6304,7 @@ void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
         emit(host, entry.second, kWindowFrame);
     }
     MSG message = {};
-    while (host->running) {
+    while (host->running && !host->window_drag_initialization_failed) {
         HANDLE handles[1] = {};
         const DWORD handle_count = host->gpu_frame_wake_timer ? 1 : 0;
         if (handle_count != 0) handles[0] = host->gpu_frame_wake_timer;
@@ -6413,6 +6491,7 @@ int native_sdk_windows_load_window_webview(Host *host, uint64_t window_id, const
 
         ChildWebView webview;
         webview.window_id = window_id;
+        webview.window_drag_generation = host->next_window_drag_generation++;
         webview.hwnd = hwnd;
         webview.label = "main";
         webview.width = rect.right > rect.left ? (double)(rect.right - rect.left) : window->second.width;
@@ -6420,6 +6499,7 @@ int native_sdk_windows_load_window_webview(Host *host, uint64_t window_id, const
         webview.layer = 0;
         webview.creation_order = 0;
         webview.bridge_enabled = true;
+        webview.window_drag_regions = window->second.window_drag_regions;
         webview.frame_explicit = false;
         webview.source_kind = source_kind;
         webview.source = slice(source, source_len);
@@ -6604,6 +6684,7 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
     window.always_on_top = (window_flags & (1u << 1)) != 0;
     window.click_through = (window_flags & (1u << 2)) != 0;
     window.activate_on_show = (window_flags & (1u << 3)) == 0;
+    window.window_drag_regions = (window_flags & (1u << 5)) != 0;
     window.show_on_first_present = show_policy == 1;
     window.policy_hidden = show_policy == 2;
     /* Register BEFORE creating: createNativeWindow's post-create frame
@@ -6652,6 +6733,10 @@ void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id) {
             slot.hwnd = nullptr;
         }
     }
+}
+
+int native_sdk_windows_window_drag_failed(Host *host) {
+    return host && host->window_drag_initialization_failed ? 1 : 0;
 }
 
 int native_sdk_windows_start_window_drag(Host *host, uint64_t window_id) {
@@ -7776,6 +7861,7 @@ int native_sdk_windows_create_webview(Host *host, uint64_t window_id, const char
 
     ChildWebView webview;
     webview.window_id = window_id;
+    webview.window_drag_generation = host->next_window_drag_generation++;
     webview.hwnd = hwnd;
     webview.label = label_string;
     webview.url = url_string;
@@ -7786,7 +7872,8 @@ int native_sdk_windows_create_webview(Host *host, uint64_t window_id, const char
     webview.layer = layer;
     webview.creation_order = host->next_child_order++;
     webview.transparent = transparent != 0;
-    webview.bridge_enabled = bridge_enabled != 0;
+    webview.bridge_enabled = (bridge_enabled & 1) != 0;
+    webview.window_drag_regions = (bridge_enabled & 2) != 0;
     inheritAssetSourceForUrl(host, window_id, webview, url_string);
     host->webviews[key] = webview;
     applyChildWebViewLayer(host, window_id, label_string);

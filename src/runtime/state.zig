@@ -70,6 +70,7 @@ pub const RuntimeMainWebViewState = struct {
 };
 
 pub const RuntimeWebView = struct {
+    window_drag_regions: bool = false,
     id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
     label: []const u8 = "",
