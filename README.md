@@ -24,7 +24,7 @@ cd my_app
 native dev
 ```
 
-`@fork` selects the latest fork release. To pin a version, install `@zogien/native-sdk@0.11.0-fork.1`.
+`@fork` selects the latest fork release. To pin a version, install `@zogien/native-sdk@0.11.0-fork.2`.
 
 ## Resources
 
