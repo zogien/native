@@ -107,7 +107,7 @@ jobs:
             if npm view "$name@$VERSION" version >/dev/null 2>&1; then
               echo "$name@$VERSION already published, skipping"
             else
-              npm publish "release-packages/$archive_name" --provenance --access public --tag "$CHANNEL"
+              npm publish "./release-packages/$archive_name" --provenance --access public --tag "$CHANNEL"
             fi
           }
           for directory in packages/native-sdk/npm/*/; do
