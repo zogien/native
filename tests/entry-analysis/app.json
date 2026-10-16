@@ -1,0 +1,31 @@
+{
+    "$schema": "https://schema.native-sdk.dev/app/v1.json",
+    "id": "dev.native_sdk.entry-analysis",
+    "name": "entry-analysis",
+    "display_name": "Entry Analysis",
+    "description": "Fixture proving native test analyzes the app entry point.",
+    "version": "0.1.0",
+    "platforms": ["macos"],
+    "permissions": ["view", "command"],
+    "capabilities": ["native_views", "gpu_surfaces"],
+    "shell": {
+        "windows": [
+            {
+                "label": "main",
+                "title": "Entry Analysis",
+                "width": 320,
+                "height": 200,
+                "views": [
+                    { "label": "main-canvas", "kind": "gpu_surface", "fill": true, "role": "Counter canvas", "accessibility_label": "Counter", "gpu_backend": "metal", "gpu_pixel_format": "bgra8_unorm", "gpu_present_mode": "timer", "gpu_alpha_mode": "opaque", "gpu_color_space": "srgb", "gpu_vsync": true }
+                ]
+            }
+        ]
+    },
+    "security": {
+        "navigation": {
+            "allowed_origins": ["zero://app", "zero://inline"],
+            "external_links": { "action": "deny" }
+        }
+    },
+    "web_engine": "system"
+}

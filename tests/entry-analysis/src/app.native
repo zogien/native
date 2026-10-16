@@ -1,0 +1,5 @@
+<!-- Entry-analysis fixture view; see main.zig for what this app proves. -->
+<row gap="8" padding="16" cross="center">
+  <text grow="1">{count}</text>
+  <button variant="primary" on-press="increment">+</button>
+</row>

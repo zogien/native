@@ -1855,10 +1855,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "ANDROID_NDK_ROOT: args[\"android-ndk\"]" },
         .{ .path = "build/app.zig", .pattern = ".ios => host.os.tag == .macos and target.result.cpu.arch == .aarch64" },
     });
-    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`)", &.{
-        .{ .path = "build/app.zig", .pattern = "app_analysis.zig" },
-        .{ .path = "build/app.zig", .pattern = "if (@hasDecl(app, \"main\")) _ = &app.main;" },
-        .{ .path = "build/app.zig", .pattern = "test_step.dependOn(&analysis_obj.step);" },
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point through an executable rooted at the test app module (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`; an object-shaped analysis fails on COFF whenever the app module carries more than one object, archive, or C input)", &.{
+        .{ .path = "build/app.zig", .pattern = "const entry_analysis = b.addExecutable(.{" },
+        .{ .path = "build/app.zig", .pattern = "test_step.dependOn(&entry_analysis.step);" },
         .{ .path = "src/runtime/ui_app.zig", .pattern = "has no default value - give every Model field a default" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-owned-runner-window-placement", "Verify owned example runners preserve explicit origins and distinguish successful state restoration", &.{
@@ -2767,6 +2766,19 @@ pub fn build(b: *std.Build) void {
         b.step("test-examples-native-shard-4", "Run the fourth native-first example test shard"),
     };
     const ui_inbox_example_step = addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .managed);
+    // UiApp.create's Model-defaults rule fires only inside this fixture's
+    // `main`; its tests and model contract compile clean. `native test`
+    // therefore fails with the teaching message exactly when the managed
+    // app build's entry analysis still reaches the entry point.
+    const entry_analysis_teaching = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+    entry_analysis_teaching.setCwd(b.path("tests/entry-analysis"));
+    entry_analysis_teaching.setName("test-app-entry-analysis-teaching");
+    entry_analysis_teaching.has_side_effects = true;
+    entry_analysis_teaching.expectExitCode(1);
+    entry_analysis_teaching.expectStdErrMatch("Model field 'count' has no default value - give every Model field a default");
+    native_examples_step.dependOn(&entry_analysis_teaching.step);
+    const entry_analysis_teaching_step = b.step("test-app-entry-analysis-teaching", "Verify native test teaches a Model-defaults error that only the app entry point reaches");
+    entry_analysis_teaching_step.dependOn(&entry_analysis_teaching.step);
     const native_example_steps = [_]*std.Build.Step{
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-command-app", "Run command app example tests", "examples/command-app", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-shell", "Run native shell example tests", "examples/native-shell", .owned),
@@ -2818,6 +2830,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-code-workbench", "Run TypeScript code workbench example tests", "examples/code-workbench", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
+        entry_analysis_teaching_step,
     };
     for (native_example_shard_steps) |shard_step| {
         native_examples_step.dependOn(shard_step);

@@ -202,6 +202,18 @@ jobs:
       # truth on a Windows host (the Linux run lives in the Zig Core
       # lane's `zig build test`).
       - run: zig build test-canvas-fonts
+      # `native test` on a TypeScript app, natively on Windows. The managed
+      # build's entry analysis sees the compiled core archive and the Debug
+      # markup data object together, and Zig refuses any COFF object
+      # compile with more than one such input, so the analysis must stay an
+      # executable rooted at the app module. The Linux example shards
+      # cannot see a COFF-only regression. Node and the core compiler
+      # install last so the steps above keep their install-free shape.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
+      - run: zig build test-example-menu-policy
 
   cef-platform-tooling:
     name: CEF Platform Tooling
