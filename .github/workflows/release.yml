@@ -35,7 +35,7 @@ jobs:
           import assert from 'node:assert/strict';
           import { readFileSync, appendFileSync } from 'node:fs';
           const pkg = JSON.parse(readFileSync('packages/native-sdk/package.json', 'utf8'));
-          assert.equal(pkg.name, '@zogien/native');
+          assert.equal(pkg.name, '@zogien/native-sdk');
           assert.equal(pkg.repository.url, 'git+https://github.com/' + process.env.GITHUB_REPOSITORY + '.git');
           const tag = 'fork/v' + pkg.version;
           if (process.env.GITHUB_REF_TYPE === 'tag') assert.equal(process.env.GITHUB_REF_NAME, tag);
@@ -114,7 +114,7 @@ jobs:
             name=$(node -p "require('./${directory}package.json').name")
             publish_package "$name"
           done
-          publish_package "@zogien/native"
+          publish_package "@zogien/native-sdk"
       - name: Create GitHub prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

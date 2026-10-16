@@ -4,7 +4,7 @@
 // the source of truth, and this script stamps it into the CLI source
 // (tools/native-sdk/main.zig), every per-platform binary package under
 // npm/, and the main package's own optionalDependencies pins. The pins
-// are exact so a given @zogien/native always installs the binary built
+// are exact so a given @zogien/native-sdk always installs the binary built
 // from the same commit. The same pass propagates the repo identity
 // fields (repository and homepage) into each platform package, so a
 // repository rename or domain move applied to the main package cannot

@@ -86,11 +86,11 @@ pub fn resolveFrameworkRoot(allocator: std.mem.Allocator, io: std.Io, env_map: *
 ///   - `<checkout>/zig-out/bin/native` -> `<checkout>` (source checkout)
 ///   - `<package>/bin/native` -> `<package>` (any bundle carrying src/
 ///     next to bin/)
-///   - `node_modules/@zogien/native-<platform>/bin/native` ->
-///     `node_modules/@zogien/native` (npm split install: per-platform
+///   - `node_modules/@zogien/native-sdk-<platform>/bin/native` ->
+///     `node_modules/@zogien/native-sdk` (npm split install: per-platform
 ///     packages carry only the binary, the main package next to them
 ///     carries the SDK source — nested or hoisted/global node_modules)
-/// The walk checks each of the four nearest ancestors, plus a `native`
+/// The walk checks each of the four nearest ancestors, plus a `native-sdk`
 /// sibling at each level for the npm split shape, and accepts the first
 /// directory that has `src/root.zig`.
 pub fn frameworkRootFromExecutable(allocator: std.mem.Allocator, io: std.Io) !?[]const u8 {
@@ -105,7 +105,7 @@ pub fn frameworkRootFromExecutable(allocator: std.mem.Allocator, io: std.Io) !?[
         if (hasFrameworkRoot(allocator, io, parent)) {
             return try allocator.dupe(u8, parent);
         }
-        const sibling = try std.fs.path.join(allocator, &.{ parent, "native" });
+        const sibling = try std.fs.path.join(allocator, &.{ parent, "native-sdk" });
         if (hasFrameworkRoot(allocator, io, sibling)) return sibling;
         allocator.free(sibling);
         dir = parent;

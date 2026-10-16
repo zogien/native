@@ -1,7 +1,7 @@
 # Releasing the fork
 
-The public CLI is `@zogien/native`. Its eight binary packages use
-`@zogien/native-<platform>`. The `native` command and the bundled
+The public CLI is `@zogien/native-sdk`. Its eight binary packages use
+`@zogien/native-sdk-<platform>`. The `native` command and the bundled
 `@native-sdk/core` authoring API keep their existing names; the core package is
 included in the CLI payload and is not published separately by this fork.
 
@@ -64,6 +64,6 @@ and [scoped public package publishing](https://docs.npmjs.com/creating-and-publi
 ## Install
 
 ```sh
-npm install -g @zogien/native@fork
+npm install -g @zogien/native-sdk@fork
 native version
 ```

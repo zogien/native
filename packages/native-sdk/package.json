@@ -1,5 +1,5 @@
 {
-  "name": "@zogien/native",
+  "name": "@zogien/native-sdk",
   "version": "0.11.0-fork.1",
   "description": "Community-maintained fork of Native SDK: TypeScript, Native markup, and native desktop tooling",
   "type": "module",
@@ -41,14 +41,14 @@
     "tar": "7.5.22"
   },
   "optionalDependencies": {
-    "@zogien/native-darwin-arm64": "0.11.0-fork.1",
-    "@zogien/native-darwin-x64": "0.11.0-fork.1",
-    "@zogien/native-linux-arm64-gnu": "0.11.0-fork.1",
-    "@zogien/native-linux-arm64-musl": "0.11.0-fork.1",
-    "@zogien/native-linux-x64-gnu": "0.11.0-fork.1",
-    "@zogien/native-linux-x64-musl": "0.11.0-fork.1",
-    "@zogien/native-win32-arm64": "0.11.0-fork.1",
-    "@zogien/native-win32-x64": "0.11.0-fork.1"
+    "@zogien/native-sdk-darwin-arm64": "0.11.0-fork.1",
+    "@zogien/native-sdk-darwin-x64": "0.11.0-fork.1",
+    "@zogien/native-sdk-linux-arm64-gnu": "0.11.0-fork.1",
+    "@zogien/native-sdk-linux-arm64-musl": "0.11.0-fork.1",
+    "@zogien/native-sdk-linux-x64-gnu": "0.11.0-fork.1",
+    "@zogien/native-sdk-linux-x64-musl": "0.11.0-fork.1",
+    "@zogien/native-sdk-win32-arm64": "0.11.0-fork.1",
+    "@zogien/native-sdk-win32-x64": "0.11.0-fork.1"
   },
   "repository": {
     "type": "git",

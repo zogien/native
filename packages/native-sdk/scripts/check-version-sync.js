@@ -124,7 +124,7 @@ if (coreJson.homepage !== packageJson.homepage) {
 }
 // The CLI carries the frontend's TypeScript compiler as a REGULAR
 // dependency via the @typescript/old ALIAS (npm:typescript@X.Y.Z): npm
-// installs it in the same transaction as @zogien/native, so the bundled
+// installs it in the same transaction as @zogien/native-sdk, so the bundled
 // packages/core resolves it through node's ancestor node_modules walk
 // with no install step at verb time (offline, read-only-prefix, and
 // production-config safe). Both manifests must pin the alias in the

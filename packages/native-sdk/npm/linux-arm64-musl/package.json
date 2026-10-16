@@ -1,5 +1,5 @@
 {
-  "name": "@zogien/native-linux-arm64-musl",
+  "name": "@zogien/native-sdk-linux-arm64-musl",
   "version": "0.11.0-fork.1",
   "description": "The native CLI binary for Linux arm64 (musl)",
   "os": [

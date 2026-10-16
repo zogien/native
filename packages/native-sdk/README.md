@@ -1,16 +1,20 @@
-# @zogien/native
+# @zogien/native-sdk
 
-A community-maintained fork of the command-line tools for [Native SDK](https://native-sdk.dev). Create, build, test, and package native desktop applications with TypeScript and Native markup.
+An unofficial, personally maintained fork of [vercel-labs/native](https://github.com/vercel-labs/native), based on upstream `v0.11.0`. This fork is not affiliated with or endorsed by Vercel.
+
+Create, build, test, and package native desktop applications with TypeScript and Native markup. This fork is maintained for personal needs, including fixes and features; current changes focus on builds and npm distribution.
 
 The default app core uses a checked TypeScript subset and compiles to native code. Native markup defines the interface, which the toolkit renders in OS windows. Apps can also use Zig cores or embed web content.
 
 ## Install
 
+Requires Node.js 24 or later. The CLI command remains `native`.
+
 ```bash
-npm install -g @zogien/native@fork
+npm install -g @zogien/native-sdk@fork
 ```
 
-The `native` binary arrives as a per-platform optional dependency (`@zogien/native-<platform>`). Installation also downloads the exact scriptc release, verifies its checksum, and installs the matching compiler API and runtime packs into `~/.native/toolchains/scriptc/`. This package carries the SDK source your apps build against, so `native init` and `native dev` work offline after installation. If npm install scripts are disabled, run `node packages/core/scripts/install_scriptc.mjs` from the installed CLI package before building. `NATIVE_SDK_SCRIPTC_CACHE` selects another toolchain cache directory. The pinned Zig toolchain is fetched into `~/.native/toolchains/` on first build unless a compatible `zig` is already on your PATH.
+The `native` binary arrives as a per-platform optional dependency (`@zogien/native-sdk-<platform>`). Installation also downloads the exact scriptc release, verifies its checksum, and installs the matching compiler API and runtime packs into `~/.native/toolchains/scriptc/`. This package carries the SDK source your apps build against, so `native init` and `native dev` work offline after installation. If npm install scripts are disabled, run `node packages/core/scripts/install_scriptc.mjs` from the installed CLI package before building. `NATIVE_SDK_SCRIPTC_CACHE` selects another toolchain cache directory. The pinned Zig toolchain is fetched into `~/.native/toolchains/` on first build unless a compatible `zig` is already on your PATH.
 
 ## Use
 
@@ -26,7 +30,7 @@ The generated counter app uses `src/core.ts` for its model and updates, `src/app
 
 When part of your product is the web, WebView surfaces coexist with the native canvas; web-frontend scaffolds (`--frontend next`, `--frontend vite`, and more) install their generated frontend dependencies automatically on first run.
 
-Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/docs/quick-start).
+Read the [upstream quick start](https://native-sdk.dev/docs/quick-start) for the full guide, using this fork's installation command above.
 
 ## Commands
 
