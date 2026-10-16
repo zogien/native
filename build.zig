@@ -1212,7 +1212,10 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&gallery_driver_run.step);
         test_step.dependOn(&gallery_driver_run.step);
         b.step("test-component-gallery", "Compare every component gallery specimen and replay across view backends").dependOn(&gallery_driver_run.step);
-        const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
+        // The run step reports captured stderr only when the process fails, so
+        // routing the reporter there keeps passing runs quiet and puts the
+        // failing assertions in the build log.
+        const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test", "--test-reporter=spec", "--test-reporter-destination=stderr" });
         for ([_][]const u8{ "scriptc_toolchain.test.ts", "compiler_command.test.ts", "external_core_compiler.test.ts", "package_manifest.test.ts" }) |file| {
             native_api_tests.addFileArg(b.path(b.fmt("packages/core/test/{s}", .{file})));
         }

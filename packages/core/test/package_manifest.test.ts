@@ -31,7 +31,9 @@ const cliManifest = JSON.parse(fs.readFileSync(path.join(pkg, "..", "native-sdk"
 
 test("the manifest names the published package and a real version", () => {
   assert.equal(manifest.name, "@native-sdk/core");
-  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+  // Fork releases are the upstream version plus a -fork.N suffix; a bare
+  // x.y.z here means an upstream merge overwrote the fork version.
+  assert.match(manifest.version, /^\d+\.\d+\.\d+-fork\.\d+$/);
   assert.equal(manifest.type, "module");
 });
 
@@ -40,9 +42,9 @@ test("provenance metadata names the real repository", () => {
   // publishing workflow's repository and rejects the tarball on any
   // mismatch — a publish-blocking field, not decoration.
   assert.equal(manifest.repository?.type, "git");
-  assert.equal(manifest.repository?.url, "git+https://github.com/vercel-labs/native.git");
+  assert.equal(manifest.repository?.url, "git+https://github.com/zogien/native.git");
   assert.equal(manifest.repository?.directory, "packages/core");
-  assert.equal(manifest.homepage, "https://native-sdk.dev");
+  assert.equal(manifest.homepage, "https://github.com/zogien/native#readme");
 });
 
 test("the artifact contains the core, compile surface, and native testing API", () => {
