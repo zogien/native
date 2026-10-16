@@ -276,6 +276,7 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 // turns on the host's embedded-WebView layer; the host
                 // fails the compile by design if it cannot be found.
                 app_mod.addIncludePath(nativeSdkPath(b, native_sdk_path, "third_party/webview2/include"));
+                if (windowsSdkWinrtIncludeDir(b, target)) |winrt| app_mod.addSystemIncludePath(.{ .cwd_relative = winrt });
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} });
                 // WebView2Loader.dll rides next to the installed app
                 // executable: the host loads it at runtime to discover
@@ -300,7 +301,11 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         }
         app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
         app_mod.linkSystemLibrary("c", .{});
-        app_mod.linkSystemLibrary("c++", .{});
+        // The MSVC target compiles the hosts against the toolchain's own
+        // STL, which pulls in msvcprt/vcruntime through its default-lib
+        // directives; Zig's libc++/libc++abi cannot be built against the
+        // MSVC CRT headers (cxxabi.h collides with vcruntime_typeinfo.h).
+        if (target.result.abi != .msvc) app_mod.linkSystemLibrary("c++", .{});
         app_mod.linkSystemLibrary("user32", .{});
         app_mod.linkSystemLibrary("gdi32", .{});
         app_mod.linkSystemLibrary("d2d1", .{});
@@ -326,6 +331,21 @@ fn webView2LoaderSubPath(target: std.Build.ResolvedTarget) []const u8 {
         "third_party/webview2/arm64/WebView2Loader.dll"
     else
         "third_party/webview2/x64/WebView2Loader.dll";
+}
+
+/// The Windows SDK's `Include/<version>/winrt` directory for an MSVC target,
+/// or null for any other target or when no Windows 10/11 SDK is installed.
+/// The WebView2 host's COM plumbing (WRL's ComPtr and Callback) lives there:
+/// Zig's MSVC libc discovery adds only the SDK's ucrt/um/shared directories,
+/// while the GNU targets get WRL from Zig's bundled mingw-w64 headers. A
+/// miss leaves the path alone and the host's `wrl.h not found` error names
+/// the gap.
+fn windowsSdkWinrtIncludeDir(b: *std.Build, target: std.Build.ResolvedTarget) ?[]const u8 {
+    if (comptime @import("builtin").os.tag != .windows) return null;
+    if (target.result.os.tag != .windows or target.result.abi != .msvc) return null;
+    const sdk = std.zig.WindowsSdk.find(b.allocator, b.graph.io, target.result.cpu.arch, &b.graph.environ_map) catch return null;
+    const installation = sdk.windows10sdk orelse return null;
+    return b.pathJoin(&.{ installation.path, "Include", installation.version, "winrt" });
 }
 
 /// `zig build run` executes the cached artifact, which has no installed

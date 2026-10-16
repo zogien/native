@@ -1,3 +1,8 @@
+/* Before any Windows header: see gpu_surface_renderer.h — the SDK's C++
+ * min/max macros break the std::min/std::max calls on the MSVC target. */
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -54,13 +59,20 @@
  * anywhere in this file. The teaching lives where it is actionable
  * instead: a stubbed host reports WebViewNotFound the moment an app
  * actually uses a WebView. */
-#elif __has_include(<WebView2.h>) && __has_include(<wrl.h>)
+#elif !__has_include(<WebView2.h>)
+#error "WebView2.h not found: add third_party/webview2/include to the include path, or define NATIVE_SDK_ALLOW_WEBVIEW2_STUB to build without the embedded WebView layer"
+#elif !__has_include(<wrl.h>)
+/* WRL (ComPtr, Callback) lives in the Windows SDK's winrt directory. Zig's
+ * mingw-w64 headers carry their own copy for the GNU targets, but Zig's
+ * MSVC libc discovery puts only the SDK's ucrt/um/shared directories on
+ * the include path, so the build graph adds Include/<version>/winrt for
+ * MSVC web builds when it can locate an installed Windows 10/11 SDK. */
+#error "wrl.h not found: the MSVC target needs the Windows SDK's Include/<version>/winrt directory on the include path; install the Windows 10/11 SDK, or define NATIVE_SDK_ALLOW_WEBVIEW2_STUB to build without the embedded WebView layer"
+#else
 #include <WebView2.h>
 #include <wrl.h>
 #define NATIVE_SDK_HAS_WEBVIEW2 1
 using Microsoft::WRL::ComPtr;
-#else
-#error "WebView2.h not found: add third_party/webview2/include to the include path, or define NATIVE_SDK_ALLOW_WEBVIEW2_STUB to build without the embedded WebView layer"
 #endif
 
 /* Media Foundation (the audio backend below) + WinHTTP (the audio cache
@@ -114,6 +126,27 @@ typedef struct {
 
 #define VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK L"VAD\\Process_Loopback"
 #endif
+
+/* The COM class, interface, and property GUIDs the host passes by value.
+ * The mingw-w64 headers declare them with DEFINE_GUID (instantiated by
+ * initguid.h above, or carried by Zig's mingw import libraries), but the
+ * Windows SDK's MIDL-generated headers only declare `extern const IID`
+ * and leave the definitions to GUID libraries — mfuuid.lib for the Media
+ * Foundation ones, none at all for the WASAPI and oleacc ones — so the
+ * MSVC target fails to link them. Defined locally like the WIC GUIDs, so
+ * both ABIs link the same self-contained host; the values are the Windows
+ * SDK's (oleacc.h, mmdeviceapi.h, audioclient.h, mfobjects.h, mfidl.h). */
+static const GUID kNativeSdkCLSID_AccPropServices = {0xb5f8350b, 0x0548, 0x48b1, {0xa6, 0xee, 0x88, 0xbd, 0x00, 0xb4, 0xa5, 0xe7}};
+static const GUID kNativeSdkPROPID_ACC_NAME = {0x608d3df8, 0x8128, 0x4aa7, {0xa4, 0x28, 0xf5, 0x5e, 0x49, 0x26, 0x72, 0x91}};
+static const GUID kNativeSdkCLSID_MMDeviceEnumerator = {0xbcde0395, 0xe52f, 0x467c, {0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e}};
+static const GUID kNativeSdkIID_IMMDeviceEnumerator = {0xa95664d2, 0x9614, 0x4f35, {0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6}};
+static const GUID kNativeSdkIID_IActivateAudioInterfaceCompletionHandler = {0x41d949ab, 0x9862, 0x444a, {0x80, 0xf6, 0xc2, 0x61, 0x33, 0x4d, 0xa5, 0xeb}};
+static const GUID kNativeSdkIID_IAudioClient = {0x1cb9ad4c, 0xdbfa, 0x4c32, {0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2}};
+static const GUID kNativeSdkIID_IAudioCaptureClient = {0xc8adbd64, 0xe71e, 0x48a0, {0xa4, 0xde, 0x18, 0x5c, 0x39, 0x5c, 0xd3, 0x17}};
+static const GUID kNativeSdkIID_IMFAsyncCallback = {0xa27003cf, 0x2354, 0x4f2a, {0x8d, 0x6a, 0xab, 0x7c, 0xff, 0x15, 0x43, 0x7e}};
+static const GUID kNativeSdkIID_IMFMediaSource = {0x279a808d, 0xaec7, 0x40c8, {0x9c, 0x6b, 0xa6, 0xb4, 0x92, 0xc7, 0x8a, 0x66}};
+static const GUID kNativeSdkIID_IMFPresentationClock = {0x868ce85c, 0x8ea9, 0x4f55, {0xab, 0x82, 0xb0, 0x09, 0xa9, 0x10, 0xa8, 0x05}};
+static const GUID kNativeSdkIID_IMFAudioStreamVolume = {0x76b1bbdb, 0x4ec8, 0x4f36, {0xb1, 0x06, 0x70, 0xa9, 0x31, 0x6d, 0xf5, 0x93}};
 
 namespace {
 
@@ -1934,9 +1967,9 @@ static void applyNativeViewAccessibility(NativeView &view) {
     bool uninitialize = false;
     initializeCom(&uninitialize);
     IAccPropServices *services = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_SERVER, IID_IAccPropServices, reinterpret_cast<void **>(&services));
+    HRESULT hr = CoCreateInstance(kNativeSdkCLSID_AccPropServices, nullptr, CLSCTX_SERVER, IID_IAccPropServices, reinterpret_cast<void **>(&services));
     if (SUCCEEDED(hr) && services) {
-        services->SetHwndPropStr(view.hwnd, OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, name.c_str());
+        services->SetHwndPropStr(view.hwnd, OBJID_CLIENT, CHILDID_SELF, kNativeSdkPROPID_ACC_NAME, name.c_str());
         services->Release();
     }
     finishCom(uninitialize);
@@ -3720,7 +3753,7 @@ struct AudioSessionEventForwarder final : public IMFAsyncCallback {
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
         if (!out) return E_POINTER;
-        if (riid == IID_IUnknown || riid == IID_IMFAsyncCallback) {
+        if (riid == IID_IUnknown || riid == kNativeSdkIID_IMFAsyncCallback) {
             *out = static_cast<IMFAsyncCallback *>(this);
             AddRef();
             return S_OK;
@@ -3804,7 +3837,7 @@ struct AudioSourceResolveForwarder final : public IMFAsyncCallback {
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
         if (!out) return E_POINTER;
-        if (riid == IID_IUnknown || riid == IID_IMFAsyncCallback) {
+        if (riid == IID_IUnknown || riid == kNativeSdkIID_IMFAsyncCallback) {
             *out = static_cast<IMFAsyncCallback *>(this);
             AddRef();
             return S_OK;
@@ -3825,7 +3858,7 @@ struct AudioSourceResolveForwarder final : public IMFAsyncCallback {
         IUnknown *object = nullptr;
         HRESULT hr = resolver->EndCreateObjectFromURL(result, &type, &object);
         IMFMediaSource *source = nullptr;
-        if (SUCCEEDED(hr) && object) object->QueryInterface(IID_IMFMediaSource, reinterpret_cast<void **>(&source));
+        if (SUCCEEDED(hr) && object) object->QueryInterface(kNativeSdkIID_IMFMediaSource, reinterpret_cast<void **>(&source));
         if (object) object->Release();
         std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
         const bool current = lifetime->alive && host->audio.active && host->audio.generation == generation;
@@ -3961,7 +3994,7 @@ static uint64_t audioPositionMs(AudioState &audio) {
     if (!audio.clock) {
         IMFClock *clock = nullptr;
         if (SUCCEEDED(audio.session->GetClock(&clock)) && clock) {
-            clock->QueryInterface(IID_IMFPresentationClock, reinterpret_cast<void **>(&audio.clock));
+            clock->QueryInterface(kNativeSdkIID_IMFPresentationClock, reinterpret_cast<void **>(&audio.clock));
             clock->Release();
         }
     }
@@ -4077,7 +4110,7 @@ struct AudioSpectrumActivateWaiter final : public IActivateAudioInterfaceComplet
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
         if (!out) return E_POINTER;
-        if (riid == IID_IUnknown || riid == IID_IActivateAudioInterfaceCompletionHandler) {
+        if (riid == IID_IUnknown || riid == kNativeSdkIID_IActivateAudioInterfaceCompletionHandler) {
             *out = static_cast<IActivateAudioInterfaceCompletionHandler *>(this);
             AddRef();
             return S_OK;
@@ -4132,7 +4165,7 @@ static HRESULT audioSpectrumActivateClient(IAudioClient **out_client) {
         return E_FAIL;
     }
     IActivateAudioInterfaceAsyncOperation *operation = nullptr;
-    HRESULT hr = activate(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, IID_IAudioClient, &prop, waiter, &operation);
+    HRESULT hr = activate(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, kNativeSdkIID_IAudioClient, &prop, waiter, &operation);
     if (SUCCEEDED(hr) && operation) {
         /* Activation completes in milliseconds when it completes at all;
          * the deadline only guards against a wedged audio service. A
@@ -4142,7 +4175,7 @@ static HRESULT audioSpectrumActivateClient(IAudioClient **out_client) {
             HRESULT activated = E_FAIL;
             IUnknown *unknown = nullptr;
             if (SUCCEEDED(operation->GetActivateResult(&activated, &unknown)) && SUCCEEDED(activated) && unknown) {
-                unknown->QueryInterface(IID_IAudioClient, reinterpret_cast<void **>(out_client));
+                unknown->QueryInterface(kNativeSdkIID_IAudioClient, reinterpret_cast<void **>(out_client));
             }
             if (unknown) unknown->Release();
             hr = *out_client ? S_OK : (FAILED(activated) ? activated : E_NOINTERFACE);
@@ -4319,7 +4352,7 @@ static void audioSpectrumCaptureThread(std::shared_ptr<AudioSpectrumShared> shar
         if (!ready) break;
         if (FAILED(audioSpectrumActivateClient(&client)) || !client) break;
         if (FAILED(audioSpectrumInitializeClient(client, ready))) break;
-        if (FAILED(client->GetService(IID_IAudioCaptureClient, reinterpret_cast<void **>(&capture))) || !capture) break;
+        if (FAILED(client->GetService(kNativeSdkIID_IAudioCaptureClient, reinterpret_cast<void **>(&capture))) || !capture) break;
         if (FAILED(client->Start())) break;
         running = true;
     } while (false);
@@ -4484,11 +4517,11 @@ static void audioCaptureThread(std::shared_ptr<AudioCaptureShared> shared) {
     HANDLE ready = nullptr;
     bool running = false;
     do {
-        if (FAILED(CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL,
-                IID_IMMDeviceEnumerator, reinterpret_cast<void **>(&enumerator))) || !enumerator) break;
+        if (FAILED(CoCreateInstance(kNativeSdkCLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL,
+                kNativeSdkIID_IMMDeviceEnumerator, reinterpret_cast<void **>(&enumerator))) || !enumerator) break;
         const EDataFlow flow = shared->source == 1 ? eRender : eCapture;
         if (FAILED(enumerator->GetDefaultAudioEndpoint(flow, eConsole, &device)) || !device) break;
-        if (FAILED(device->Activate(IID_IAudioClient, CLSCTX_ALL, nullptr,
+        if (FAILED(device->Activate(kNativeSdkIID_IAudioClient, CLSCTX_ALL, nullptr,
                 reinterpret_cast<void **>(&client))) || !client) break;
         WAVEFORMATEX format = {};
         format.wFormatTag = WAVE_FORMAT_PCM;
@@ -4504,7 +4537,7 @@ static void audioCaptureThread(std::shared_ptr<AudioCaptureShared> shared) {
         if (FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 1000000, 0, &format, nullptr))) break;
         ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!ready || FAILED(client->SetEventHandle(ready))) break;
-        if (FAILED(client->GetService(IID_IAudioCaptureClient, reinterpret_cast<void **>(&capture))) || !capture) break;
+        if (FAILED(client->GetService(kNativeSdkIID_IAudioCaptureClient, reinterpret_cast<void **>(&capture))) || !capture) break;
         if (FAILED(client->Start())) break;
         running = true;
     } while (false);
@@ -4740,7 +4773,7 @@ static void audioApplyVolume(Host *host) {
     AudioState &audio = host->audio;
     if (!audio.session) return;
     IMFAudioStreamVolume *volume = nullptr;
-    if (FAILED(MFGetService(audio.session, MR_STREAM_VOLUME_SERVICE, IID_IMFAudioStreamVolume, reinterpret_cast<void **>(&volume))) || !volume) return;
+    if (FAILED(MFGetService(audio.session, MR_STREAM_VOLUME_SERVICE, kNativeSdkIID_IMFAudioStreamVolume, reinterpret_cast<void **>(&volume))) || !volume) return;
     UINT32 channels = 0;
     if (SUCCEEDED(volume->GetChannelCount(&channels)) && channels > 0 && channels <= 16) {
         float levels[16];
@@ -4768,7 +4801,7 @@ static int audioLoadPathInternal(Host *host, const std::string &path) {
     resolver->Release();
     if (FAILED(hr) || !object) return 2;
     IMFMediaSource *source = nullptr;
-    object->QueryInterface(IID_IMFMediaSource, reinterpret_cast<void **>(&source));
+    object->QueryInterface(kNativeSdkIID_IMFMediaSource, reinterpret_cast<void **>(&source));
     object->Release();
     if (!source) return 2;
     AudioState &audio = host->audio;

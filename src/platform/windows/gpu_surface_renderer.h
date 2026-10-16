@@ -1,5 +1,12 @@
 #pragma once
 
+/* The Windows SDK's minwindef.h defines function-like min/max macros in
+ * C++ unless NOMINMAX is set (mingw-w64's copy defines them for C only),
+ * and on the MSVC target they swallow every std::min/std::max and
+ * numeric_limits<T>::max() call that follows. */
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 
 #include <stddef.h>
