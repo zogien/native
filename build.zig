@@ -2001,17 +2001,21 @@ pub fn build(b: *std.Build) void {
     // reachable through the system include paths, an
     // include-path-decides guard would compile the full layer into a
     // native-only build and reintroduce the WebView2Loader.dll reference
-    // its executable must not carry. Without the define the header is
-    // required — a web build that cannot see it fails at compile time
-    // instead of quietly shipping the stubbed host (whose WebView loads
-    // report WebViewNotFound at runtime).
+    // its executable must not carry. Without the define both WebView2.h
+    // and WRL's wrl.h are required, each with its own #error naming it —
+    // a web build that cannot see either fails at compile time instead of
+    // quietly shipping the stubbed host (whose WebView loads report
+    // WebViewNotFound at runtime) — and the real layer sits in the final
+    // #else that only both headers reach.
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-webview2-vendor", "Verify the vendored WebView2 SDK stays wired into every web-declaring Windows build graph", &.{
         .{ .path = "third_party/webview2/include/WebView2.h", .pattern = "CreateCoreWebView2EnvironmentWithOptions" },
         .{ .path = "third_party/webview2/include/EventToken.h", .pattern = "EventRegistrationToken" },
         .{ .path = "third_party/webview2/LICENSE.txt", .pattern = "Redistribution and use in source and binary forms" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#if defined(NATIVE_SDK_ALLOW_WEBVIEW2_STUB)" },
-        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#elif __has_include(<WebView2.h>) && __has_include(<wrl.h>)" },
-        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#error \"WebView2.h not found" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#elif !__has_include(<WebView2.h>)\n#error \"WebView2.h not found" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#elif !__has_include(<wrl.h>)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#error \"wrl.h not found" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#else\n#include <WebView2.h>\n#include <wrl.h>\n#define NATIVE_SDK_HAS_WEBVIEW2 1" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "LoadLibraryW(L\"WebView2Loader.dll\")" },
         .{ .path = "build/app.zig", .pattern = ".system => if (web_layer) {" },
         .{ .path = "build/app.zig", .pattern = "app_mod.addIncludePath(dep.path(\"third_party/webview2/include\"));" },
