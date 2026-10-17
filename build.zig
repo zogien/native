@@ -2779,6 +2779,33 @@ pub fn build(b: *std.Build) void {
     native_examples_step.dependOn(&entry_analysis_teaching.step);
     const entry_analysis_teaching_step = b.step("test-app-entry-analysis-teaching", "Verify native test teaches a Model-defaults error that only the app entry point reaches");
     entry_analysis_teaching_step.dependOn(&entry_analysis_teaching.step);
+    // MSVC images build only on a Windows host with Visual Studio, so this
+    // group exists only there and runs in the Windows CI job. The release
+    // builds are GUI-subsystem and so cover the mainCRTStartup entry; the
+    // TypeScript runs cover the scriptc runtime's MSVC link
+    // (linkScriptcMsvcRuntime in build/app.zig). The runs share example
+    // build caches and outputs, so they are chained one after another.
+    if (b.graph.host.result.os.tag == .windows) {
+        const msvc_step = b.step("test-windows-msvc-apps", "Build and test Zig-core and TypeScript apps for x86_64-windows-msvc");
+        const msvc_runs = [_]struct { name: []const u8, dir: []const u8, argv: []const []const u8 }{
+            .{ .name = "msvc calculator build", .dir = "examples/calculator", .argv = &.{ "build", "-Dtarget=x86_64-windows-msvc" } },
+            .{ .name = "msvc menu-policy test", .dir = "examples/menu-policy", .argv = &.{ "test", "-Dplatform=null", "-Dtarget=x86_64-windows-msvc" } },
+            .{ .name = "msvc menu-policy build", .dir = "examples/menu-policy", .argv = &.{ "build", "-Dtarget=x86_64-windows-msvc" } },
+            .{ .name = "msvc service-feed-reader test", .dir = "examples/service-feed-reader", .argv = &.{ "test", "-Dplatform=null", "-Dtarget=x86_64-windows-msvc" } },
+        };
+        var previous: ?*std.Build.Step = null;
+        for (msvc_runs) |entry| {
+            const run = managedExampleRun(b, host_cli_exe, entry.argv);
+            run.setCwd(b.path(entry.dir));
+            run.setName(entry.name);
+            run.has_side_effects = true;
+            _ = run.captureStdOut(.{});
+            _ = run.captureStdErr(.{});
+            if (previous) |step| run.step.dependOn(step);
+            previous = &run.step;
+            msvc_step.dependOn(&run.step);
+        }
+    }
     const native_example_steps = [_]*std.Build.Step{
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-command-app", "Run command app example tests", "examples/command-app", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-shell", "Run native shell example tests", "examples/native-shell", .owned),

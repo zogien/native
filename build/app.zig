@@ -2017,8 +2017,14 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     // on GUI exes (handles inherit; only console AUTO-allocation is
     // gated by the subsystem), so automation harnesses that pipe
     // `app.exe > log 2>&1` keep their logs either way.
+    //
+    // MSVC's CRT enters a GUI-subsystem image through WinMainCRTStartup,
+    // which calls WinMain, but Zig apps export only `main`; MinGW's startup
+    // calls `main` under either subsystem. MSVC targets therefore keep the
+    // GUI subsystem and enter through the console CRT entry instead.
     if (target.result.os.tag == .windows and app_optimize != .Debug) {
         exe.subsystem = .windows;
+        if (target.result.abi == .msvc) exe.entry = .{ .symbol_name = "mainCRTStartup" };
     }
     linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, web_layer, cef_dir, cef_auto_install);
     const install = b.addInstallArtifact(exe, .{});
@@ -2307,6 +2313,9 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         if (link_ts_archives) {
             if (stage.service_archive) |service_archive| app_mod.addObjectFile(service_archive);
         }
+        if (link_ts_archives and target.result.os.tag == .windows and target.result.abi == .msvc) {
+            linkScriptcMsvcRuntime(dep, app_mod);
+        }
     }
     if (app_config.sqlite_capability) {
         // `store` and the relational `sqlite` tier share this exact object.
@@ -2322,6 +2331,25 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
     }
     addMacosInfoPlist(b, app_mod, target, app_config);
     return app_mod;
+}
+
+/// The Windows libraries scriptc's runtime pack declares (runtime-pack.json
+/// system_libraries; bcrypt and crypt32 back its TLS). An unused import
+/// library adds no DLL dependency, so they are linked unconditionally.
+const scriptc_windows_system_libraries = [_][]const u8{ "advapi32", "iphlpapi", "ws2_32", "bcrypt", "crypt32" };
+
+/// The pinned scriptc builds its Windows runtime against Zig's MinGW sysroot,
+/// and an MSVC image links the static UCRT without MinGW's default libraries.
+/// Restate what MinGW would have supplied on the module that carries the core
+/// and service archives, so the app exe and every test-side artifact that
+/// imports it (unit tests, model contract, test host) link alike: the pack's
+/// system libraries, MSVC's oldnames.lib for the POSIX names (open, read,
+/// close, ...), and scriptc_mingw_compat.c for the rest of MinGW's startup
+/// and CRT layer (running the runtime's .ctors constructors above all).
+fn linkScriptcMsvcRuntime(dep: *std.Build.Dependency, mod: *std.Build.Module) void {
+    for (scriptc_windows_system_libraries) |name| mod.linkSystemLibrary(name, .{});
+    mod.linkSystemLibrary("oldnames", .{});
+    mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/scriptc_mingw_compat.c"), .flags = &.{} });
 }
 
 /// Compile primary markup bytes independently from the Zig app graph. The

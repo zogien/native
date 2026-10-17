@@ -214,6 +214,11 @@ jobs:
           node-version: 24
       - run: npm ci --prefix packages/core
       - run: zig build test-example-menu-policy
+      # The same host builds and tests apps for x86_64-windows-msvc with the
+      # runner's Visual Studio: release builds (GUI subsystem, so the
+      # mainCRTStartup entry) and TypeScript apps (the scriptc runtime's MSVC
+      # link). No other job can build an MSVC image.
+      - run: zig build test-windows-msvc-apps
 
   cef-platform-tooling:
     name: CEF Platform Tooling

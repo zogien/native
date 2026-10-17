@@ -1493,9 +1493,12 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    // release-shaped exes are GUI-subsystem so the app never flashes a
         \\    // console behind its window; Debug keeps the console for dev logs.
         \\    // Redirected logging still works on GUI exes - only console
-        \\    // AUTO-allocation is subsystem-gated.
+        \\    // AUTO-allocation is subsystem-gated. MSVC's CRT enters a GUI exe
+        \\    // through WinMain, which Zig apps do not export, so MSVC targets
+        \\    // keep the GUI subsystem but enter through mainCRTStartup.
         \\    if (target.result.os.tag == .windows and optimize != .Debug) {
         \\        exe.subsystem = .windows;
+        \\        if (target.result.abi == .msvc) exe.entry = .{ .symbol_name = "mainCRTStartup" };
         \\    }
         \\    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
         \\    b.installArtifact(exe);
@@ -1554,6 +1557,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        // exe's own mode: release-shaped Windows exes are GUI-subsystem.
         \\        if (target.result.os.tag == .windows and package_optimize != .Debug) {
         \\            built.subsystem = .windows;
+        \\            if (target.result.abi == .msvc) built.entry = .{ .symbol_name = "mainCRTStartup" };
         \\        }
         \\        linkPlatform(b, target, package_app_mod, built, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
         \\        break :pkg built;
@@ -4284,6 +4288,9 @@ test "writeDefaultApp emits Vite project files" {
     // the SDK build graph) so packaged scaffold apps never flash a console.
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (target.result.os.tag == .windows and optimize != .Debug) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "exe.subsystem = .windows;") != null);
+    // MSVC's CRT would enter that GUI exe through WinMain, which Zig apps
+    // do not export; MSVC targets enter through mainCRTStartup instead.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (target.result.abi == .msvc) exe.entry = .{ .symbol_name = \"mainCRTStartup\" };") != null);
     // The package step wraps its own release-shaped exe: Debug stays the
     // run/dev default, but `zig build package` must never ship a Debug
     // (console-subsystem) binary unless the user pinned the mode
@@ -4296,6 +4303,7 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const package_exe = if (package_optimize == optimize) exe else pkg: {") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (target.result.os.tag == .windows and package_optimize != .Debug) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "built.subsystem = .windows;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (target.result.abi == .msvc) built.entry = .{ .symbol_name = \"mainCRTStartup\" };") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addFileArg(package_exe.getEmittedBin());") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.step.dependOn(&package_exe.step);") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package_optimize_name,") != null);
