@@ -312,6 +312,9 @@ struct WindowsEvent {
      * the selected item's id (0 = dismissed without a selection). */
     uint64_t widget_id;
     uint32_t menu_item_id;
+    /* Window events: nonzero while the window is maximized (IsZoomed).
+     * Every emit carries the live value, so any frame event reports it. */
+    int maximized;
 };
 
 /* One context-menu entry crossing the C ABI (the same shape the macOS
@@ -415,6 +418,9 @@ struct Window {
     /* True while the .hide policy has this window off the glass; the
      * hwnd stays live and the map entry stays owned. */
     bool policy_hidden = false;
+    /* The maximized state last reported to the runtime, so WM_SIZE emits
+     * a frame event only when it changes. */
+    bool maximized = false;
 };
 
 /* One rectangle of a canvas view's window-drag mirror (runtime push,
@@ -1382,11 +1388,29 @@ static void emit(Host *host, const Window &window, EventKind kind) {
     event.open = window.hwnd != nullptr;
     event.focused = windowOwnsKeyboardFocus(window);
     event.hidden = window.policy_hidden ? 1 : 0;
+    event.maximized = window.hwnd && IsZoomed(window.hwnd) ? 1 : 0;
     event.label = window.label.c_str();
     event.label_len = window.label.size();
     event.title = window.title.c_str();
     event.title_len = window.title.size();
     host->callback(host->callback_context, &event);
+}
+
+/* WM_SIZE runs for every maximize and restore, whoever started it: the
+ * caption double-click, the system menu, Win+Up, a drag to the top edge,
+ * or the app's own maximize call. A frame event on each transition keeps the runtime's
+ * maximized state current; ordinary resizes emit nothing new. */
+static void emitMaximizedTransition(Host *host, HWND hwnd) {
+    if (!host || !hwnd) return;
+    for (auto &entry : host->windows) {
+        Window &window = entry.second;
+        if (window.hwnd != hwnd) continue;
+        const bool maximized = IsZoomed(hwnd) != FALSE;
+        if (maximized == window.maximized) return;
+        window.maximized = maximized;
+        emit(host, window, kWindowFrame);
+        return;
+    }
 }
 
 static void emitFileDrop(Host *host, const Window &window, const std::string &paths) {
@@ -5673,6 +5697,28 @@ static bool handleAppTimerMessage(Host *host, WPARAM wparam) {
     return true;
 }
 
+/* Windows sizes only captioned windows to the work area when they
+ * maximize; a caption-less popup covers the whole monitor, taskbar
+ * included. Chromeless windows get the captioned behavior back: the
+ * maximized frame is the work area of the window's monitor, grown by the
+ * resize frame so the borders park offscreen and the client fills the
+ * work area exactly, whether an app control, a drag-region double-click,
+ * or the system menu maximized it. */
+static void applyChromelessMaximizedBounds(Host *host, HWND hwnd, MINMAXINFO *info) {
+    if (!info || !chromelessWindowForHwnd(host, hwnd)) return;
+    MONITORINFO monitor = {};
+    monitor.cbSize = sizeof(monitor);
+    if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+    RECT frame = {};
+    const DWORD style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const DWORD ex_style = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if (!adjustWindowRectForDpi(&frame, style, GetMenu(hwnd) != nullptr, ex_style, dpiForWindow(hwnd))) return;
+    info->ptMaxPosition.x = monitor.rcWork.left - monitor.rcMonitor.left + frame.left;
+    info->ptMaxPosition.y = monitor.rcWork.top - monitor.rcMonitor.top + frame.top;
+    info->ptMaxSize.x = (monitor.rcWork.right - monitor.rcWork.left) + (frame.right - frame.left);
+    info->ptMaxSize.y = (monitor.rcWork.bottom - monitor.rcWork.top) + (frame.bottom - frame.top);
+}
+
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
@@ -5925,6 +5971,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                     }
                 }
             }
+            emitMaximizedTransition(host, hwnd);
             return 0;
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
@@ -6011,6 +6058,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             }
             return 0;
         case WM_GETMINMAXINFO:
+            applyChromelessMaximizedBounds(host, hwnd, reinterpret_cast<MINMAXINFO *>(lparam));
             if (host) {
                 for (auto &entry : host->windows) {
                     Window &window = entry.second;
@@ -6901,6 +6949,45 @@ int native_sdk_windows_minimize_window(Host *host, uint64_t window_id) {
     if (found == host->windows.end() || !found->second.hwnd) return 0;
     ShowWindow(found->second.hwnd, SW_MINIMIZE);
     return 1;
+}
+
+/* Maximize and restore-from-maximized for app-drawn window controls.
+ * Returns 1 on success, 0 for an unknown or destroyed window, -1 when the
+ * window is not resizable (the system offers it no maximize either), and
+ * -2 when it is not on the glass: SW_MAXIMIZE and SW_RESTORE both show a
+ * hidden window, which would bypass the policy-hidden and deferred-show
+ * bookkeeping. The state change reaches the runtime through WM_SIZE. */
+int native_sdk_windows_maximize_window(Host *host, uint64_t window_id) {
+    if (!host) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return 0;
+    if (!found->second.resizable) return -1;
+    if (!IsWindowVisible(found->second.hwnd)) return -2;
+    ShowWindow(found->second.hwnd, SW_MAXIMIZE);
+    return 1;
+}
+
+int native_sdk_windows_unmaximize_window(Host *host, uint64_t window_id) {
+    if (!host) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return 0;
+    if (!IsZoomed(found->second.hwnd)) return 1;
+    if (!IsWindowVisible(found->second.hwnd)) return -2;
+    ShowWindow(found->second.hwnd, SW_RESTORE);
+    return 1;
+}
+
+/* The user-close request: post the same WM_CLOSE the caption close button
+ * and Alt+F4 produce, so the WM_CLOSE handler applies close_policy.
+ * native_sdk_windows_close_window stays the app's unconditional close.
+ * Posting keeps the close out of the runtime call that requested it.
+ * Returns 1 when posted, 0 for an unknown or destroyed window, -1 when
+ * the post fails. */
+int native_sdk_windows_request_close_window(Host *host, uint64_t window_id) {
+    if (!host) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return 0;
+    return PostMessageW(found->second.hwnd, WM_CLOSE, 0, 0) ? 1 : -1;
 }
 
 int native_sdk_windows_hide_window(Host *host, uint64_t window_id) {

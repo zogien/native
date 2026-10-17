@@ -815,6 +815,11 @@ pub const Runtime = struct {
     const viewTreeHasFocused = WindowViewMethods.viewTreeHasFocused;
     const viewTreeHasFocusedDepth = WindowViewMethods.viewTreeHasFocusedDepth;
 
+    const WindowControlMethods = @import("window_controls.zig").RuntimeWindowControls(Runtime);
+    pub const maximizeWindow = WindowControlMethods.maximizeWindow;
+    pub const unmaximizeWindow = WindowControlMethods.unmaximizeWindow;
+    pub const requestCloseWindow = WindowControlMethods.requestCloseWindow;
+
     const SystemServiceMethods = runtime_system_services.RuntimeSystemServices(Runtime);
     pub const readClipboard = SystemServiceMethods.readClipboard;
     pub const writeClipboard = SystemServiceMethods.writeClipboard;

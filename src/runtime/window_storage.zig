@@ -220,6 +220,9 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             const index = existing_index orelse try Self.reserveWindow(self, state.id, state.label, state.title, null, true, .allow_source_less);
             self.windows[index].info.frame = state.frame;
             self.windows[index].info.scale_factor = state.scale_factor;
+            const was_maximized = self.windows[index].info.maximized;
+            self.windows[index].info.maximized = state.maximized;
+            if (was_maximized != state.maximized) @import("window_controls.zig").announceMaximized(self, state.id, state.maximized);
             if (self.window_lifecycle_policy == null) {
                 self.windows[index].info.open = state.open;
                 self.windows[index].info.hidden = state.hidden;

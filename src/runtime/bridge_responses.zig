@@ -289,6 +289,8 @@ pub fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !vo
         window.frame.height,
         window.scale_factor,
     });
+    try writer.writeAll(",\"maximized\":");
+    try writer.writeAll(if (window.maximized) "true" else "false");
     try writer.writeByte('}');
 }
 

@@ -125,6 +125,9 @@ const WindowsEvent = extern struct {
     /// selection).
     widget_id: u64,
     menu_item_id: u32,
+    /// Window events: nonzero while the window is maximized. Every emit
+    /// carries the live value, so any frame event reports it.
+    maximized: c_int,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -166,6 +169,9 @@ extern fn native_sdk_windows_minimize_window(host: *WindowsHost, window_id: u64)
 extern fn native_sdk_windows_hide_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_show_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_close_policy(host: *WindowsHost, window_id: u64, close_policy: c_int) c_int;
+extern fn native_sdk_windows_maximize_window(host: *WindowsHost, window_id: u64) c_int;
+extern fn native_sdk_windows_unmaximize_window(host: *WindowsHost, window_id: u64) c_int;
+extern fn native_sdk_windows_request_close_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, gpu_backend_request: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_update_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_set_view_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
@@ -438,6 +444,9 @@ pub const WindowsPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .maximize_window_fn = maximizeWindow,
+                .unmaximize_window_fn = unmaximizeWindow,
+                .request_close_window_fn = requestCloseWindow,
                 .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
                 .quit_app_fn = quitApp,
@@ -658,6 +667,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
                 .open = event.open != 0,
                 .focused = event.focused != 0,
                 .hidden = event.hidden != 0,
+                .maximized = event.maximized != 0,
             } });
         },
         .view_focused => state.emit(.{ .view_focused = .{
@@ -1034,6 +1044,36 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_windows_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn maximizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    return windowControlResult(native_sdk_windows_maximize_window(self.host, window_id));
+}
+
+fn unmaximizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    return windowControlResult(native_sdk_windows_unmaximize_window(self.host, window_id));
+}
+
+fn requestCloseWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    return switch (native_sdk_windows_request_close_window(self.host, window_id)) {
+        1 => {},
+        0 => error.WindowNotFound,
+        else => error.CloseFailed,
+    };
+}
+
+/// The maximize/unmaximize host status codes (see webview2_host.cpp).
+fn windowControlResult(status: c_int) anyerror!void {
+    return switch (status) {
+        1 => {},
+        0 => error.WindowNotFound,
+        -1 => error.WindowNotResizable,
+        -2 => error.WindowHidden,
+        else => error.Unexpected,
+    };
 }
 
 fn hideWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
@@ -2759,4 +2799,96 @@ fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []cons
 
 test "windows platform module exports type" {
     _ = WindowsPlatform;
+}
+
+test "windows event declares the same fields in the same order as the C host" {
+    // WindowsEvent is written twice, here and in webview2_host.cpp, and
+    // crosses the C ABI by layout. A field added on one side only, or at
+    // a different position, shifts every later field without a compile
+    // error, so the two declarations are compared by name and order.
+    const field_names = comptime blk: {
+        const fields = @typeInfo(WindowsEvent).@"struct".fields;
+        var names: [fields.len][]const u8 = undefined;
+        for (fields, 0..) |field, index| names[index] = field.name;
+        break :blk names;
+    };
+    const host_source = @embedFile("webview2_host.cpp");
+    const header = "struct WindowsEvent {";
+    const start = (std.mem.indexOf(u8, host_source, header) orelse return error.TestExpectedEqual) + header.len;
+    const end = std.mem.indexOfPos(u8, host_source, start, "};") orelse return error.TestExpectedEqual;
+    var lines = std.mem.splitScalar(u8, host_source[start..end], '\n');
+    var count: usize = 0;
+    var in_comment = false;
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (in_comment) {
+            if (std.mem.indexOf(u8, line, "*/") != null) in_comment = false;
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "/*")) {
+            if (std.mem.indexOf(u8, line, "*/") == null) in_comment = true;
+            continue;
+        }
+        if (!std.mem.endsWith(u8, line, ";")) continue;
+        var declaration = line[0 .. line.len - 1];
+        if (std.mem.indexOfScalar(u8, declaration, '[')) |bracket| declaration = declaration[0..bracket];
+        const name_start = (std.mem.lastIndexOfAny(u8, declaration, " *") orelse return error.TestExpectedEqual) + 1;
+        try std.testing.expect(count < field_names.len);
+        try std.testing.expectEqualStrings(field_names[count], declaration[name_start..]);
+        count += 1;
+    }
+    try std.testing.expectEqual(field_names.len, count);
+}
+
+/// One exported host function's source: from `start` up to the next
+/// exported `native_sdk_windows_` definition.
+fn hostFunction(host_source: []const u8, start: usize) ?[]const u8 {
+    const end = std.mem.indexOfPos(u8, host_source, start + 1, "int native_sdk_windows_") orelse return null;
+    return host_source[start..end];
+}
+
+test "windows maximize status codes map to explicit errors" {
+    try windowControlResult(1);
+    try std.testing.expectError(error.WindowNotFound, windowControlResult(0));
+    try std.testing.expectError(error.WindowNotResizable, windowControlResult(-1));
+    try std.testing.expectError(error.WindowHidden, windowControlResult(-2));
+}
+
+test "windows maximize refuses what the system would not maximize and reports every transition" {
+    // The host verbs are C++ this suite cannot execute; pin their shape
+    // textually, like the WM_CLOSE hook test above.
+    const host_source = @embedFile("webview2_host.cpp");
+    const maximize_at = std.mem.indexOf(u8, host_source, "int native_sdk_windows_maximize_window(") orelse return error.TestExpectedEqual;
+    const maximize_fn = hostFunction(host_source, maximize_at) orelse return error.TestExpectedEqual;
+    const resizable_at = std.mem.indexOf(u8, maximize_fn, "if (!found->second.resizable) return -1;") orelse return error.TestExpectedEqual;
+    const visible_at = std.mem.indexOf(u8, maximize_fn, "if (!IsWindowVisible(found->second.hwnd)) return -2;") orelse return error.TestExpectedEqual;
+    const show_at = std.mem.indexOf(u8, maximize_fn, "ShowWindow(found->second.hwnd, SW_MAXIMIZE);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(resizable_at < show_at and visible_at < show_at);
+
+    // Every frame event carries the live state, and the top-level window
+    // procedure's WM_SIZE reports each transition, whoever caused it.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.maximized = window.hwnd && IsZoomed(window.hwnd) ? 1 : 0;") != null);
+    const proc_at = std.mem.indexOf(u8, host_source, "static LRESULT CALLBACK windowProc(") orelse return error.TestExpectedEqual;
+    const size_at = std.mem.indexOfPos(u8, host_source, proc_at, "case WM_SIZE:") orelse return error.TestExpectedEqual;
+    const next_case_at = std.mem.indexOfPos(u8, host_source, size_at, "case WM_SETFOCUS:") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, host_source[size_at..next_case_at], "emitMaximizedTransition(host, hwnd);") != null);
+
+    // A maximized chromeless window keeps the taskbar visible: without
+    // a caption the system would size it to the whole monitor.
+    const minmax_at = std.mem.indexOfPos(u8, host_source, proc_at, "case WM_GETMINMAXINFO:") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, host_source[minmax_at + "case WM_GETMINMAXINFO:".len ..], " \t\r\n"), "applyChromelessMaximizedBounds(host, hwnd, reinterpret_cast<MINMAXINFO *>(lparam));"));
+}
+
+test "windows close request posts the user's WM_CLOSE while the app's close stays direct" {
+    const host_source = @embedFile("webview2_host.cpp");
+    const request_at = std.mem.indexOf(u8, host_source, "int native_sdk_windows_request_close_window(") orelse return error.TestExpectedEqual;
+    const request_fn = hostFunction(host_source, request_at) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, request_fn, "PostMessageW(found->second.hwnd, WM_CLOSE, 0, 0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request_fn, "DestroyWindow") == null);
+
+    // The app's own close keeps bypassing the WM_CLOSE close-policy hook.
+    const close_at = std.mem.indexOf(u8, host_source, "int native_sdk_windows_close_window(") orelse return error.TestExpectedEqual;
+    const close_fn = hostFunction(host_source, close_at) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, close_fn, "DestroyWindow(found->second.hwnd);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, close_fn, "WM_CLOSE") == null);
 }

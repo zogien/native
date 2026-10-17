@@ -718,6 +718,10 @@ pub const WindowInfo = struct {
     focused: bool = false,
     /// Alive but policy-hidden — see `WindowState.hidden`.
     hidden: bool = false,
+    /// Maximized as last reported by the host's frame event, whichever
+    /// path changed it (app call, caption double-click, system menu,
+    /// keyboard shortcut). Hosts that do not report it leave it false.
+    maximized: bool = false,
 
     pub fn state(self: WindowInfo) WindowState {
         return .{
@@ -729,6 +733,7 @@ pub const WindowInfo = struct {
             .open = self.open,
             .focused = self.focused,
             .hidden = self.hidden,
+            .maximized = self.maximized,
         };
     }
 };
@@ -2708,6 +2713,23 @@ pub const PlatformServices = struct {
     /// controls — chromeless windows have no system button to click.
     /// Platforms without the concept leave this null.
     minimize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// The OS maximize and restore-from-maximized verbs for app-drawn
+    /// window controls (Windows `SW_MAXIMIZE`/`SW_RESTORE`). Hosts refuse
+    /// a non-resizable window (`error.WindowNotResizable`, the system has
+    /// no maximize affordance for it) and a window that is not on the
+    /// glass (`error.WindowHidden`). Unmaximizing a window that is not
+    /// maximized succeeds without effect. The resulting state arrives on
+    /// the window's frame event (`WindowState.maximized`). Platforms
+    /// without the verbs leave these null.
+    maximize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    unmaximize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// Ask the window to close the way the user's close button does
+    /// (Windows posts `WM_CLOSE`), so `close_policy` decides between
+    /// hiding and closing. Unlike `close_window_fn` this only queues the
+    /// request: the outcome arrives later as the host's ordinary frame
+    /// events, exactly like a user close. Platforms without the verb
+    /// leave this null.
+    request_close_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     /// Keep a live window and all of its views, but order it off the
     /// glass. The runtime marks `WindowInfo.hidden` while it is out;
     /// `show_window_fn` is the inverse. Platforms without a reliable
@@ -3165,6 +3187,21 @@ pub const PlatformServices = struct {
     pub fn minimizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const minimize_fn = self.minimize_window_fn orelse return error.UnsupportedService;
         return minimize_fn(self.context, window_id);
+    }
+
+    pub fn maximizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const maximize_fn = self.maximize_window_fn orelse return error.UnsupportedService;
+        return maximize_fn(self.context, window_id);
+    }
+
+    pub fn unmaximizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const unmaximize_fn = self.unmaximize_window_fn orelse return error.UnsupportedService;
+        return unmaximize_fn(self.context, window_id);
+    }
+
+    pub fn requestCloseWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const request_fn = self.request_close_window_fn orelse return error.UnsupportedService;
+        return request_fn(self.context, window_id);
     }
 
     pub fn hideWindow(self: PlatformServices, window_id: WindowId) anyerror!void {

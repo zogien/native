@@ -32,6 +32,8 @@ export interface NativeSdkWindowInfo {
   width: number;
   height: number;
   scale: number;
+  /** Maximized, whoever changed it; `window.zero.on("window:state", ...)` reports each change. */
+  maximized: boolean;
 }
 
 export type NativeSdkWindowTitlebarStyle =

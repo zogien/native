@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
+<title>Window Controls Quitter</title><link rel="stylesheet" href="style.css"></head>
+<body data-window="quitter">
+<header data-native-window-drag><span>Window Controls Quitter</span>
+<nav data-native-window-drag-exclude><button id="minimize">Minimize</button><button id="maximize">Maximize</button><button id="close">Close</button></nav>
+</header>
+<main>
+<p id="state">Maximized: unknown</p>
+<button id="counter">Clicks: 0</button>
+<button id="reload">Reload</button>
+<p id="error">Error: none</p>
+</main>
+<script src="app.js"></script>
+</body></html>

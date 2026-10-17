@@ -1,0 +1,64 @@
+{
+  "id": "dev.native_sdk.window_controls",
+  "name": "window-controls",
+  "display_name": "Window Controls Contract",
+  "version": "0.1.0",
+  "platforms": [
+    "windows"
+  ],
+  "permissions": [
+    "command",
+    "window"
+  ],
+  "capabilities": [
+    "webview",
+    "js_bridge",
+    "tray"
+  ],
+  "web_engine": "system",
+  "security": {
+    "navigation": {
+      "allowed_origins": [
+        "zero://app"
+      ],
+      "external_links": {
+        "action": "deny"
+      }
+    }
+  },
+  "windows": [
+    {
+      "label": "main",
+      "title": "Window Controls Main",
+      "width": 900,
+      "height": 560,
+      "titlebar": "chromeless",
+      "window_drag_regions": true,
+      "restore_state": false
+    },
+    {
+      "label": "palette",
+      "title": "Window Controls Palette",
+      "width": 520,
+      "height": 380,
+      "x": 160,
+      "y": 160,
+      "titlebar": "chromeless",
+      "window_drag_regions": true,
+      "close_policy": "hide",
+      "restore_state": false
+    },
+    {
+      "label": "quitter",
+      "title": "Window Controls Quitter",
+      "width": 520,
+      "height": 380,
+      "x": 220,
+      "y": 220,
+      "titlebar": "chromeless",
+      "resizable": false,
+      "window_drag_regions": true,
+      "restore_state": false
+    }
+  ]
+}

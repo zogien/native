@@ -448,6 +448,11 @@ pub const NullPlatform = struct {
     /// real hosts' close delegates, hiding instead of closing under
     /// `.hide`.
     window_close_policy: [max_windows]types.WindowClosePolicy = [_]types.WindowClosePolicy{.quit} ** max_windows,
+    /// Close requests (`request_close_window_fn`) not yet handled, oldest
+    /// first. The Windows host posts WM_CLOSE, so a requested close
+    /// resolves on a later loop turn; `takeQueuedCloseRequest` models it.
+    queued_close_requests: [max_windows]WindowId = [_]WindowId{0} ** max_windows,
+    queued_close_request_count: usize = 0,
     /// Test seam: refuse one OS create without retaining a window identity.
     fail_next_create_window: bool = false,
     /// Test seam: make the NEXT `close_window_fn` call fail with
@@ -918,6 +923,9 @@ pub const NullPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .maximize_window_fn = maximizeWindow,
+                .unmaximize_window_fn = unmaximizeWindow,
+                .request_close_window_fn = requestCloseWindow,
                 .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
                 .set_dock_presence_fn = setDockPresence,
@@ -1317,6 +1325,36 @@ pub const NullPlatform = struct {
         self.windows[index].focused = false;
         self.window_minimize_count[index] += 1;
         self.window_occluded[index] = true;
+    }
+
+    /// The modeled maximize: the refusals the Windows host makes, then the
+    /// state flip its WM_SIZE handler reports. `windowFrameEvent` hands a
+    /// test the frame event that report carries.
+    fn maximizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        if (!self.windows[index].open) return error.WindowNotFound;
+        if (!self.window_resizable[index]) return error.WindowNotResizable;
+        if (self.windows[index].hidden or !self.window_visible[index]) return error.WindowHidden;
+        self.windows[index].maximized = true;
+    }
+
+    fn unmaximizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        if (!self.windows[index].open) return error.WindowNotFound;
+        if (!self.windows[index].maximized) return;
+        if (self.windows[index].hidden or !self.window_visible[index]) return error.WindowHidden;
+        self.windows[index].maximized = false;
+    }
+
+    fn requestCloseWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        if (!self.windows[index].open) return error.WindowNotFound;
+        if (self.queued_close_request_count >= self.queued_close_requests.len) return error.WindowLimitReached;
+        self.queued_close_requests[self.queued_close_request_count] = window_id;
+        self.queued_close_request_count += 1;
     }
 
     fn showWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
@@ -2928,6 +2966,7 @@ pub const NullPlatform = struct {
                 .open = true,
                 .focused = false,
                 .hidden = true,
+                .maximized = info.maximized,
             } };
         }
         const info = self.windows[index];
@@ -2943,6 +2982,33 @@ pub const NullPlatform = struct {
             .open = false,
             .focused = false,
         } };
+    }
+
+    /// Test seam: drain the oldest queued close request, the modeled loop
+    /// turn on which the host handles its posted WM_CLOSE. It resolves
+    /// exactly like `userCloseWindow` (close_policy decides); dispatch the
+    /// returned event through the runtime. Null while nothing is queued,
+    /// or when the window closed before its turn (a WM_CLOSE posted to a
+    /// destroyed window is never delivered).
+    pub fn takeQueuedCloseRequest(self: *NullPlatform) ?Event {
+        if (self.queued_close_request_count == 0) return null;
+        const window_id = self.queued_close_requests[0];
+        var cursor: usize = 0;
+        while (cursor + 1 < self.queued_close_request_count) : (cursor += 1) {
+            self.queued_close_requests[cursor] = self.queued_close_requests[cursor + 1];
+        }
+        self.queued_close_request_count -= 1;
+        const index = self.findWindowIndex(window_id) orelse return null;
+        if (!self.windows[index].open) return null;
+        return self.userCloseWindow(window_id);
+    }
+
+    /// Test seam: the frame event for a window's current modeled state,
+    /// `maximized` included: what the Windows host emits when a maximize
+    /// or restore lands. Null for an unknown window.
+    pub fn windowFrameEvent(self: *const NullPlatform, window_id: WindowId) ?Event {
+        const index = self.findWindowIndex(window_id) orelse return null;
+        return .{ .window_frame_changed = self.windows[index].state() };
     }
 
     /// Test seam: the user asked the app to come back with no window on

@@ -66,6 +66,21 @@ fn minimize(context: ?*anyopaque, id: u64) !void {
     try t.call(4, id);
     try t.base.minimizeWindow(id);
 }
+fn maximize(context: ?*anyopaque, id: u64) !void {
+    const t = trace(context);
+    try t.call(5, id);
+    try t.base.maximizeWindow(id);
+}
+fn unmaximize(context: ?*anyopaque, id: u64) !void {
+    const t = trace(context);
+    try t.call(6, id);
+    try t.base.unmaximizeWindow(id);
+}
+fn requestClose(context: ?*anyopaque, id: u64) !void {
+    const t = trace(context);
+    try t.call(7, id);
+    try t.base.requestCloseWindow(id);
+}
 fn accessibility(context: ?*anyopaque, snapshot: sdk.platform.WidgetAccessibilitySnapshot) !void {
     const t = trace(context);
     const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, snapshot, .{});
@@ -91,6 +106,9 @@ const Pair = struct {
             h.runtime.options.platform.services.show_window_fn = show;
             h.runtime.options.platform.services.focus_window_fn = focus;
             h.runtime.options.platform.services.minimize_window_fn = minimize;
+            h.runtime.options.platform.services.maximize_window_fn = maximize;
+            h.runtime.options.platform.services.unmaximize_window_fn = unmaximize;
+            h.runtime.options.platform.services.request_close_window_fn = requestClose;
             if (i == 1) h.runtime.window_lifecycle_policy = observed;
             _ = try h.runtime.createWindow(.{ .id = 9007199254740993, .label = "panel", .title = "Panel", .default_frame = .init(100, 50, 400, 300), .source = sdk.platform.WebViewSource.html("panel") });
             for ([_]u64{ 1, 9007199254740993 }) |id| {
@@ -148,6 +166,9 @@ fn invokeOne(rt: *sdk.Runtime, verb: u8, id: u64) !void {
         2 => try rt.showWindow(id),
         3 => try rt.focusWindow(id),
         4 => try rt.minimizeWindow(id),
+        5 => try rt.maximizeWindow(id),
+        6 => try rt.unmaximizeWindow(id),
+        7 => try rt.requestCloseWindow(id),
         else => unreachable,
     }
 }
@@ -356,4 +377,23 @@ test "compiled window lifecycle preserves opaque replay labels and successful ca
     pair.right.runtime.restoreWindowCapabilityResult("panel", false);
     try pair.same();
     for (modes) |count| try std.testing.expect(count > 0);
+}
+test "compiled window lifecycle admits window controls exactly like minimize" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var pair = try Pair.create();
+    defer pair.destroy();
+    const panel: u64 = 9007199254740993;
+    const before = traces[1].count;
+    for ([_]u8{ 5, 6, 7 }) |verb| try pair.invoke(verb, panel);
+    try std.testing.expectEqual(before + 3, traces[1].count);
+    // A host refusal reaches both runtimes as the same error, state unchanged.
+    try pair.invoke(1, panel);
+    try pair.invoke(5, panel);
+    // Dead slots and unknown ids never reach the host.
+    try pair.invoke(0, panel);
+    const closed = traces[1].count;
+    for ([_]u8{ 5, 6, 7 }) |verb| try pair.invoke(verb, panel);
+    for ([_]u64{ 2, std.math.maxInt(u64) }) |id| for ([_]u8{ 5, 6, 7 }) |verb| try pair.invoke(verb, id);
+    try std.testing.expectEqual(closed, traces[1].count);
 }

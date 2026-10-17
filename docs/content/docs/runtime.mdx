@@ -330,3 +330,44 @@ try runtime.run(my_app.app());
     </tr>
   </tbody>
 </table>
+
+## Window controls for custom title bars
+
+A window without system caption buttons (`titlebar = .chromeless`, or a WebView page drawing its own title bar) needs the same verbs the buttons perform. `minimizeWindow(id)` minimizes; these three cover the rest:
+
+<table>
+  <thead>
+    <tr>
+      <th>Method</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>maximizeWindow(id) !void</code></td>
+      <td>Maximize the window. Fails with <code>error.WindowNotResizable</code> for a non-resizable window, which the system does not maximize either, and with <code>error.WindowHidden</code> for a window that is not on screen</td>
+    </tr>
+    <tr>
+      <td><code>unmaximizeWindow(id) !void</code></td>
+      <td>Restore a maximized window to its normal frame. A window that is not maximized is left as it is</td>
+    </tr>
+    <tr>
+      <td><code>requestCloseWindow(id) !void</code></td>
+      <td>Close the window the way its system close button or Alt+F4 does, so its <code>close_policy</code> applies: <code>.hide</code> hides it and keeps its views, <code>.quit</code> closes it and dispatches <code>window_closed</code>. The request is queued, so the result arrives as the window's frame events</td>
+    </tr>
+  </tbody>
+</table>
+
+`closeWindow(id)` keeps its meaning: the app's own unconditional close, which ignores `close_policy` and does not dispatch `window_closed`. Use `requestCloseWindow(id)` for a close button.
+
+On Windows a maximized `chromeless` window fills its monitor's work area and leaves the taskbar visible, like a window with a system title bar.
+
+`WindowInfo.maximized` reports the current state, whatever changed it: these methods, a double-click on a drag region, the system menu, a keyboard shortcut, or dragging the window to the top of the screen. A minimized window reports `false`. A page reads the same field from `window.zero.windows.list()` and hears each change as a `window:state` event, so a maximize/restore button follows the window rather than its own clicks:
+
+```js
+window.zero.on("window:state", ({ maximized }) => {
+  maximizeButton.textContent = maximized ? "Restore" : "Maximize";
+});
+```
+
+Every method fails with `error.WindowNotFound` for an unknown or closed window. The verbs are implemented on Windows; other platforms return `error.UnsupportedService`, and `maximized` stays `false` there.
