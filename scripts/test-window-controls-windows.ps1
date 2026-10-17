@@ -16,6 +16,8 @@ public static class WindowControlsNative {
  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left,Top,Right,Bottom; }
  [StructLayout(LayoutKind.Sequential)] public struct Point { public int X,Y; }
  [StructLayout(LayoutKind.Sequential)] struct MonitorInfo { public uint Size; public Rect Monitor; public Rect Work; public uint Flags; }
+ delegate bool MonitorEnumProc(IntPtr monitor,IntPtr hdc,ref Rect bounds,IntPtr data);
+ [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr hdc,IntPtr clip,MonitorEnumProc callback,IntPtr data);
  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
@@ -27,6 +29,15 @@ public static class WindowControlsNative {
   var info=new MonitorInfo();info.Size=(uint)Marshal.SizeOf(typeof(MonitorInfo));
   if(!GetMonitorInfo(MonitorFromWindow(h,2),ref info))throw new Exception("monitor unavailable");
   return info.Work;
+ }
+ public static Rect[] WorkAreas() {
+  var areas=new System.Collections.Generic.List<Rect>();
+  EnumDisplayMonitors(IntPtr.Zero,IntPtr.Zero,delegate(IntPtr monitor,IntPtr hdc,ref Rect bounds,IntPtr data) {
+   var info=new MonitorInfo();info.Size=(uint)Marshal.SizeOf(typeof(MonitorInfo));
+   if(GetMonitorInfo(monitor,ref info))areas.Add(info.Work);
+   return true;
+  },IntPtr.Zero);
+  return areas.ToArray();
  }
  public static Rect ClientOnScreen(IntPtr h) {
   Rect r;if(!GetClientRect(h,out r))throw new Exception("window unavailable");
@@ -104,6 +115,34 @@ function Double-Click-Client([IntPtr]$Handle,[int]$X,[int]$Y) {
   Start-Sleep -Milliseconds 80
  }
 }
+function Same-Rect($A,$B) {
+ return $A.Left -eq $B.Left -and $A.Top -eq $B.Top -and $A.Right -eq $B.Right -and $A.Bottom -eq $B.Bottom
+}
+function Format-Rect($R) {return "$($R.Left),$($R.Top)..$($R.Right),$($R.Bottom)"}
+function Require-FillsWorkArea([IntPtr]$Handle,[string]$Name) {
+ $work=[WindowControlsNative]::WorkArea($Handle)
+ $client=[WindowControlsNative]::ClientOnScreen($Handle)
+ if(-not (Same-Rect $client $work)){throw "$Name`: client $(Format-Rect $client) does not fill work area $(Format-Rect $work)"}
+}
+function Drag-Client([IntPtr]$Handle,[int]$X,[int]$Y,[int]$DX,[int]$DY) {
+ $point=New-Object WindowDragNative+Point
+ $scale=[WindowDragNative]::GetDpiForWindow($Handle)/96.0
+ $point.X=[int]($X*$scale);$point.Y=[int]($Y*$scale)
+ if(-not [WindowDragNative]::ClientToScreen($Handle,[ref]$point)){throw 'Client coordinate conversion failed'}
+ Require-InputOwner $Handle
+ [void][WindowDragNative]::SetCursorPos($point.X,$point.Y)
+ Start-Sleep -Milliseconds 80
+ $pressed=$false
+ try {
+  [WindowDragNative]::Button($true);$pressed=$true
+  Start-Sleep -Milliseconds 100
+  for($step=1;$step -le 8;$step++){
+   [void][WindowDragNative]::SetCursorPos($point.X+[int]($DX*$step/8),$point.Y+[int]($DY*$step/8))
+   Start-Sleep -Milliseconds 30
+  }
+ } finally {if($pressed){[WindowDragNative]::Button($false)}}
+ Start-Sleep -Milliseconds 150
+}
 function Find-Window([string]$Title) {
  $deadline=[DateTime]::UtcNow.AddSeconds(20)
  do {
@@ -122,30 +161,35 @@ try {
  $quitter=Find-Window 'Window Controls Quitter'
  foreach($handle in @($main,$palette,$quitter)){Wait-Control $handle 'Maximized: false' 15}
 
- # The page's own buttons drive the window.
- Focus-Window $main
- Click-Control $main 'Maximize'
- Wait-Until {[WindowDragNative]::IsZoomed($main)} 'page Maximize did not maximize the native window'
- Wait-Control $main 'Maximized: true'
- Wait-Control $main 'Restore'
- $work=[WindowControlsNative]::WorkArea($main)
- $client=[WindowControlsNative]::ClientOnScreen($main)
- Pass @{test='page-maximize';clientBottom=$client.Bottom;workBottom=$work.Bottom}
- if($client.Bottom -gt $work.Bottom -or $client.Top -lt $work.Top){throw "maximized chromeless window covers the taskbar: client $($client.Top)..$($client.Bottom), work area $($work.Top)..$($work.Bottom)"}
- Pass @{test='maximize-keeps-work-area'}
-
- Focus-Window $main
- Click-Control $main 'Restore'
- Wait-Until {-not [WindowDragNative]::IsZoomed($main)} 'page Restore did not restore the native window'
- Wait-Control $main 'Maximized: false'
- Wait-Control $main 'Maximize'
- Pass @{test='page-restore'}
+ # The page's own buttons drive the window, on every attached monitor:
+ # a maximized chromeless window must fill exactly that monitor's work
+ # area, taskbar left visible.
+ $monitors=[WindowControlsNative]::WorkAreas()
+ for($index=0;$index -lt $monitors.Length;$index++){
+  $work=$monitors[$index]
+  [void][WindowDragNative]::SetWindowPos($main,[IntPtr]::Zero,$work.Left+80,$work.Top+80,0,0,0x0001)
+  Wait-Until {(Same-Rect ([WindowControlsNative]::WorkArea($main)) $work)} "main window did not move onto monitor $index"
+  Focus-Window $main
+  Click-Control $main 'Maximize'
+  Wait-Until {[WindowDragNative]::IsZoomed($main)} "page Maximize did not maximize the native window on monitor $index"
+  Wait-Control $main 'Maximized: true'
+  Wait-Control $main 'Restore'
+  Require-FillsWorkArea $main "page maximize on monitor $index"
+  Pass @{test="page-maximize-monitor-$index";work=(Format-Rect $work)}
+  Focus-Window $main
+  Click-Control $main 'Restore'
+  Wait-Until {-not [WindowDragNative]::IsZoomed($main)} "page Restore did not restore the native window on monitor $index"
+  Wait-Control $main 'Maximized: false'
+  Wait-Control $main 'Maximize'
+  Pass @{test="page-restore-monitor-$index"}
+ }
 
  # A system action the app did not request still reaches the page.
  Focus-Window $main
  Double-Click-Client $main 420 22
  Wait-Until {[WindowDragNative]::IsZoomed($main)} 'caption double-click did not maximize the native window'
  Wait-Control $main 'Maximized: true'
+ Require-FillsWorkArea $main 'caption double-click maximize'
  Pass @{test='system-maximize-reaches-page'}
 
  # A page loading while maximized reads the state from the window list.
@@ -161,6 +205,17 @@ try {
  Wait-Until {-not [WindowDragNative]::IsZoomed($main)} 'SW_RESTORE did not restore the native window'
  Wait-Control $main 'Maximized: false'
  Pass @{test='system-restore-reaches-page'}
+
+ # The maximized-frame correction runs on every position change; a
+ # restored window still moves with its drag region.
+ Focus-Window $main
+ $before=[WindowDragNative]::Bounds($main)
+ Drag-Client $main 420 22 96 48
+ $after=[WindowDragNative]::Bounds($main)
+ $dx=$after.Left-$before.Left;$dy=$after.Top-$before.Top
+ if([Math]::Abs($dx-96) -gt 8 -or [Math]::Abs($dy-48) -gt 8){throw "header drag did not move the restored window: $dx,$dy"}
+ if(($after.Right-$after.Left) -ne ($before.Right-$before.Left) -or ($after.Bottom-$after.Top) -ne ($before.Bottom-$before.Top)){throw 'header drag resized the restored window'}
+ Pass @{test='restored-window-drags';dx=$dx;dy=$dy}
 
  Focus-Window $main
  Click-Control $main 'Minimize'

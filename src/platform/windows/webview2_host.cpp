@@ -5703,20 +5703,59 @@ static bool handleAppTimerMessage(Host *host, WPARAM wparam) {
  * maximized frame is the work area of the window's monitor, grown by the
  * resize frame so the borders park offscreen and the client fills the
  * work area exactly, whether an app control, a drag-region double-click,
- * or the system menu maximized it. */
-static void applyChromelessMaximizedBounds(Host *host, HWND hwnd, MINMAXINFO *info) {
-    if (!info || !chromelessWindowForHwnd(host, hwnd)) return;
+ * or the system menu maximized it. Writes that frame in screen
+ * coordinates, plus the monitor rect it was taken from. */
+static bool chromelessMaximizedFrame(HWND hwnd, HMONITOR monitor_handle, RECT *maximized, RECT *monitor_rect) {
     MONITORINFO monitor = {};
     monitor.cbSize = sizeof(monitor);
-    if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+    if (!GetMonitorInfoW(monitor_handle, &monitor)) return false;
     RECT frame = {};
     const DWORD style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
     const DWORD ex_style = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    if (!adjustWindowRectForDpi(&frame, style, GetMenu(hwnd) != nullptr, ex_style, dpiForWindow(hwnd))) return;
-    info->ptMaxPosition.x = monitor.rcWork.left - monitor.rcMonitor.left + frame.left;
-    info->ptMaxPosition.y = monitor.rcWork.top - monitor.rcMonitor.top + frame.top;
-    info->ptMaxSize.x = (monitor.rcWork.right - monitor.rcWork.left) + (frame.right - frame.left);
-    info->ptMaxSize.y = (monitor.rcWork.bottom - monitor.rcWork.top) + (frame.bottom - frame.top);
+    if (!adjustWindowRectForDpi(&frame, style, GetMenu(hwnd) != nullptr, ex_style, dpiForWindow(hwnd))) return false;
+    maximized->left = monitor.rcWork.left + frame.left;
+    maximized->top = monitor.rcWork.top + frame.top;
+    maximized->right = monitor.rcWork.right + frame.right;
+    maximized->bottom = monitor.rcWork.bottom + frame.bottom;
+    if (monitor_rect) *monitor_rect = monitor.rcMonitor;
+    return true;
+}
+
+static void applyChromelessMaximizedBounds(Host *host, HWND hwnd, MINMAXINFO *info) {
+    if (!info || !chromelessWindowForHwnd(host, hwnd)) return;
+    RECT maximized = {};
+    RECT monitor = {};
+    if (!chromelessMaximizedFrame(hwnd, MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &maximized, &monitor)) return;
+    info->ptMaxPosition.x = maximized.left - monitor.left;
+    info->ptMaxPosition.y = maximized.top - monitor.top;
+    info->ptMaxSize.x = maximized.right - maximized.left;
+    info->ptMaxSize.y = maximized.bottom - maximized.top;
+}
+
+/* WM_GETMINMAXINFO speaks in primary-monitor terms: when a window
+ * maximizes onto another monitor, the system rescales those values by
+ * the difference between the two monitors, which can overshoot a
+ * monitor larger than the primary one. So the final frame of a maximized
+ * chromeless window is set here, from the monitor it actually lands on,
+ * whatever moved it: a maximize, or a maximized window moving to another
+ * monitor. Pure z-order changes pass through. */
+static void clampChromelessMaximizedFrame(Host *host, HWND hwnd, WINDOWPOS *pos) {
+    if (!pos || ((pos->flags & SWP_NOMOVE) && (pos->flags & SWP_NOSIZE))) return;
+    if (!IsZoomed(hwnd) || !chromelessWindowForHwnd(host, hwnd)) return;
+    RECT proposed = {};
+    GetWindowRect(hwnd, &proposed);
+    if (!(pos->flags & SWP_NOMOVE)) OffsetRect(&proposed, pos->x - proposed.left, pos->y - proposed.top);
+    if (!(pos->flags & SWP_NOSIZE)) {
+        proposed.right = proposed.left + pos->cx;
+        proposed.bottom = proposed.top + pos->cy;
+    }
+    RECT maximized = {};
+    if (!chromelessMaximizedFrame(hwnd, MonitorFromRect(&proposed, MONITOR_DEFAULTTONEAREST), &maximized, nullptr)) return;
+    pos->x = maximized.left;
+    pos->y = maximized.top;
+    pos->cx = maximized.right - maximized.left;
+    pos->cy = maximized.bottom - maximized.top;
+    pos->flags &= ~(SWP_NOMOVE | SWP_NOSIZE);
 }
 
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -6057,6 +6096,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 for (auto &entry : host->windows) emit(host, entry.second, kFrame);
             }
             return 0;
+        case WM_WINDOWPOSCHANGING:
+            clampChromelessMaximizedFrame(host, hwnd, reinterpret_cast<WINDOWPOS *>(lparam));
+            break;
         case WM_GETMINMAXINFO:
             applyChromelessMaximizedBounds(host, hwnd, reinterpret_cast<MINMAXINFO *>(lparam));
             if (host) {

@@ -2874,9 +2874,14 @@ test "windows maximize refuses what the system would not maximize and reports ev
     try std.testing.expect(std.mem.indexOf(u8, host_source[size_at..next_case_at], "emitMaximizedTransition(host, hwnd);") != null);
 
     // A maximized chromeless window keeps the taskbar visible: without
-    // a caption the system would size it to the whole monitor.
+    // a caption the system would size it to the whole monitor. The
+    // min/max answer sets the size, and the position change re-derives
+    // it from the monitor the window lands on, which the min/max answer
+    // alone can get wrong on a secondary monitor larger than the primary.
     const minmax_at = std.mem.indexOfPos(u8, host_source, proc_at, "case WM_GETMINMAXINFO:") orelse return error.TestExpectedEqual;
     try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, host_source[minmax_at + "case WM_GETMINMAXINFO:".len ..], " \t\r\n"), "applyChromelessMaximizedBounds(host, hwnd, reinterpret_cast<MINMAXINFO *>(lparam));"));
+    const changing_at = std.mem.indexOfPos(u8, host_source, proc_at, "case WM_WINDOWPOSCHANGING:") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, host_source[changing_at + "case WM_WINDOWPOSCHANGING:".len ..], " \t\r\n"), "clampChromelessMaximizedFrame(host, hwnd, reinterpret_cast<WINDOWPOS *>(lparam));"));
 }
 
 test "windows close request posts the user's WM_CLOSE while the app's close stays direct" {
