@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,WindowsBase
 Add-Type -Path (Join-Path $PSScriptRoot 'window-drag-windows-native.cs')
+. (Join-Path $PSScriptRoot 'window-resize-edges-windows.ps1')
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -216,6 +217,11 @@ try {
  if([Math]::Abs($dx-96) -gt 8 -or [Math]::Abs($dy-48) -gt 8){throw "header drag did not move the restored window: $dx,$dy"}
  if(($after.Right-$after.Left) -ne ($before.Right-$before.Left) -or ($after.Bottom-$after.Top) -ne ($before.Bottom-$before.Top)){throw 'header drag resized the restored window'}
  Pass @{test='restored-window-drags';dx=$dx;dy=$dy}
+
+ # A chromeless window hands its top frame to the client: the window
+ # keeps the top resize band over the page, its buttons included.
+ $failureWindow=$main
+ Test-TopResizeEdges $main {param($result) Pass $result}
 
  Focus-Window $main
  Click-Control $main 'Minimize'

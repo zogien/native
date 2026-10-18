@@ -62,4 +62,22 @@ public static class WindowDragNative {
   if(SendInput(1,new[]{input},Marshal.SizeOf(typeof(Input)))!=1)throw new Exception("SendInput failed: "+Marshal.GetLastWin32Error());
  }
  public static Rect Bounds(IntPtr h){Rect r;if(!GetWindowRect(h,out r))throw new Exception("window unavailable");return r;}
+ [StructLayout(LayoutKind.Sequential)] public struct CursorInfo { public int Size,Flags; public IntPtr Cursor; public Point Position; }
+ [StructLayout(LayoutKind.Sequential)] struct MonitorInfo { public uint Size; public Rect Monitor; public Rect Work; public uint Flags; }
+ [DllImport("user32.dll")] static extern bool GetCursorInfo(ref CursorInfo info);
+ [DllImport("user32.dll")] static extern IntPtr LoadCursor(IntPtr instance,IntPtr name);
+ [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h,out Rect r);
+ [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h,uint flags);
+ [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr monitor,ref MonitorInfo info);
+ // A shared system cursor (IDC_* id) is the one on screen right now.
+ public static bool CursorIs(int systemCursor) {
+  var info=new CursorInfo();info.Size=Marshal.SizeOf(typeof(CursorInfo));
+  return GetCursorInfo(ref info) && info.Cursor==LoadCursor(IntPtr.Zero,(IntPtr)systemCursor);
+ }
+ public static int ClientWidth(IntPtr h){Rect r;if(!GetClientRect(h,out r))throw new Exception("window unavailable");return r.Right;}
+ public static Rect WorkArea(IntPtr h) {
+  var info=new MonitorInfo();info.Size=(uint)Marshal.SizeOf(typeof(MonitorInfo));
+  if(!GetMonitorInfo(MonitorFromWindow(h,2),ref info))throw new Exception("monitor unavailable");
+  return info.Work;
+ }
 }

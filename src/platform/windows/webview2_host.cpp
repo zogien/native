@@ -421,6 +421,9 @@ struct Window {
     /* The maximized state last reported to the runtime, so WM_SIZE emits
      * a frame event only when it changes. */
     bool maximized = false;
+    /* Same-thread child kept above content children across the top
+     * resize band (see syncTopResizeStrip); created on first need. */
+    HWND top_resize_strip = nullptr;
 };
 
 /* One rectangle of a canvas view's window-drag mirror (runtime push,
@@ -2014,6 +2017,8 @@ static void applyNativeViewState(NativeView &view, bool update_text, const std::
     applyNativeViewAccessibility(view);
 }
 
+static void syncTopResizeStrip(Host *host, uint64_t window_id);
+
 static void reorderWindowChildren(Host *host, uint64_t window_id) {
     if (!host) return;
     struct LayerItem {
@@ -2041,6 +2046,8 @@ static void reorderWindowChildren(Host *host, uint64_t window_id) {
     for (const LayerItem &item : items) {
         SetWindowPos(item.hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
+    /* Content layers never rise above the window's own resize band. */
+    syncTopResizeStrip(host, window_id);
 }
 
 static bool emitNativeCommandForHwnd(Host *host, HWND hwnd, UINT notification_code) {
@@ -2328,6 +2335,25 @@ static bool windowIsChromeless(const Window &window) {
     return window.titlebar_style == 3;
 }
 
+/* Windows whose top resize frame lives INSIDE the client, answered by
+ * the window's own WM_NCHITTEST and the top resize strip: the hidden
+ * styles, and chromeless windows. On Windows 10 a caption-less frame
+ * with any non-client top draws it as a blank white bar, so chromeless
+ * keeps real left/right/bottom borders (resize and shadow) and hands
+ * the client the top edge, the frame Tauri gives its undecorated
+ * windows. Two chromeless shapes keep the plain popup frame: transparent
+ * windows, whose per-pixel present seeds hit-testable resize bands
+ * around the client, and windows carrying a menu bar, which needs the
+ * non-client top. */
+static bool windowReclaimsTopFrame(const Window &window, bool has_menu) {
+    if (windowUsesHiddenTitlebar(window)) return true;
+    return windowIsChromeless(window) && !window.transparent && !has_menu;
+}
+
+static bool windowReclaimsTopFrame(const Window &window) {
+    return windowReclaimsTopFrame(window, window.hwnd && GetMenu(window.hwnd) != nullptr);
+}
+
 static Window *hiddenTitlebarWindowForHwnd(Host *host, HWND hwnd) {
     if (!host || !hwnd) return nullptr;
     for (auto &entry : host->windows) {
@@ -2436,6 +2462,168 @@ static BOOL adjustWindowRectForDpi(RECT *rect, DWORD style, BOOL menu, DWORD ex_
 static int hiddenFrameTopThickness(HWND hwnd) {
     const UINT dpi = dpiForWindow(hwnd);
     return systemMetricForDpi(SM_CYSIZEFRAME, dpi) + systemMetricForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+/* The top resize band's hit code for a client point: `thickness` rows
+ * tall, with corner slivers as wide as the side borders so the diagonal
+ * grips survive at the very top; HTNOWHERE outside the band. */
+static constexpr LRESULT topResizeBandHitCode(int x, int y, int client_width, int thickness, int corner) {
+    if (y < 0 || y >= thickness || x < 0 || x >= client_width) return HTNOWHERE;
+    if (x < corner) return HTTOPLEFT;
+    if (x >= client_width - corner) return HTTOPRIGHT;
+    return HTTOP;
+}
+
+static_assert(
+    topResizeBandHitCode(3, 2, 1040, 8, 8) == HTTOPLEFT &&
+    topResizeBandHitCode(8, 2, 1040, 8, 8) == HTTOP &&
+    topResizeBandHitCode(1031, 7, 1040, 8, 8) == HTTOP &&
+    topResizeBandHitCode(1032, 7, 1040, 8, 8) == HTTOPRIGHT &&
+    topResizeBandHitCode(520, 8, 1040, 8, 8) == HTNOWHERE &&
+    topResizeBandHitCode(520, -1, 1040, 8, 8) == HTNOWHERE,
+    "the top band is exactly `thickness` rows tall with `corner`-wide diagonal grips");
+
+/* The top resize band of a window that reclaims its top frame, in the
+ * window's client coordinates. Only a restored resizable window has one:
+ * a maximized window does not resize and a fixed one never does. Every
+ * surface that answers for the band — the window itself, canvas children
+ * handing it back, and the top resize strip — asks here. */
+static LRESULT topResizeBandHit(const Window &window, POINT client) {
+    if (!window.hwnd || !windowReclaimsTopFrame(window)) return HTNOWHERE;
+    if (!window.resizable || IsZoomed(window.hwnd) || IsIconic(window.hwnd)) return HTNOWHERE;
+    RECT rect = {};
+    GetClientRect(window.hwnd, &rect);
+    const UINT dpi = dpiForWindow(window.hwnd);
+    const int corner = systemMetricForDpi(SM_CXSIZEFRAME, dpi) + systemMetricForDpi(SM_CXPADDEDBORDER, dpi);
+    return topResizeBandHitCode(client.x, client.y, rect.right - rect.left, hiddenFrameTopThickness(window.hwnd), corner);
+}
+
+/* ------------------------------------------------------------------------
+ * Top resize strip.
+ *
+ * A child covering the top band must hand it back to the window. Canvas
+ * surfaces in hidden-titlebar windows do (they answer HTTRANSPARENT
+ * there), but a WebView2 child belongs to the browser process and never
+ * consults its parent, so under WebView content the band was only
+ * resizable where WebView2's own drag-region windows happened to answer
+ * it. The strip is a same-thread, unpainted child kept above every
+ * content child across the band: it answers the window's band hit codes
+ * itself (the cursor follows from them) and forwards the press to the
+ * window, whose DefWindowProc runs the system size loop. Tauri recovers
+ * the top edge of its undecorated windows the same way. WS_EX_TRANSPARENT
+ * keeps the strip out of its siblings' visible regions: the WebView
+ * containers clip siblings, and without it the band shows the window
+ * background instead of the content under it. */
+
+static Window *windowForTopResizeStrip(Host *host, HWND strip) {
+    if (!host || !strip) return nullptr;
+    for (auto &entry : host->windows) {
+        if (entry.second.top_resize_strip == strip) return &entry.second;
+    }
+    return nullptr;
+}
+
+static LRESULT CALLBACK topResizeStripProc(HWND strip, UINT message, WPARAM wparam, LPARAM lparam) {
+    Host *host = reinterpret_cast<Host *>(GetWindowLongPtrW(strip, GWLP_USERDATA));
+    switch (message) {
+        case WM_NCHITTEST: {
+            Window *window = windowForTopResizeStrip(host, strip);
+            if (!window || !window->hwnd) return HTTRANSPARENT;
+            POINT point = { (int)(short)LOWORD(lparam), (int)(short)HIWORD(lparam) };
+            ScreenToClient(window->hwnd, &point);
+            const LRESULT hit = topResizeBandHit(*window, point);
+            return hit != HTNOWHERE ? hit : HTTRANSPARENT;
+        }
+        case WM_NCLBUTTONDOWN:
+        case WM_NCLBUTTONDBLCLK:
+            /* Same thread, so the window's own non-client handling runs
+             * synchronously with the original screen point: the size loop
+             * for a press, the vertical maximize for a double-click. */
+            if (wparam == HTTOP || wparam == HTTOPLEFT || wparam == HTTOPRIGHT) {
+                Window *window = windowForTopResizeStrip(host, strip);
+                if (window && window->hwnd) return SendMessageW(window->hwnd, message, wparam, lparam);
+            }
+            break;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint = {};
+            BeginPaint(strip, &paint);
+            EndPaint(strip, &paint);
+            return 0;
+        }
+        default:
+            break;
+    }
+    return DefWindowProcW(strip, message, wparam, lparam);
+}
+
+static const wchar_t *topResizeStripClassName(Host *host) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = topResizeStripProc;
+        wc.hInstance = host->instance;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpszClassName = L"NativeSdkTopResizeStrip";
+        registered = RegisterClassExW(&wc) != 0;
+    }
+    return L"NativeSdkTopResizeStrip";
+}
+
+/* Whether any WebView container reaches into the window's top band. */
+static bool webViewCoversTopBand(Host *host, const Window &window, int band) {
+    RECT client = {};
+    GetClientRect(window.hwnd, &client);
+    const RECT band_rect = { 0, 0, client.right - client.left, band };
+    for (auto &entry : host->webviews) {
+        const ChildWebView &webview = entry.second;
+        if (webview.window_id != window.id || !webview.hwnd) continue;
+        if (!(GetWindowLongPtrW(webview.hwnd, GWL_STYLE) & WS_VISIBLE)) continue;
+        RECT bounds = {};
+        GetWindowRect(webview.hwnd, &bounds);
+        POINT top_left = { bounds.left, bounds.top };
+        POINT bottom_right = { bounds.right, bounds.bottom };
+        ScreenToClient(window.hwnd, &top_left);
+        ScreenToClient(window.hwnd, &bottom_right);
+        const RECT local = { top_left.x, top_left.y, bottom_right.x, bottom_right.y };
+        RECT overlap = {};
+        if (IntersectRect(&overlap, &local, &band_rect)) return true;
+    }
+    return false;
+}
+
+/* Show, size and raise the strip over the band of a restored resizable
+ * window that reclaims its top frame; hide it otherwise. Chromeless
+ * windows always take it: their content children answer the band as
+ * client. Hidden-titlebar windows take it only while a WebView covers the
+ * band, so canvas windows keep their own band and the DWM keeps first
+ * claim on its caption buttons. Runs after every geometry, state, or
+ * child z-order change. */
+static void syncTopResizeStrip(Host *host, uint64_t window_id) {
+    if (!host) return;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return;
+    Window &window = found->second;
+    const int band = hiddenFrameTopThickness(window.hwnd);
+    const bool wanted = windowReclaimsTopFrame(window) && window.resizable && !window.click_through &&
+        !IsZoomed(window.hwnd) && !IsIconic(window.hwnd) &&
+        (windowIsChromeless(window) || webViewCoversTopBand(host, window, band));
+    if (!wanted) {
+        if (window.top_resize_strip) ShowWindow(window.top_resize_strip, SW_HIDE);
+        return;
+    }
+    if (!window.top_resize_strip) {
+        HWND strip = CreateWindowExW(WS_EX_TRANSPARENT, topResizeStripClassName(host), L"", WS_CHILD | WS_CLIPSIBLINGS,
+            0, 0, 0, 0, window.hwnd, nullptr, host->instance, nullptr);
+        if (!strip) return;
+        SetWindowLongPtrW(strip, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(host));
+        window.top_resize_strip = strip;
+    }
+    RECT client = {};
+    GetClientRect(window.hwnd, &client);
+    SetWindowPos(window.top_resize_strip, HWND_TOP, 0, 0, client.right - client.left, band, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
 /* Height of the standard caption band (frame + caption) at the window's
@@ -3448,7 +3636,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             if (!chrome_window) break;
             POINT point = { (int)(short)LOWORD(lparam), (int)(short)HIWORD(lparam) };
             ScreenToClient(chrome_window->hwnd, &point);
-            if (chrome_window->resizable && !IsZoomed(chrome_window->hwnd) && point.y >= 0 && point.y < hiddenFrameTopThickness(chrome_window->hwnd)) return HTTRANSPARENT;
+            if (topResizeBandHit(*chrome_window, point) != HTNOWHERE) return HTTRANSPARENT;
             RECT cluster = {};
             if (captionButtonsClientRect(chrome_window->hwnd, &cluster) && PtInRect(&cluster, point)) return HTTRANSPARENT;
             if (windowDragRegionHit(host, *chrome_window, point)) return HTTRANSPARENT;
@@ -5010,6 +5198,7 @@ static void destroyAllWindows(Host *host) {
         if (entry.second.hwnd) {
             DestroyWindow(entry.second.hwnd);
             entry.second.hwnd = nullptr;
+            entry.second.top_resize_strip = nullptr;
         }
     }
 }
@@ -5339,9 +5528,11 @@ static void cleanupPendingChildWebView(Host *host, const std::string &key) {
     if (!host) return;
     auto found = host->webviews.find(key);
     if (found == host->webviews.end()) return;
+    const uint64_t window_id = found->second.window_id;
     if (found->second.controller) found->second.controller->Close();
     if (found->second.hwnd) DestroyWindow(found->second.hwnd);
     host->webviews.erase(found);
+    syncTopResizeStrip(host, window_id);
 }
 
 static void failWindowDragInitialization(Host *host, const std::string &key, HRESULT result) {
@@ -5818,21 +6009,11 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 if (def_hit != HTCLIENT) return def_hit;
                 POINT point = { (int)(short)LOWORD(lparam), (int)(short)HIWORD(lparam) };
                 ScreenToClient(hwnd, &point);
-                RECT client = {};
-                GetClientRect(hwnd, &client);
                 /* Top resize band: the caption removal moved the top
                  * frame INSIDE the client area, so hand its band back to
-                 * the system — restored and resizable windows only (a
-                 * maximized window does not resize, a fixed one never
-                 * does). Corner slivers widen to the side borders so the
-                 * diagonal grips survive at the very top. */
-                if (chrome_window->resizable && !IsZoomed(hwnd) && point.y >= 0 && point.y < hiddenFrameTopThickness(hwnd)) {
-                    const UINT dpi = dpiForWindow(hwnd);
-                    const int corner = systemMetricForDpi(SM_CXSIZEFRAME, dpi) + systemMetricForDpi(SM_CXPADDEDBORDER, dpi);
-                    if (point.x < corner) return HTTOPLEFT;
-                    if (point.x >= client.right - corner) return HTTOPRIGHT;
-                    return HTTOP;
-                }
+                 * the system. */
+                const LRESULT band_hit = topResizeBandHit(*chrome_window, point);
+                if (band_hit != HTNOWHERE) return band_hit;
                 /* Caption buttons when DwmDefWindowProc stayed silent
                  * (composition off, older cores): DefWindowProc still
                  * performs minimize/maximize/close for these hit codes,
@@ -5865,6 +6046,22 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 break;
         }
     }
+    /* Chromeless windows hand the top frame to the client (see
+     * windowReclaimsTopFrame) while restored. A maximized window keeps
+     * DefWindowProc's inset: its frame parks the borders offscreen around
+     * the work area, and the inset is what lands the client exactly on
+     * it. */
+    if (message == WM_NCCALCSIZE && wparam) {
+        Window *chromeless_window = chromelessWindowForHwnd(host, hwnd);
+        if (chromeless_window && windowReclaimsTopFrame(*chromeless_window) && !IsZoomed(hwnd)) {
+            NCCALCSIZE_PARAMS *params = reinterpret_cast<NCCALCSIZE_PARAMS *>(lparam);
+            const LONG original_top = params->rgrc[0].top;
+            const LRESULT def_result = DefWindowProcW(hwnd, WM_NCCALCSIZE, wparam, lparam);
+            if (def_result != 0) return def_result;
+            params->rgrc[0].top = original_top;
+            return 0;
+        }
+    }
     /* Chromeless windows (WS_POPUP, no caption): DefWindowProc owns the
      * resize frame when one exists; the app's window-drag regions are
      * the only caption there is, so a client-area hit inside one
@@ -5877,6 +6074,8 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (def_hit != HTCLIENT) return def_hit;
             POINT point = { (int)(short)LOWORD(lparam), (int)(short)HIWORD(lparam) };
             ScreenToClient(hwnd, &point);
+            const LRESULT band_hit = topResizeBandHit(*chromeless_window, point);
+            if (band_hit != HTNOWHERE) return band_hit;
             if (windowDragRegionHit(host, *chromeless_window, point)) return HTCAPTION;
             return HTCLIENT;
         }
@@ -5990,6 +6189,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                             applyWebViewFrame(main->second);
                         }
 #endif
+                        /* Size, maximize/restore, minimize, and dpi changes
+                         * all land here. */
+                        syncTopResizeStrip(host, entry.first);
                         emit(host, entry.second, kResize);
                     }
                 }
@@ -6109,9 +6311,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                     /* The declared floor is a CONTENT size in LOGICAL
                      * points; scale to physical pixels at this window's
                      * DPI, then convert to the outer track size for its
-                     * current style. Hidden titlebar styles carry no top
-                     * chrome (the custom WM_NCCALCSIZE hands the caption
-                     * band to the client), so their conversion skips it
+                     * current style. Styles that reclaim their top frame
+                     * carry no top chrome (the custom WM_NCCALCSIZE hands
+                     * it to the client), so their conversion skips it
                      * too. */
                     const UINT dpi = dpiForWindow(hwnd);
                     const double scale = (double)dpi / 96.0;
@@ -6124,7 +6326,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                     adjustWindowRectForDpi(&frame, style, has_menu, ex_style, dpi);
                     LONG outer_width = frame.right - frame.left;
                     LONG outer_height = frame.bottom - frame.top;
-                    if (windowUsesHiddenTitlebar(window)) {
+                    if (windowReclaimsTopFrame(window, has_menu)) {
                         const SIZE outer = hiddenOuterSizeForContent(style, ex_style, has_menu, min_content_width, min_content_height, dpi);
                         outer_width = outer.cx;
                         outer_height = outer.cy;
@@ -6183,6 +6385,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                         destroyNativeViewsForWindow(host, entry.first);
                         destroyChildWebViewsForWindow(host, entry.first);
                         entry.second.hwnd = nullptr;
+                        entry.second.top_resize_strip = nullptr;
                         /* Destroyed means closed, never hidden. */
                         entry.second.policy_hidden = false;
                         emit(host, entry.second, kWindowFrame);
@@ -6252,9 +6455,9 @@ static bool createNativeWindow(Host *host, Window &window) {
      * re-derives the frame if it lands on another monitor), then grow
      * it to the outer size for this style so the client rect lands at
      * the request. The menu bar is attached after creation, so account
-     * for it here when menus are declared. Hidden styles use the
-     * custom-calc shape (no top chrome) — plain adjustment would land
-     * their client one caption band tall. */
+     * for it here when menus are declared. Styles that reclaim their top
+     * frame use the custom-calc shape (no top chrome) — plain adjustment
+     * would land their client one caption band (or top border) tall. */
     const bool has_menu = !host->menus.empty();
     const UINT dpi = systemDpi();
     const double scale = (double)dpi / 96.0;
@@ -6264,7 +6467,7 @@ static bool createNativeWindow(Host *host, Window &window) {
     adjustWindowRectForDpi(&frame, style, has_menu ? TRUE : FALSE, 0, dpi);
     LONG outer_width = frame.right - frame.left;
     LONG outer_height = frame.bottom - frame.top;
-    if (windowUsesHiddenTitlebar(window)) {
+    if (windowReclaimsTopFrame(window, has_menu)) {
         const SIZE outer = hiddenOuterSizeForContent(style, 0, has_menu, content_width, content_height, dpi);
         outer_width = outer.cx;
         outer_height = outer.cy;
@@ -6296,13 +6499,14 @@ static bool createNativeWindow(Host *host, Window &window) {
     /* Before the first show, so a dark-scheme launch never flashes a
      * light caption. */
     applyStandardTitlebarColorScheme(window);
-    if (windowUsesHiddenTitlebar(window)) {
-        applyHiddenTitlebarFrame(window);
+    if (windowUsesHiddenTitlebar(window)) applyHiddenTitlebarFrame(window);
+    if (windowReclaimsTopFrame(window)) {
         /* The create-time WM_NCCALCSIZE ran before this window was
          * registered under its HWND, so the custom calc did not apply;
          * force one now that the map entry resolves. The callers keep
          * `window` referencing the stored map entry for exactly this. */
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        syncTopResizeStrip(host, window.id);
     }
     /* Initialize WS_EX_LAYERED through the same per-pixel path used by
      * canvas presents. A layered HWND is otherwise not displayable until
@@ -6638,6 +6842,7 @@ int native_sdk_windows_load_window_webview(Host *host, uint64_t window_id, const
             host->webviews.erase(key);
             return 0;
         }
+        syncTopResizeStrip(host, window_id);
     }
 
     ChildWebView &webview = found->second;
@@ -8042,6 +8247,7 @@ int native_sdk_windows_create_webview(Host *host, uint64_t window_id, const char
     if (!createChildWebView(host, key)) {
         DestroyWindow(hwnd);
         host->webviews.erase(key);
+        syncTopResizeStrip(host, window_id);
         return 0;
     }
     return 1;
@@ -8066,6 +8272,7 @@ int native_sdk_windows_set_webview_frame(Host *host, uint64_t window_id, const c
         found->second.controller->put_Bounds(bounds);
     }
 #endif
+    syncTopResizeStrip(host, window_id);
     return 1;
 }
 
@@ -8145,6 +8352,7 @@ int native_sdk_windows_close_webview(Host *host, uint64_t window_id, const char 
 #endif
     if (found->second.hwnd) DestroyWindow(found->second.hwnd);
     host->webviews.erase(found);
+    syncTopResizeStrip(host, window_id);
     return 1;
 }
 

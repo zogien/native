@@ -2,7 +2,7 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
 <title>Window drag contract</title><link rel="stylesheet" href="style.css"></head><body>
-<header data-native-window-drag id="header">Native SDK draggable header</header>
+<header data-native-window-drag id="header">Native SDK draggable header<div data-native-window-drag-exclude id="window-controls"><button aria-label="Minimize window">_</button><button aria-label="Close window">X</button></div></header>
 <main><h1>Window drag contract</h1><p>Drag the blue header or green surface. Double-click follows the desktop's titlebar preference.</p>
 <div class="handle" data-native-window-drag id="surface">Draggable content area
 <div data-native-window-drag-exclude><button id="counter">Clicks: 0</button><input id="text" placeholder="Type and select here" value="Select this text"></div>

@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,WindowsBase
 Add-Type -Path (Join-Path $PSScriptRoot 'window-drag-windows-native.cs')
+. (Join-Path $PSScriptRoot 'window-resize-edges-windows.ps1')
 $exe=(Resolve-Path -LiteralPath $Executable).Path
 $exampleRoot=Split-Path (Split-Path (Split-Path $exe -Parent) -Parent) -Parent
 $artifactRoot=[System.IO.Path]::GetFullPath($ArtifactDirectory)
@@ -185,6 +186,11 @@ try {
  if(-not $menuOpen){throw 'right click did not open the owning native window system menu'}
  $results.Add(@{test='native-system-menu';owner=$true})
  Write-Output ('PASS '+$results[$results.Count-1].test)
+
+ # The hidden-titlebar top frame lives in the client, under the WebView:
+ # the window keeps its top resize band, above the page's excluded
+ # window controls too.
+ Test-TopResizeEdges $main {param($result) $results.Add($result);Write-Output ('PASS '+$result.test)}
 
 
  $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $artifactRoot 'results.json') -Encoding UTF8

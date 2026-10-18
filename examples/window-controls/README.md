@@ -8,6 +8,8 @@ A Windows fixture for page-drawn title bars. Three chromeless windows draw Minim
 
 Each page shows `Maximized: true|false` from the window list and the `window:state` event, so the button follows caption double-clicks and keyboard shortcuts as well as its own clicks.
 
+On Windows a chromeless window hands its top frame to the page, so the harness also checks that the window still resizes from the top edge and both top corners, above the page's buttons too, and that a top-edge double-click maximizes it vertically.
+
 Build it, then drive it with real input:
 
 ```bash

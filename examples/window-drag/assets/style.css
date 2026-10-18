@@ -4,3 +4,5 @@ main {padding:24px;width:620px;box-sizing:border-box}
 .handle {padding:20px;margin:20px 0;background:#cfebdd;border:2px solid #25704b}
 button,input,a {font:inherit;margin:6px;padding:8px}
 output {display:block;margin-top:20px;white-space:pre-wrap}
+#window-controls {position:absolute;top:0;right:0;display:flex}
+#window-controls button {margin:0;width:46px;height:32px;padding:0}
