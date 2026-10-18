@@ -241,6 +241,10 @@ pub const max_session_journal_bytes = runtime_session_journal.max_session_journa
 pub const max_session_record_bytes = runtime_session_journal.max_session_record_bytes;
 pub const max_session_event_bytes = runtime_session_journal.max_session_event_bytes;
 
+/// Manifest `single_instance` ownership; the launcher claims it before
+/// startup and the `native-sdk.app.launches` source delivers launches.
+pub const single_instance = @import("single_instance.zig");
+
 const runtime_clock = @import("clock.zig");
 pub const Clock = runtime_clock.Clock;
 pub const TestClock = runtime_clock.TestClock;

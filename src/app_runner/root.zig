@@ -651,6 +651,30 @@ fn manifestDeclaresCredentials() bool {
     return false;
 }
 
+fn manifestSingleInstance() bool {
+    return if (comptime @hasField(@TypeOf(app_manifest), "single_instance")) app_manifest.single_instance else false;
+}
+
+/// Manifest `single_instance`: claims ownership before anything else
+/// starts. A later launch hands its working directory and arguments to
+/// the owner and exits here, its exit code naming the delivery result.
+/// Replay never claims. Only the first call claims, so an entry point may
+/// call it before its own startup work and the call in `runWithOptions`
+/// is then a no-op.
+pub fn enforceSingleInstance(init: std.process.Init) void {
+    if (comptime !manifestSingleInstance()) return;
+    if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY") != null) return;
+    const outcome = native_sdk.single_instance.claim(init.io, init.gpa, init.minimal.args, app_manifest.id) orelse return;
+    switch (outcome) {
+        .primary => {},
+        .standalone => |reason| std.log.warn("single_instance: {s}; running without instance ownership", .{reason}),
+        .secondary => |result| {
+            if (result != .delivered) std.debug.print("{s}: {s}\n", .{ app_manifest.name, result.describe() });
+            std.process.exit(result.exitCode());
+        },
+    }
+}
+
 fn menuItem(comptime item: anytype) native_sdk.MenuItem {
     return .{
         .label = if (@hasField(@TypeOf(item), "label")) item.label else "",
@@ -694,6 +718,7 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY")) |journal_path| {
         return runSessionReplay(app, options, init, journal_path);
     }
+    enforceSingleInstance(init);
     const RecordStoreType = if (comptime manifestDeclaresStore()) native_sdk.RecordStore else void;
     var record_store_value: RecordStoreType = undefined;
     var record_store_open = false;

@@ -1,13 +1,17 @@
 //! Explicit native external-producer capabilities. Portable app state and
-//! channel lifecycle stay in the app; this source owns a detached OS sampler.
+//! channel lifecycle stay in the app; `native-sdk.process.samples` owns a
+//! detached OS sampler, and `native-sdk.app.launches` hands the channel to
+//! the single-instance listener (single_instance.zig).
 const std = @import("std");
 const builtin = @import("builtin");
 const effects = @import("effects.zig");
 const clock = @import("clock.zig");
+const single_instance = @import("single_instance.zig");
 const sample_interval_ms = 500;
 const max_line_bytes = 96;
 
 pub fn start(name: []const u8, payload: []const u8, handle: effects.ChannelHandle) !void {
+    if (std.mem.eql(u8, name, single_instance.source_name)) return single_instance.attach(payload, handle);
     if (!std.mem.eql(u8, name, "native-sdk.process.samples")) return error.UnknownChannelSource;
     if (payload.len != 0) return error.InvalidChannelSourceArguments;
     if (comptime builtin.single_threaded) return error.UnsupportedChannelSource;

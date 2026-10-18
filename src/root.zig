@@ -157,6 +157,7 @@ pub const EffectChannelSourceState = runtime.EffectChannelSourceState;
 pub const EffectChannelSourceResult = runtime.EffectChannelSourceResult;
 pub const max_channel_source_payload = runtime.max_channel_source_payload;
 pub const ChannelHandle = runtime.ChannelHandle;
+pub const single_instance = runtime.single_instance;
 pub const max_effect_channels = runtime.max_effect_channels;
 pub const max_effect_channel_bytes = runtime.max_effect_channel_bytes;
 pub const max_effect_channel_pending = runtime.max_effect_channel_pending;

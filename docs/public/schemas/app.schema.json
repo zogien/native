@@ -34,6 +34,7 @@
       }
     },
     "dock_visible": { "type": "boolean", "default": true },
+    "single_instance": { "type": "boolean", "default": false },
     "persist": { "$ref": "#/$defs/persist" },
     "images": { "$ref": "#/$defs/images" },
     "service_packages": {

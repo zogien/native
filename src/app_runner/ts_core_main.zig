@@ -54,6 +54,11 @@
 //!                    when a core requests it, so packaged apps never
 //!                    depend on their process working directory for
 //!                    durable files.
+//!   single instance  app.zon's `.single_instance` claims ownership first
+//!                    thing in `main`; a later launch exits after handing
+//!                    its cwd and arguments to the owner, whose core
+//!                    receives them on the `native-sdk.app.launches`
+//!                    channel source.
 //!
 //! Editing this file is never core-level work: it carries no app logic and
 //! regenerates from the SDK on every build.
@@ -169,6 +174,9 @@ pub fn testMain(init: std.process.Init) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
+    // Before persistence, services, or any window: a later launch of a
+    // `single_instance` app exits here once the owner has its arguments.
+    runner.enforceSingleInstance(init);
     var options = appOptions(init.io);
     // The platform caches directory for this app: when the core's
     // `Cmd.audioPlay` names a URL with no cachePath, the bridge derives
