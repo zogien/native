@@ -9,6 +9,7 @@ const diagnostics = @import("diagnostics");
 const ios_tool = @import("ios.zig");
 const manifest_tool = @import("manifest.zig");
 const web_engine_tool = @import("web_engine.zig");
+const windows_installer = @import("windows_installer.zig");
 const xcodeproj_tool = @import("xcodeproj.zig");
 
 /// The SDK's default app icon (kept in sync by `zig build generate-icon`):
@@ -89,6 +90,9 @@ pub const PackageOptions = struct {
     /// Emit the ZIP consumed by the native updater. macOS only; unlike the
     /// user-facing DMG, this archive contains exactly the packaged .app.
     update_archive: bool = false,
+    /// Emit a per-user setup program beside a Windows artifact
+    /// (windows_installer.zig). Windows only.
+    installer: bool = false,
     /// The process environment, when the caller has one (the CLI). The
     /// Android artifact probes it for the SDK/NDK toolchain to assemble
     /// the debug APK; without it the generated project is still complete
@@ -161,6 +165,7 @@ pub const PackageStats = struct {
     web_layer: ?manifest_tool.WebLayer = null,
     archive_path: ?[]const u8 = null,
     update_archive_path: ?[]const u8 = null,
+    installer_path: ?[]const u8 = null,
     /// The Windows subsystem verdict: `console` when the package
     /// wrapped a CONSOLE-subsystem exe (the app will flash a terminal
     /// window behind itself on every launch), `gui` for a GUI-subsystem
@@ -282,7 +287,35 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
         if (!options.metadata.updates.enabled()) return error.UpdatesNotConfigured;
         stats.update_archive_path = try createUpdateArchive(allocator, io, options);
     }
+    if (options.installer) {
+        if (options.target != .windows) return error.UnsupportedInstallerTarget;
+        stats.installer_path = try createWindowsSetup(allocator, io, options);
+    }
     return stats;
+}
+
+/// The per-user setup program, beside the artifact directory, for the
+/// architecture of the packaged executable.
+fn createWindowsSetup(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) ![]const u8 {
+    const binary_path = options.binary_path orelse {
+        std.debug.print("error: --installer needs the app executable; pass --binary\n", .{});
+        return error.MissingBinary;
+    };
+    const arch: windows_installer.Arch = if (try peExecutableIsArm64(io, binary_path)) .aarch64 else .x86_64;
+    const executable = try std.fmt.allocPrint(allocator, "{s}.exe", .{options.metadata.name});
+    defer allocator.free(executable);
+    const file_name = try windows_installer.setupFileName(allocator, options.metadata, arch);
+    defer allocator.free(file_name);
+    const setup_path = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(options.output_path) orelse ".", file_name });
+    errdefer allocator.free(setup_path);
+    try windows_installer.createSetup(allocator, io, .{
+        .artifact_dir = options.output_path,
+        .metadata = options.metadata,
+        .executable = executable,
+        .arch = arch,
+        .output_path = setup_path,
+    });
+    return setup_path;
 }
 
 fn metadataHasCapability(metadata: manifest_tool.Metadata, name: []const u8) bool {
@@ -331,6 +364,9 @@ pub fn printDiagnostic(stats: PackageStats) void {
     }
     if (stats.update_archive_path) |archive| {
         std.debug.print("  update archive: {s}\n", .{archive});
+    }
+    if (stats.installer_path) |installer| {
+        std.debug.print("  installer: {s}\n", .{installer});
     }
 }
 
@@ -1479,7 +1515,7 @@ fn elfStringAt(strtab: []const u8, offset: u64) ?[]const u8 {
 /// Whether a PE executable targets arm64, read from the COFF machine
 /// field. Anything unrecognized falls back to x64, the default Windows
 /// build target.
-fn peExecutableIsArm64(io: std.Io, path: []const u8) !bool {
+pub fn peExecutableIsArm64(io: std.Io, path: []const u8) !bool {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     var read_buffer: [4096]u8 = undefined;
@@ -1812,7 +1848,7 @@ fn appendFmt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), comptime for
     try out.appendSlice(allocator, text);
 }
 
-fn trimExtensionDot(extension: []const u8) []const u8 {
+pub fn trimExtensionDot(extension: []const u8) []const u8 {
     if (extension.len > 0 and extension[0] == '.') return extension[1..];
     return extension;
 }
@@ -2123,7 +2159,7 @@ fn windowsRegistrationScript(allocator: std.mem.Allocator, metadata: manifest_to
     return out.toOwnedSlice(allocator);
 }
 
-fn windowsProgId(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, association: manifest_tool.FileAssociationMetadata) ![]const u8 {
+pub fn windowsProgId(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, association: manifest_tool.FileAssociationMetadata) ![]const u8 {
     const app = try windowsIdentifierComponentAlloc(allocator, metadata.id);
     defer allocator.free(app);
     const name = try windowsIdentifierComponentAlloc(allocator, association.name);

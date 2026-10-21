@@ -21,6 +21,8 @@ pub const android = @import("android.zig");
 pub const xcodeproj = @import("xcodeproj.zig");
 pub const db = @import("db.zig");
 pub const update = @import("update.zig");
+pub const zip_writer = @import("zip_writer.zig");
+pub const windows_installer = @import("windows_installer.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

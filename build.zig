@@ -236,6 +236,7 @@ pub fn build(b: *std.Build) void {
     const platform_info_mod = cli_modules.platform_info;
     const json_mod = module(b, target, optimize, "src/primitives/json/root.zig");
     const app_runner_assets_mod = module(b, target, optimize, "src/app_runner/app_assets.zig");
+    const windows_install_mod = module(b, target, optimize, "src/windows_install/tests.zig");
     const canvas_mod = module(b, target, optimize, "src/primitives/canvas/root.zig");
     canvas_mod.addImport("geometry", geometry_mod);
     canvas_mod.addImport("json", json_mod);
@@ -258,6 +259,7 @@ pub fn build(b: *std.Build) void {
     const platform_info_tests = testArtifact(b, platform_info_mod);
     const json_tests = testArtifact(b, json_mod);
     const app_runner_assets_tests = testArtifact(b, app_runner_assets_mod);
+    const windows_install_tests = testArtifact(b, windows_install_mod);
     const canvas_tests = testArtifact(b, canvas_mod);
     // Keep the GTK software-present damage math in a C-only executable: it
     // exercises the production helper without requiring GTK headers, a
@@ -658,6 +660,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(platform_info_tests).step);
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
+    test_step.dependOn(&b.addRunArtifact(windows_install_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_window_placement_tests).step);
     test_step.dependOn(&app_runner_test_run.step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
@@ -2577,6 +2580,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-app-dirs", "Run app directory module tests", app_dirs_tests);
     addTestStep(b, "test-trace", "Run trace module tests", trace_tests);
     addTestStep(b, "test-app-manifest", "Run app manifest module tests", app_manifest_tests);
+    addTestStep(b, "test-windows-install", "Run Windows setup, launcher and install switch tests", windows_install_tests);
     addTestStep(b, "test-diagnostics", "Run diagnostics module tests", diagnostics_tests);
     addTestStep(b, "test-platform-info", "Run platform info module tests", platform_info_tests);
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);

@@ -6690,6 +6690,14 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     host->app_name = slice(app_name, app_name_len);
     host->window_title = slice(window_title, window_title_len);
     host->bundle_id = slice(bundle_id, bundle_id_len);
+    /* The taskbar groups and pins windows by AppUserModelID. Name the
+     * process by its bundle id, the id the installer's Start menu
+     * shortcut carries, so the taskbar follows the app instead of the
+     * path of the executable that happened to start it. */
+    if (!host->bundle_id.empty()) {
+        const std::wstring app_user_model_id = widen(host->bundle_id);
+        SetCurrentProcessExplicitAppUserModelID(app_user_model_id.c_str());
+    }
     host->icon_path = slice(icon_path, icon_path_len);
     Window window;
     window.id = 1;

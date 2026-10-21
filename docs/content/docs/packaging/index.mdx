@@ -240,6 +240,51 @@ Windows packaging is in early development. The packager copies the binary and as
 
 The artifact keeps the executable in `bin\` and mirrors the asset tree at its app-relative path under `resources\` (`resources\assets\`, or `resources\dist\` for frontend assets). When the executable runs from `bin\`, the packaged app reads relative asset paths such as `assets/fonts/mono.ttf`, and serves a relative WebView asset root, from that `resources\` directory, whatever the working directory of the launch. A development binary outside `bin\`, or an asset missing from the package, keeps resolving against the working directory. Linux artifacts use the same layout for startup asset reads; the Linux WebView host still serves its asset root from the working directory.
 
+### Per-user installer
+
+```bash
+native package --target windows --manifest app.json --binary zig-out/bin/MyApp.exe --installer
+```
+
+`--installer` also writes `<name>-<version>-windows-<arch>-setup.exe` beside the artifact directory, for the architecture of the packaged executable. Running it installs the app for the current user, without administrator rights, and then starts it:
+
+<table>
+  <thead>
+    <tr>
+      <th>Installed</th>
+      <th>Where</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>The app</td>
+      <td><code>{"%LOCALAPPDATA%\\Programs\\<display name>\\app\\"}</code>, the artifact directory</td>
+    </tr>
+    <tr>
+      <td>The launcher</td>
+      <td><code>{"%LOCALAPPDATA%\\Programs\\<display name>\\<name>.exe"}</code>, at a path that stays the same across versions; it starts <code>{"app\\bin\\<name>.exe"}</code> with the arguments it received</td>
+    </tr>
+    <tr>
+      <td>Start menu shortcut</td>
+      <td>Points at the launcher and carries the app's bundle id as its AppUserModelID, the id the app's process also claims, so taskbar grouping and pins follow the app</td>
+    </tr>
+    <tr>
+      <td>Settings &gt; Apps entry</td>
+      <td><code>{"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\<bundle-id>"}</code></td>
+    </tr>
+    <tr>
+      <td>File associations and URL schemes</td>
+      <td>The manifest's <code>file_associations</code> and <code>url_schemes</code>, under <code>HKCU\Software\Classes</code>, opening through the launcher</td>
+    </tr>
+  </tbody>
+</table>
+
+Running a setup program again reinstalls or replaces the installed version; the app must not be running. `--silent` installs without dialogs and without starting the app, and exits with code 2 while the app runs. The setup program checks its own payload against the SHA-256 it carries before installing anything.
+
+Uninstall from Settings > Apps, or run `<name>.exe --uninstall` (`--silent` skips the confirmation). It removes the shortcut, the registry entries and the install folder. The app's data under `%LOCALAPPDATA%\<bundle-id>` stays.
+
+The SDK does not sign the setup program or the launcher. Sign `bin\<name>.exe` before packaging and the setup program after it; the launcher the setup program installs stays unsigned. The installer installs per user only; a per-machine install under Program Files is not supported.
+
 ## Frontend assets
 
 ### Bundle assets

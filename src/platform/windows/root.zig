@@ -2756,6 +2756,14 @@ test "windows webview assets resolve against the packaged resources beside bin" 
     try std.testing.expect(std.mem.indexOf(u8, resources, "return bin.substr(0, bin_slash) + L\"\\\\resources\";") != null);
 }
 
+test "windows names the process by its bundle id for the taskbar" {
+    // The installer's Start menu shortcut carries the bundle id as its
+    // AppUserModelID; the process must claim the same id.
+    const host_source = @embedFile("webview2_host.cpp");
+    const create_at = std.mem.indexOf(u8, host_source, "host->bundle_id = slice(bundle_id, bundle_id_len);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, host_source[create_at..], "SetCurrentProcessExplicitAppUserModelID(app_user_model_id.c_str());") != null);
+}
+
 test "windows audio event maps kinds and payload" {
     var event = std.mem.zeroes(WindowsEvent);
     event.audio_kind = 1;
