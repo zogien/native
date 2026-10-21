@@ -1323,7 +1323,10 @@ pub const AppInfo = struct {
     window_title: []const u8 = "",
     bundle_id: []const u8 = "dev.native_sdk.app",
     icon_path: []const u8 = "",
+    /// The manifest's feed URL, before the host expands `{target}` and
+    /// `{current_version}` for this install.
     update_feed_url: []const u8 = "",
+    /// The trusted update keys: base64 Ed25519 public keys, comma-joined.
     update_public_key: []const u8 = "",
     update_check_on_start: bool = false,
     main_window: WindowOptions = .{},

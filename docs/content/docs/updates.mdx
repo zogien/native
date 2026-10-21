@@ -33,7 +33,7 @@ Put only the public key and feed URL in `app.json`:
   "name": "my-app",
   "version": "1.0.0",
   "updates": {
-    "feed_url": "https://example.com/releases/native-update.json",
+    "feed_url": "https://example.com/releases/{target}/native-update.json",
     "public_key": "base64-ed25519-public-key",
     "check_on_start": true
   }
@@ -44,11 +44,34 @@ Legacy `app.zon` uses the same fields:
 
 ```zig
 .updates = .{
-    .feed_url = "https://example.com/releases/native-update.json",
+    .feed_url = "https://example.com/releases/{target}/native-update.json",
     .public_key = "base64-ed25519-public-key",
     .check_on_start = true,
 },
 ```
+
+Each installed app expands two placeholders in the path or query of `feed_url` before it checks:
+
+<table>
+  <thead>
+    <tr>
+      <th>Placeholder</th>
+      <th>Replaced with</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>{"{target}"}</code></td>
+      <td>The release target of the running build: <code>macos-aarch64</code> or <code>macos-x86_64</code></td>
+    </tr>
+    <tr>
+      <td><code>{"{current_version}"}</code></td>
+      <td>The installed version, for example <code>1.0.0</code>, for a feed server that answers per version</td>
+    </tr>
+  </tbody>
+</table>
+
+A feed holds the release for one target, so `{target}` lets one manifest serve every build: Apple silicon installs read `releases/macos-aarch64/native-update.json` and Intel installs read `releases/macos-x86_64/native-update.json`. A `feed_url` without placeholders serves a single target.
 
 Both URLs in the release path—the feed URL and archive URL—must use HTTPS. The Ed25519 signature remains the authority if the server or TLS endpoint is compromised.
 
@@ -88,9 +111,30 @@ native update sign \
   --output native-update.json
 ```
 
-Use `macos-aarch64` for Apple silicon and `macos-x86_64` for Intel. Publish the resulting `native-update.json` at the manifest's `feed_url`. Sign and publish one target-specific feed per app build.
+Use `macos-aarch64` for Apple silicon and `macos-x86_64` for Intel. Publish the resulting `native-update.json` at the manifest's `feed_url` with `{target}` replaced by that target. Sign and publish one feed per target.
 
-`native update sign` refuses a private key that does not match the public key embedded in the manifest, and refuses an archive whose executable does not contain the architecture named by `--target`.
+`native update sign` refuses a private key that the manifest does not trust (its `public_key` or one of its `public_keys`), and refuses an archive whose executable does not contain the architecture named by `--target`.
+
+Installed apps ignore feed fields they do not know, so later SDK versions can add fields to the feed without breaking existing installs. Apps built with SDK versions up to `0.11.0-fork.3` reject unknown fields; keep their feed URLs serving feeds signed by those versions.
+
+## Rotate the update key
+
+Installs verify a feed against every key their manifest trusts: `public_key` plus up to three `public_keys`. To move to a new key without stranding existing installs:
+
+1. Generate the new key with `native update keygen`.
+2. In the next release, set `public_key` to the new key and add the old key to `public_keys`.
+3. Sign that release's feed with the old key, which the previous release already trusts.
+4. Sign later releases with the new key, and drop the old key from `public_keys` once no supported install depends on it.
+
+```json
+"updates": {
+  "feed_url": "https://example.com/releases/{target}/native-update.json",
+  "public_key": "base64-new-public-key",
+  "public_keys": ["base64-old-public-key"]
+}
+```
+
+A lost private key cannot be rotated away from: installs that trust only that key cannot verify any later release. Keep a backup of every private key a supported release trusts.
 
 ## Trigger a check
 
@@ -109,7 +153,7 @@ The runtime consumes this command as a host action. Do not map it through a Type
 The updater verifies every release in this order:
 
 1. Decode the bounded feed envelope.
-2. Verify its exact payload bytes with the embedded Ed25519 public key.
+2. Verify its exact payload bytes with one of the app's trusted Ed25519 public keys.
 3. Match bundle ID, target architecture, and a newer semantic version.
 4. Download through HTTPS and reject redirects away from HTTPS.
 5. Match the signed archive byte size and SHA-256 digest before extraction.

@@ -62,7 +62,7 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     const url = archive_url orelse return error.InvalidArguments;
     const release_target = target orelse return error.InvalidArguments;
     if (!update_feed.archiveUrlIsValid(url)) return error.InvalidArchiveUrl;
-    if (!std.mem.eql(u8, release_target, "macos-aarch64") and !std.mem.eql(u8, release_target, "macos-x86_64")) return error.InvalidTarget;
+    if (!update_feed.isTarget(release_target)) return error.InvalidTarget;
     if (!std.mem.endsWith(u8, archive, ".zip")) return error.InvalidArchive;
     const metadata = try manifest_tool.readMetadata(allocator, io, manifest_path orelse manifest_tool.defaultPath(io) orelse "app.json");
     defer metadata.deinit(allocator);
@@ -83,12 +83,14 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     var extra: [1]u8 = undefined;
     if (try key_reader.interface.readSliceShort(&extra) != 0) return error.InvalidPrivateKey;
     const key_pair = try Ed25519.KeyPair.generateDeterministic(seed);
-    const configured_public_key = metadata.updates.public_key orelse return error.UpdatesNotConfigured;
-    var configured_public_key_bytes: [Ed25519.PublicKey.encoded_length]u8 = undefined;
-    const configured_public_key_size = std.base64.standard.Decoder.calcSizeForSlice(configured_public_key) catch return error.InvalidUpdatePublicKey;
-    if (configured_public_key_size != configured_public_key_bytes.len) return error.InvalidUpdatePublicKey;
-    std.base64.standard.Decoder.decode(&configured_public_key_bytes, configured_public_key) catch return error.InvalidUpdatePublicKey;
-    if (!std.crypto.timing_safe.eql([Ed25519.PublicKey.encoded_length]u8, key_pair.public_key.toBytes(), configured_public_key_bytes)) return error.UpdateKeyMismatch;
+    // The release's installs trust the manifest's `public_key` and any
+    // `public_keys`, so a release that rotates keys is signed with the key
+    // the installs it replaces already know.
+    if (metadata.updates.public_key == null) return error.UpdatesNotConfigured;
+    if (!metadata.updates.publicKeysAreValid()) return error.InvalidUpdatePublicKey;
+    var signing_public_key_base64: [std.base64.standard.Encoder.calcSize(Ed25519.PublicKey.encoded_length)]u8 = undefined;
+    const signing_public_key = std.base64.standard.Encoder.encode(&signing_public_key_base64, &key_pair.public_key.toBytes());
+    if (!metadata.updates.trustsPublicKey(signing_public_key)) return error.UpdateKeyMismatch;
 
     var archive_file = try std.Io.Dir.cwd().openFile(io, archive, .{});
     defer archive_file.close(io);
@@ -139,7 +141,7 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     defer output_writer.deinit();
     try std.json.Stringify.value(.{ .payload = payload_base64, .signature = &signature_base64 }, .{ .whitespace = .indent_2 }, &output_writer.writer);
     try output_writer.writer.writeByte('\n');
-    var verified = try update_feed.verifyEnvelope(allocator, output_writer.written(), configured_public_key);
+    var verified = try update_feed.verifyEnvelope(allocator, output_writer.written(), signing_public_key);
     defer verified.deinit(allocator);
     if (!std.mem.eql(u8, verified.release.bundle_id, metadata.id) or
         !std.mem.eql(u8, verified.release.version, metadata.version) or
@@ -573,4 +575,81 @@ test "update archive validation requires one matching app bundle" {
     try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, invalid_path, "com.example.demo", "1.2.3", "demo", "macos-aarch64"));
     try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.other", "1.2.3", "demo", "macos-aarch64"));
     try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.demo", "1.2.4", "demo", "macos-aarch64"));
+}
+
+test "a release that rotates update keys is signed with a key its installs already trust" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(root);
+
+    const old_key = try Ed25519.KeyPair.generateDeterministic([_]u8{0x51} ** Ed25519.KeyPair.seed_length);
+    const unrelated_key = try Ed25519.KeyPair.generateDeterministic([_]u8{0x53} ** Ed25519.KeyPair.seed_length);
+    const old_seed = old_key.secret_key.seed();
+    const unrelated_seed = unrelated_key.secret_key.seed();
+    try tmp.dir.writeFile(io, .{ .sub_path = "old.key", .data = &old_seed });
+    try tmp.dir.writeFile(io, .{ .sub_path = "unrelated.key", .data = &unrelated_seed });
+    // The new release names its new key as `public_key` and keeps the old
+    // one in `public_keys`; installs of the previous release know only
+    // the old one.
+    try tmp.dir.writeFile(io, .{ .sub_path = "app.json", .data =
+        \\{
+        \\  "id": "com.example.demo",
+        \\  "name": "demo",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/releases/{target}/native-update.json",
+        \\    "public_key": "IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9frc=",
+        \\    "public_keys": ["wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo="]
+        \\  }
+        \\}
+    });
+    var plist_buffer: [1024]u8 = undefined;
+    const plist = try updateInfoPlist("com.example.demo", "1.2.3", "demo", &plist_buffer);
+    const executable = thinMachO64(cpu_type_arm64);
+    const archive_entries = [_]StoredZipEntry{
+        .{ .name = "Demo.app/Contents/Info.plist", .data = plist },
+        .{ .name = "Demo.app/Contents/MacOS/demo", .data = &executable },
+    };
+    const archive = try storedZipAlloc(allocator, &archive_entries);
+    defer allocator.free(archive);
+    try tmp.dir.writeFile(io, .{ .sub_path = "demo.zip", .data = archive });
+
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}/app.json", .{root});
+    defer allocator.free(manifest_path);
+    const archive_path = try std.fmt.allocPrint(allocator, "{s}/demo.zip", .{root});
+    defer allocator.free(archive_path);
+    const old_key_path = try std.fmt.allocPrint(allocator, "{s}/old.key", .{root});
+    defer allocator.free(old_key_path);
+    const unrelated_key_path = try std.fmt.allocPrint(allocator, "{s}/unrelated.key", .{root});
+    defer allocator.free(unrelated_key_path);
+    const output_path = try std.fmt.allocPrint(allocator, "{s}/native-update.json", .{root});
+    defer allocator.free(output_path);
+
+    try sign(allocator, io, &.{ "--private-key", old_key_path, "--manifest", manifest_path, "--archive", archive_path, "--url", "https://example.com/demo-1.2.3.zip", "--target", "macos-aarch64", "--output", output_path });
+    const feed = try std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .limited(update_feed.max_envelope_bytes));
+    defer allocator.free(feed);
+    var verified = try update_feed.verifyEnvelope(allocator, feed, "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=");
+    defer verified.deinit(allocator);
+    try std.testing.expectEqualStrings("1.2.3", verified.release.version);
+    try std.testing.expectError(error.InvalidUpdateSignature, update_feed.verifyEnvelope(allocator, feed, "IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9frc="));
+
+    try std.testing.expectError(error.UpdateKeyMismatch, sign(allocator, io, &.{ "--private-key", unrelated_key_path, "--manifest", manifest_path, "--archive", archive_path, "--url", "https://example.com/demo-1.2.3.zip", "--target", "macos-aarch64", "--output", output_path }));
+
+    // A key that does not decode is reported as such, not as a mismatch.
+    try tmp.dir.writeFile(io, .{ .sub_path = "app.json", .data =
+        \\{
+        \\  "id": "com.example.demo",
+        \\  "name": "demo",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/releases/{target}/native-update.json",
+        \\    "public_key": "IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9frc=",
+        \\    "public_keys": ["wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=", "not-a-key"]
+        \\  }
+        \\}
+    });
+    try std.testing.expectError(error.InvalidUpdatePublicKey, sign(allocator, io, &.{ "--private-key", old_key_path, "--manifest", manifest_path, "--archive", archive_path, "--url", "https://example.com/demo-1.2.3.zip", "--target", "macos-aarch64", "--output", output_path }));
 }

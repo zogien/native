@@ -98,7 +98,7 @@ pub const RunOptions = struct {
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
             .update_feed_url = manifestUpdateString("feed_url"),
-            .update_public_key = manifestUpdateString("public_key"),
+            .update_public_key = manifestUpdatePublicKeys(),
             .update_check_on_start = manifestUpdateCheckOnStart(),
             .main_window = .{
                 .id = 1,
@@ -170,6 +170,17 @@ fn manifestUpdateString(comptime field: []const u8) []const u8 {
         .optional => value orelse "",
         else => value,
     };
+}
+
+/// The trusted update keys the updater verifies feeds against:
+/// `public_key` followed by any `public_keys`, comma-joined.
+fn manifestUpdatePublicKeys() []const u8 {
+    const primary = comptime manifestUpdateString("public_key");
+    if (comptime primary.len == 0) return "";
+    if (comptime !@hasField(@TypeOf(app_manifest.updates), "public_keys")) return primary;
+    comptime var keys: []const u8 = primary;
+    inline for (app_manifest.updates.public_keys) |key| keys = keys ++ "," ++ key;
+    return keys;
 }
 
 fn manifestUpdateCheckOnStart() bool {
@@ -1318,8 +1329,8 @@ test "RunOptions resolves manifest commands menus and shortcuts" {
     };
     var info_buffers: StateBuffers = .{};
     const app_info = options.appInfo(&info_buffers);
-    try std.testing.expectEqualStrings("https://example.com/native-update.json", app_info.update_feed_url);
-    try std.testing.expectEqualStrings("11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=", app_info.update_public_key);
+    try std.testing.expectEqualStrings("https://example.com/releases/{target}/native-update.json", app_info.update_feed_url);
+    try std.testing.expectEqualStrings("11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=,wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=", app_info.update_public_key);
     try std.testing.expect(app_info.update_check_on_start);
 
     var command_storage: CommandStorage = .{};
