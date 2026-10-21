@@ -657,17 +657,54 @@ pub fn validateSecurity(security: SecurityConfig) ValidationError!void {
 pub fn validateUpdates(updates: UpdateConfig) ValidationError!void {
     if ((updates.feed_url == null) != (updates.public_key == null)) return error.MissingRequiredField;
     if (updates.check_on_start and updates.feed_url == null) return error.MissingRequiredField;
+    if (updates.public_keys.len > 0 and updates.public_key == null) return error.MissingRequiredField;
+    if (updates.public_keys.len > types.max_update_public_keys) return error.MissingRequiredField;
     if (updates.feed_url) |url| {
         if (url.len > 4096) return error.InvalidUrl;
         if (!std.mem.startsWith(u8, url, "https://")) return error.InvalidUrl;
         try validateUrl(url);
+        try validateFeedUrlPlaceholders(url);
     }
-    if (updates.public_key) |key| {
-        var decoded: [std.crypto.sign.Ed25519.PublicKey.encoded_length]u8 = undefined;
-        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(key) catch return error.MissingRequiredField;
-        if (decoded_len != decoded.len) return error.MissingRequiredField;
-        std.base64.standard.Decoder.decode(&decoded, key) catch return error.MissingRequiredField;
-        _ = std.crypto.sign.Ed25519.PublicKey.fromBytes(decoded) catch return error.MissingRequiredField;
+    if (updates.public_key) |key| try validateUpdatePublicKey(key);
+    for (updates.public_keys, 0..) |key, index| {
+        try validateUpdatePublicKey(key);
+        if (std.mem.eql(u8, key, updates.public_key.?)) return error.MissingRequiredField;
+        for (updates.public_keys[0..index]) |previous| {
+            if (std.mem.eql(u8, key, previous)) return error.MissingRequiredField;
+        }
+    }
+}
+
+fn validateUpdatePublicKey(key: []const u8) ValidationError!void {
+    var decoded: [std.crypto.sign.Ed25519.PublicKey.encoded_length]u8 = undefined;
+    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(key) catch return error.MissingRequiredField;
+    if (decoded_len != decoded.len) return error.MissingRequiredField;
+    std.base64.standard.Decoder.decode(&decoded, key) catch return error.MissingRequiredField;
+    _ = std.crypto.sign.Ed25519.PublicKey.fromBytes(decoded) catch return error.MissingRequiredField;
+}
+
+/// A feed_url may name `{target}` and `{current_version}`, which each
+/// installed app expands for itself, in its path or query only.
+fn validateFeedUrlPlaceholders(url: []const u8) ValidationError!void {
+    const authority_start = "https://".len;
+    const authority_end = std.mem.findAnyPos(u8, url, authority_start, "/?#") orelse url.len;
+    if (std.mem.findAny(u8, url[0..authority_end], "{}") != null) return error.InvalidUrl;
+    var index = authority_end;
+    while (index < url.len) : (index += 1) {
+        switch (url[index]) {
+            '{' => {
+                const rest = url[index..];
+                const placeholder = if (std.mem.startsWith(u8, rest, "{target}"))
+                    "{target}"
+                else if (std.mem.startsWith(u8, rest, "{current_version}"))
+                    "{current_version}"
+                else
+                    return error.InvalidUrl;
+                index += placeholder.len - 1;
+            },
+            '}' => return error.InvalidUrl,
+            else => {},
+        }
     }
 }
 

@@ -79,6 +79,7 @@ const relational_store = @import("relational_store.zig");
 const credentials_store = @import("credentials_store.zig");
 const file_access = @import("file_access.zig");
 const pty_transport = @import("pty.zig");
+const update_engine = @import("../updater/engine.zig");
 
 /// Maximum in-flight effects (spawn slots / worker threads).
 pub const max_effects: usize = 16;
@@ -9665,7 +9666,8 @@ pub fn Effects(comptime Msg: type) type {
             return @import("desktop_files.zig").isName(name) or std.mem.startsWith(u8, name, "core.store.") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
-                std.mem.eql(u8, name, "native-sdk.time.formatLocal");
+                std.mem.eql(u8, name, "native-sdk.time.formatLocal") or
+                std.mem.startsWith(u8, name, update_engine.request_prefix);
         }
 
         fn isNativeHostSendName(name: []const u8) bool {
@@ -9824,6 +9826,15 @@ pub fn Effects(comptime Msg: type) type {
             }
             if (std.mem.eql(u8, name, "native-sdk.time.formatLocal")) {
                 self.performBoundSystemRequest(name, key, payload);
+                return;
+            }
+            if (std.mem.startsWith(u8, name, update_engine.request_prefix)) {
+                // The updater answers at once; its work runs off the loop
+                // and reports through the `native-sdk.updates` channel.
+                var output: [update_engine.max_response_bytes]u8 = undefined;
+                const response = update_engine.handleRequest(name, payload, &output);
+                self.feedHostResult(key, response.ok, response.bytes) catch {};
+                if (response.quit) if (self.services) |services| services.quitApp() catch {};
                 return;
             }
             const services = self.services orelse {

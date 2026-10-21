@@ -139,6 +139,12 @@
       "properties": {
         "feed_url": { "type": "string", "pattern": "^https://", "maxLength": 4096 },
         "public_key": { "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$" },
+        "public_keys": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$" }
+        },
         "check_on_start": { "type": "boolean", "default": false }
       }
     },

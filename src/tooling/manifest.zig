@@ -212,6 +212,8 @@ pub const Metadata = struct {
         if (self.url_schemes.len > 0) allocator.free(self.url_schemes);
         if (self.updates.feed_url) |value| allocator.free(value);
         if (self.updates.public_key) |value| allocator.free(value);
+        for (self.updates.public_keys) |value| allocator.free(value);
+        if (self.updates.public_keys.len > 0) allocator.free(self.updates.public_keys);
         if (self.dmg.volume_name) |value| allocator.free(value);
         if (self.dmg.background) |value| allocator.free(value);
         for (self.dmg.items) |item| {
@@ -425,10 +427,47 @@ pub const DmgMetadata = struct {
 pub const UpdateMetadata = struct {
     feed_url: ?[]const u8 = null,
     public_key: ?[]const u8 = null,
+    public_keys: []const []const u8 = &.{},
     check_on_start: bool = false,
 
     pub fn enabled(self: UpdateMetadata) bool {
         return self.feed_url != null;
+    }
+
+    /// Whether `public_key` is set and it and every `public_keys` entry
+    /// decode as base64 Ed25519 public keys.
+    pub fn publicKeysAreValid(self: UpdateMetadata) bool {
+        const primary = self.public_key orelse return false;
+        if (decodeUpdatePublicKey(primary) == null) return false;
+        for (self.public_keys) |key| {
+            if (decodeUpdatePublicKey(key) == null) return false;
+        }
+        return true;
+    }
+
+    /// Whether `public_key` or one of `public_keys` decodes to the same key
+    /// as this base64 public key.
+    pub fn trustsPublicKey(self: UpdateMetadata, public_key: []const u8) bool {
+        const wanted = decodeUpdatePublicKey(public_key) orelse return false;
+        if (self.public_key) |primary| {
+            if (decodeUpdatePublicKey(primary)) |bytes| {
+                if (std.mem.eql(u8, &bytes, &wanted)) return true;
+            }
+        }
+        for (self.public_keys) |key| {
+            if (decodeUpdatePublicKey(key)) |bytes| {
+                if (std.mem.eql(u8, &bytes, &wanted)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn decodeUpdatePublicKey(value: []const u8) ?[32]u8 {
+        var bytes: [32]u8 = undefined;
+        const size = std.base64.standard.Decoder.calcSizeForSlice(value) catch return null;
+        if (size != bytes.len) return null;
+        std.base64.standard.Decoder.decode(&bytes, value) catch return null;
+        return bytes;
     }
 };
 
@@ -580,7 +619,9 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer allocator.free(file_associations);
     const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app manifest URL schemes are invalid" };
     defer allocator.free(url_schemes);
-    const updates = convertUpdates(metadata.updates) catch return .{ .ok = false, .message = "app manifest updates are invalid - updates require an HTTPS feed_url and a base64 Ed25519 public_key; check_on_start requires both" };
+    const updates_message = "app manifest updates are invalid - updates require an HTTPS feed_url and a base64 Ed25519 public_key; public_keys adds at most 3 further distinct keys; feed_url may name {target} and {current_version} in its path or query; check_on_start requires both";
+    const updates = convertUpdates(metadata.updates) catch return .{ .ok = false, .message = updates_message };
+    app_manifest.validateUpdates(updates) catch return .{ .ok = false, .message = updates_message };
     // General manifest validation owns only values the app explicitly
     // declared. Archive-time fallbacks (notably display_name as the volume
     // name) are validated when a macOS archive is actually requested, so an
@@ -751,17 +792,18 @@ fn duplicateRawUpdates(allocator: std.mem.Allocator, raw: RawUpdates) !UpdateMet
     return .{
         .feed_url = try duplicateOptionalString(allocator, raw.feed_url),
         .public_key = try duplicateOptionalString(allocator, raw.public_key),
+        .public_keys = try duplicateStringList(allocator, raw.public_keys),
         .check_on_start = raw.check_on_start,
     };
 }
 
 fn convertUpdates(updates: UpdateMetadata) !app_manifest.UpdateConfig {
-    if (updates.feed_url == null and updates.public_key == null and !updates.check_on_start) return .{};
+    if (updates.feed_url == null and updates.public_key == null and updates.public_keys.len == 0 and !updates.check_on_start) return .{};
     const feed_url = updates.feed_url orelse return error.InvalidUpdates;
     const public_key = updates.public_key orelse return error.InvalidUpdates;
     if (!std.mem.startsWith(u8, feed_url, "https://")) return error.InvalidUpdates;
     if (public_key.len == 0) return error.InvalidUpdates;
-    return .{ .feed_url = feed_url, .public_key = public_key, .check_on_start = updates.check_on_start };
+    return .{ .feed_url = feed_url, .public_key = public_key, .public_keys = updates.public_keys, .check_on_start = updates.check_on_start };
 }
 
 fn duplicateRawServicePackages(allocator: std.mem.Allocator, packages: []const raw_manifest.RawServicePackage) ![]const ServicePackageMetadata {
@@ -2553,6 +2595,48 @@ test "JSON manifest parser carries native update configuration" {
     try std.testing.expect(metadata.updates.enabled());
     try std.testing.expect(metadata.updates.check_on_start);
     try std.testing.expectEqualStrings("https://example.com/native-update.json", metadata.updates.feed_url.?);
+}
+
+test "JSON manifest parser carries per-target feeds and rotated update keys" {
+    const metadata = try parseJsonText(std.testing.allocator,
+        \\{
+        \\  "id": "com.example.updates",
+        \\  "name": "updates",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/releases/{target}/native-update.json",
+        \\    "public_key": "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=",
+        \\    "public_keys": ["11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="]
+        \\  }
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("https://example.com/releases/{target}/native-update.json", metadata.updates.feed_url.?);
+    try std.testing.expect(metadata.updates.trustsPublicKey("wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo="));
+    try std.testing.expect(metadata.updates.trustsPublicKey("11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="));
+    try std.testing.expect(!metadata.updates.trustsPublicKey("IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9frc="));
+}
+
+test "manifest validation names the update rules" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-updates";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.json", .data =
+        \\{
+        \\  "id": "com.example.updates",
+        \\  "name": "updates",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/{arch}/native-update.json",
+        \\    "public_key": "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo="
+        \\  }
+        \\}
+    });
+    const result = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.json");
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, "{target} and {current_version}") != null);
 }
 
 test "JSON file validation rejects null with a teaching diagnostic regardless of extension case" {

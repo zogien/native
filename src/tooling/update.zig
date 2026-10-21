@@ -1,6 +1,7 @@
 const std = @import("std");
 const manifest_tool = @import("manifest.zig");
 const update_feed = @import("update_feed");
+const install_config = @import("windows_install_config");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 
@@ -50,9 +51,14 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     var target: ?[]const u8 = null;
     var release_notes: []const u8 = "";
     var output_path: []const u8 = "native-update.json";
+    var url_policy: update_feed.UrlPolicy = .{};
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const name = args[index];
+        if (std.mem.eql(u8, name, "--allow-loopback-http")) {
+            url_policy.allow_loopback_http = true;
+            continue;
+        }
         index += 1;
         if (index >= args.len) return error.InvalidArguments;
         const value = args[index];
@@ -61,15 +67,16 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     const archive = archive_path orelse return error.InvalidArguments;
     const url = archive_url orelse return error.InvalidArguments;
     const release_target = target orelse return error.InvalidArguments;
-    if (!update_feed.archiveUrlIsValid(url)) return error.InvalidArchiveUrl;
-    if (!std.mem.eql(u8, release_target, "macos-aarch64") and !std.mem.eql(u8, release_target, "macos-x86_64")) return error.InvalidTarget;
+    if (!update_feed.urlAllowed(url, url_policy)) return error.InvalidArchiveUrl;
+    if (!update_feed.isTarget(release_target)) return error.InvalidTarget;
     if (!std.mem.endsWith(u8, archive, ".zip")) return error.InvalidArchive;
     const metadata = try manifest_tool.readMetadata(allocator, io, manifest_path orelse manifest_tool.defaultPath(io) orelse "app.json");
     defer metadata.deinit(allocator);
     if (!metadata.updates.enabled()) return error.UpdatesNotConfigured;
     _ = manifest_tool.parseVersion(metadata.version) catch return error.InvalidManifestVersion;
     if (release_notes.len > 16 * 1024) return error.ReleaseNotesTooLarge;
-    validateUpdateArchive(allocator, io, archive, metadata.id, metadata.version, metadata.name, release_target) catch |err| switch (err) {
+    const validate = if (std.mem.startsWith(u8, release_target, "windows-")) &validateWindowsUpdateArchive else &validateUpdateArchive;
+    validate(allocator, io, archive, metadata.id, metadata.version, metadata.name, release_target) catch |err| switch (err) {
         error.UpdateArchitectureMismatch => return error.UpdateArchitectureMismatch,
         else => return error.InvalidArchive,
     };
@@ -83,12 +90,14 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     var extra: [1]u8 = undefined;
     if (try key_reader.interface.readSliceShort(&extra) != 0) return error.InvalidPrivateKey;
     const key_pair = try Ed25519.KeyPair.generateDeterministic(seed);
-    const configured_public_key = metadata.updates.public_key orelse return error.UpdatesNotConfigured;
-    var configured_public_key_bytes: [Ed25519.PublicKey.encoded_length]u8 = undefined;
-    const configured_public_key_size = std.base64.standard.Decoder.calcSizeForSlice(configured_public_key) catch return error.InvalidUpdatePublicKey;
-    if (configured_public_key_size != configured_public_key_bytes.len) return error.InvalidUpdatePublicKey;
-    std.base64.standard.Decoder.decode(&configured_public_key_bytes, configured_public_key) catch return error.InvalidUpdatePublicKey;
-    if (!std.crypto.timing_safe.eql([Ed25519.PublicKey.encoded_length]u8, key_pair.public_key.toBytes(), configured_public_key_bytes)) return error.UpdateKeyMismatch;
+    // The release's installs trust the manifest's `public_key` and any
+    // `public_keys`, so a release that rotates keys is signed with the key
+    // the installs it replaces already know.
+    if (metadata.updates.public_key == null) return error.UpdatesNotConfigured;
+    if (!metadata.updates.publicKeysAreValid()) return error.InvalidUpdatePublicKey;
+    var signing_public_key_base64: [std.base64.standard.Encoder.calcSize(Ed25519.PublicKey.encoded_length)]u8 = undefined;
+    const signing_public_key = std.base64.standard.Encoder.encode(&signing_public_key_base64, &key_pair.public_key.toBytes());
+    if (!metadata.updates.trustsPublicKey(signing_public_key)) return error.UpdateKeyMismatch;
 
     var archive_file = try std.Io.Dir.cwd().openFile(io, archive, .{});
     defer archive_file.close(io);
@@ -139,7 +148,7 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     defer output_writer.deinit();
     try std.json.Stringify.value(.{ .payload = payload_base64, .signature = &signature_base64 }, .{ .whitespace = .indent_2 }, &output_writer.writer);
     try output_writer.writer.writeByte('\n');
-    var verified = try update_feed.verifyEnvelope(allocator, output_writer.written(), configured_public_key);
+    var verified = try update_feed.verifyEnvelopeWithPolicy(allocator, output_writer.written(), signing_public_key, url_policy);
     defer verified.deinit(allocator);
     if (!std.mem.eql(u8, verified.release.bundle_id, metadata.id) or
         !std.mem.eql(u8, verified.release.version, metadata.version) or
@@ -149,6 +158,9 @@ fn sign(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !voi
     try atomic.file.writeStreamingAll(io, output_writer.written());
     try atomic.replace(io);
     std.debug.print("signed {s} {s} update ({d} bytes) into {s}\n", .{ metadata.displayName(), metadata.version, archive_stat.size, output_path });
+    if (!update_feed.archiveUrlIsValid(url)) {
+        std.debug.print("note: the archive URL is loopback http://; installed apps accept this feed only while NATIVE_SDK_UPDATES_FEED_URL points them at it\n", .{});
+    }
 }
 
 const max_info_plist_bytes: u64 = 1024 * 1024;
@@ -216,6 +228,72 @@ fn validateUpdateArchive(
         !plistStringValueEquals(plist, "CFBundleVersion", expected_version) or
         !plistStringValueEquals(plist, "CFBundleExecutable", expected_executable) or
         !plistStringValueEquals(plist, "CFBundlePackageType", "APPL")) return error.InvalidArchive;
+}
+
+/// A Windows update archive is the install image `native package
+/// --update-archive` writes: the app's install configuration naming this
+/// app and version, its launcher, and `bin\<name>.exe` built for the
+/// target architecture.
+fn validateWindowsUpdateArchive(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    archive_path: []const u8,
+    expected_bundle_id: []const u8,
+    expected_version: []const u8,
+    expected_name: []const u8,
+    expected_target: []const u8,
+) !void {
+    const expected_machine: u16 = if (std.mem.eql(u8, expected_target, "windows-aarch64")) 0xaa64 else if (std.mem.eql(u8, expected_target, "windows-x86_64")) 0x8664 else return error.InvalidTarget;
+    var file = try std.Io.Dir.cwd().openFile(io, archive_path, .{});
+    defer file.close(io);
+    var reader_buffer: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &reader_buffer);
+    var iterator = try std.zip.Iterator.init(&reader);
+    var filename_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var executable_name_buffer: [256]u8 = undefined;
+    const executable_name = try std.fmt.bufPrint(&executable_name_buffer, "bin/{s}.exe", .{expected_name});
+    var config_bytes: ?[]u8 = null;
+    defer if (config_bytes) |bytes| allocator.free(bytes);
+    var has_launcher = false;
+    var executable_machine: ?u16 = null;
+    var entries: usize = 0;
+
+    while (try iterator.next()) |entry| {
+        const filename = try zipEntryFilename(&reader, entry, &filename_buffer);
+        if (!zipEntryPathIsSafe(filename)) return error.InvalidArchive;
+        // Installed apps unpack with std.zip, which reads only these.
+        if (entry.compression_method != .store and entry.compression_method != .deflate) return error.InvalidArchive;
+        entries += 1;
+        if (entries > 1_000_000) return error.InvalidArchive;
+        if (std.mem.eql(u8, filename, install_config.file_name)) {
+            if (config_bytes != null) return error.InvalidArchive;
+            config_bytes = try readZipEntryAlloc(allocator, &reader, entry, filename, install_config.max_config_bytes);
+        } else if (std.mem.eql(u8, filename, "native-launcher.exe")) {
+            has_launcher = true;
+        } else if (std.ascii.eqlIgnoreCase(filename, executable_name)) {
+            var header: [4096]u8 = undefined;
+            const prefix = try readZipEntryPrefix(&reader, entry, filename, &header);
+            executable_machine = peMachine(prefix) orelse return error.InvalidArchive;
+        }
+    }
+
+    const bytes = config_bytes orelse return error.InvalidArchive;
+    var parsed = install_config.parse(allocator, bytes) catch return error.InvalidArchive;
+    defer parsed.deinit();
+    const config = parsed.value;
+    if (!std.mem.eql(u8, config.bundle_id, expected_bundle_id) or
+        !std.mem.eql(u8, config.version, expected_version) or
+        !std.mem.eql(u8, config.name, expected_name)) return error.InvalidArchive;
+    if (!has_launcher) return error.InvalidArchive;
+    const machine = executable_machine orelse return error.InvalidArchive;
+    if (machine != expected_machine) return error.UpdateArchitectureMismatch;
+}
+
+fn peMachine(header: []const u8) ?u16 {
+    if (header.len < 0x40 or header[0] != 'M' or header[1] != 'Z') return null;
+    const pe_offset: usize = std.mem.readInt(u32, header[0x3c..0x40], .little);
+    if (pe_offset + 6 > header.len or !std.mem.eql(u8, header[pe_offset..][0..4], "PE\x00\x00")) return null;
+    return std.mem.readInt(u16, header[pe_offset + 4 ..][0..2], .little);
 }
 
 const max_macho_architectures: usize = 64;
@@ -573,4 +651,144 @@ test "update archive validation requires one matching app bundle" {
     try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, invalid_path, "com.example.demo", "1.2.3", "demo", "macos-aarch64"));
     try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.other", "1.2.3", "demo", "macos-aarch64"));
     try std.testing.expectError(error.InvalidArchive, validateUpdateArchive(std.testing.allocator, std.testing.io, valid_path, "com.example.demo", "1.2.4", "demo", "macos-aarch64"));
+}
+
+test "a release that rotates update keys is signed with a key its installs already trust" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(root);
+
+    const old_key = try Ed25519.KeyPair.generateDeterministic([_]u8{0x51} ** Ed25519.KeyPair.seed_length);
+    const unrelated_key = try Ed25519.KeyPair.generateDeterministic([_]u8{0x53} ** Ed25519.KeyPair.seed_length);
+    const old_seed = old_key.secret_key.seed();
+    const unrelated_seed = unrelated_key.secret_key.seed();
+    try tmp.dir.writeFile(io, .{ .sub_path = "old.key", .data = &old_seed });
+    try tmp.dir.writeFile(io, .{ .sub_path = "unrelated.key", .data = &unrelated_seed });
+    // The new release names its new key as `public_key` and keeps the old
+    // one in `public_keys`; installs of the previous release know only
+    // the old one.
+    try tmp.dir.writeFile(io, .{ .sub_path = "app.json", .data =
+        \\{
+        \\  "id": "com.example.demo",
+        \\  "name": "demo",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/releases/{target}/native-update.json",
+        \\    "public_key": "IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9frc=",
+        \\    "public_keys": ["wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo="]
+        \\  }
+        \\}
+    });
+    var plist_buffer: [1024]u8 = undefined;
+    const plist = try updateInfoPlist("com.example.demo", "1.2.3", "demo", &plist_buffer);
+    const executable = thinMachO64(cpu_type_arm64);
+    const archive_entries = [_]StoredZipEntry{
+        .{ .name = "Demo.app/Contents/Info.plist", .data = plist },
+        .{ .name = "Demo.app/Contents/MacOS/demo", .data = &executable },
+    };
+    const archive = try storedZipAlloc(allocator, &archive_entries);
+    defer allocator.free(archive);
+    try tmp.dir.writeFile(io, .{ .sub_path = "demo.zip", .data = archive });
+
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}/app.json", .{root});
+    defer allocator.free(manifest_path);
+    const archive_path = try std.fmt.allocPrint(allocator, "{s}/demo.zip", .{root});
+    defer allocator.free(archive_path);
+    const old_key_path = try std.fmt.allocPrint(allocator, "{s}/old.key", .{root});
+    defer allocator.free(old_key_path);
+    const unrelated_key_path = try std.fmt.allocPrint(allocator, "{s}/unrelated.key", .{root});
+    defer allocator.free(unrelated_key_path);
+    const output_path = try std.fmt.allocPrint(allocator, "{s}/native-update.json", .{root});
+    defer allocator.free(output_path);
+
+    try sign(allocator, io, &.{ "--private-key", old_key_path, "--manifest", manifest_path, "--archive", archive_path, "--url", "https://example.com/demo-1.2.3.zip", "--target", "macos-aarch64", "--output", output_path });
+    const feed = try std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .limited(update_feed.max_envelope_bytes));
+    defer allocator.free(feed);
+    var verified = try update_feed.verifyEnvelope(allocator, feed, "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=");
+    defer verified.deinit(allocator);
+    try std.testing.expectEqualStrings("1.2.3", verified.release.version);
+    try std.testing.expectError(error.InvalidUpdateSignature, update_feed.verifyEnvelope(allocator, feed, "IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9frc="));
+
+    try std.testing.expectError(error.UpdateKeyMismatch, sign(allocator, io, &.{ "--private-key", unrelated_key_path, "--manifest", manifest_path, "--archive", archive_path, "--url", "https://example.com/demo-1.2.3.zip", "--target", "macos-aarch64", "--output", output_path }));
+
+    // A key that does not decode is reported as such, not as a mismatch.
+    try tmp.dir.writeFile(io, .{ .sub_path = "app.json", .data =
+        \\{
+        \\  "id": "com.example.demo",
+        \\  "name": "demo",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/releases/{target}/native-update.json",
+        \\    "public_key": "IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9frc=",
+        \\    "public_keys": ["wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=", "not-a-key"]
+        \\  }
+        \\}
+    });
+    try std.testing.expectError(error.InvalidUpdatePublicKey, sign(allocator, io, &.{ "--private-key", old_key_path, "--manifest", manifest_path, "--archive", archive_path, "--url", "https://example.com/demo-1.2.3.zip", "--target", "macos-aarch64", "--output", output_path }));
+}
+
+test "a Windows release signs its installed image and names loopback http only when asked" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(root);
+
+    const key = try Ed25519.KeyPair.generateDeterministic([_]u8{0x51} ** Ed25519.KeyPair.seed_length);
+    const seed = key.secret_key.seed();
+    try tmp.dir.writeFile(io, .{ .sub_path = "release.key", .data = &seed });
+    try tmp.dir.writeFile(io, .{ .sub_path = "app.json", .data =
+        \\{
+        \\  "id": "com.example.demo",
+        \\  "name": "demo",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/releases/{target}/native-update.json",
+        \\    "public_key": "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo="
+        \\  }
+        \\}
+    });
+    var config_writer = std.Io.Writer.Allocating.init(allocator);
+    defer config_writer.deinit();
+    try install_config.write(.{ .bundle_id = "com.example.demo", .name = "demo", .display_name = "Demo", .version = "1.2.3", .executable = "demo.exe" }, &config_writer.writer);
+    var executable = [_]u8{0} ** 0x100;
+    executable[0] = 'M';
+    executable[1] = 'Z';
+    std.mem.writeInt(u32, executable[0x3c..0x40], 0x80, .little);
+    @memcpy(executable[0x80..0x84], "PE\x00\x00");
+    std.mem.writeInt(u16, executable[0x84..0x86], 0x8664, .little);
+    const archive = try storedZipAlloc(allocator, &.{
+        .{ .name = install_config.file_name, .data = config_writer.written() },
+        .{ .name = "native-launcher.exe", .data = "launcher" },
+        .{ .name = "bin/demo.exe", .data = &executable },
+    });
+    defer allocator.free(archive);
+    try tmp.dir.writeFile(io, .{ .sub_path = "demo.zip", .data = archive });
+
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}/app.json", .{root});
+    defer allocator.free(manifest_path);
+    const archive_path = try std.fmt.allocPrint(allocator, "{s}/demo.zip", .{root});
+    defer allocator.free(archive_path);
+    const key_path = try std.fmt.allocPrint(allocator, "{s}/release.key", .{root});
+    defer allocator.free(key_path);
+    const output_path = try std.fmt.allocPrint(allocator, "{s}/native-update.json", .{root});
+    defer allocator.free(output_path);
+    const common = [_][]const u8{ "--private-key", key_path, "--manifest", manifest_path, "--archive", archive_path, "--output", output_path };
+
+    try sign(allocator, io, &(common ++ [_][]const u8{ "--url", "https://example.com/demo-1.2.3.zip", "--target", "windows-x86_64" }));
+    try std.testing.expectError(error.UpdateArchitectureMismatch, sign(allocator, io, &(common ++ [_][]const u8{ "--url", "https://example.com/demo-1.2.3.zip", "--target", "windows-aarch64" })));
+
+    const local_url = "http://127.0.0.1:8080/demo-1.2.3.zip";
+    try std.testing.expectError(error.InvalidArchiveUrl, sign(allocator, io, &(common ++ [_][]const u8{ "--url", local_url, "--target", "windows-x86_64" })));
+    try sign(allocator, io, &(common ++ [_][]const u8{ "--url", local_url, "--target", "windows-x86_64", "--allow-loopback-http" }));
+    const feed = try std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .limited(update_feed.max_envelope_bytes));
+    defer allocator.free(feed);
+    try std.testing.expectError(error.InvalidUpdatePayload, update_feed.verifyEnvelope(allocator, feed, "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo="));
+    var verified = try update_feed.verifyEnvelopeWithPolicy(allocator, feed, "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=", .{ .allow_loopback_http = true });
+    defer verified.deinit(allocator);
+    try std.testing.expectEqualStrings(local_url, verified.release.archive_url);
 }

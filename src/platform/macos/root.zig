@@ -9,6 +9,7 @@ const canvas = @import("canvas");
 // macOS mask/inset render so the Dock tile matches `native package`.
 const app_icon = canvas.app_icon;
 const updater_c_api = @import("../../updater/c_api.zig");
+const update_feed = @import("../../updater/feed.zig");
 
 comptime {
     _ = updater_c_api.native_sdk_update_verify_feed;
@@ -685,12 +686,10 @@ pub const MacPlatform = struct {
         const dock_icon = planDockIcon(app_info.icon_path);
         const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
         const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, if (app_info.dock_visible) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
-        const update_target = comptime switch (builtin.cpu.arch) {
-            .aarch64 => "macos-aarch64",
-            .x86_64 => "macos-x86_64",
-            else => "macos-unsupported",
-        };
-        native_sdk_appkit_configure_updates(host, app_info.update_feed_url.ptr, app_info.update_feed_url.len, app_info.update_public_key.ptr, app_info.update_public_key.len, if (app_info.update_check_on_start) 1 else 0, update_target.ptr, update_target.len);
+        const update_target = comptime update_feed.currentTarget() orelse "macos-unsupported";
+        var update_feed_url_buffer: [update_feed.max_feed_url_bytes]u8 = undefined;
+        const update_feed_url = expandedUpdateFeedUrl(&update_feed_url_buffer, app_info.update_feed_url, update_target, app_info.version);
+        native_sdk_appkit_configure_updates(host, update_feed_url.ptr, update_feed_url.len, app_info.update_public_key.ptr, app_info.update_public_key.len, if (app_info.update_check_on_start) 1 else 0, update_target.ptr, update_target.len);
         switch (dock_icon) {
             .host_file => {},
             .masked_render => spawnDevDockIconRender(host, app_info.icon_path),
@@ -2390,6 +2389,18 @@ fn checkForUpdates(context: ?*anyopaque, user_initiated: bool) anyerror!void {
     if (native_sdk_appkit_check_for_updates(self.host, if (user_initiated) 1 else 0) == 0) return error.UnsupportedService;
 }
 
+/// The feed URL the host fetches: the manifest's, with `{target}` and
+/// `{current_version}` expanded for this install. A URL this build cannot
+/// expand leaves updates unconfigured rather than fetching some other
+/// target's feed.
+fn expandedUpdateFeedUrl(buffer: []u8, template: []const u8, target: []const u8, version: []const u8) []const u8 {
+    if (template.len == 0) return "";
+    return update_feed.expandFeedUrl(buffer, template, target, version) catch |err| {
+        std.log.warn("updates disabled: feed_url cannot be expanded for {s} {s} ({s})", .{ target, version, @errorName(err) });
+        return "";
+    };
+}
+
 fn configureSecurityPolicy(context: ?*anyopaque, policy: security.Policy) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     var origins_buffer: [4096]u8 = undefined;
@@ -3101,6 +3112,18 @@ test "mac updater hashes archives off the main thread and treats user cancellati
     try std.testing.expect(std.mem.indexOf(u8, download_body, "strongSelf.updateDownloadCancelledByUser = YES;") != null);
     try std.testing.expect(std.mem.indexOf(u8, download_body, "if (cancelledByUser)") != null);
     try std.testing.expect(std.mem.indexOf(u8, download_body, "strongSelf.updateCheckRunning = NO;") != null);
+}
+
+test "mac updater fetches the feed URL expanded for this install" {
+    var buffer: [update_feed.max_feed_url_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "https://example.com/releases/macos-aarch64/native-update.json?from=1.2.3",
+        expandedUpdateFeedUrl(&buffer, "https://example.com/releases/{target}/native-update.json?from={current_version}", "macos-aarch64", "1.2.3"),
+    );
+    try std.testing.expectEqualStrings("", expandedUpdateFeedUrl(&buffer, "", "macos-aarch64", "1.2.3"));
+    // A build with no release format fetches nothing rather than another
+    // target's feed.
+    try std.testing.expectEqualStrings("", expandedUpdateFeedUrl(&buffer, "https://example.com/{target}.json", "macos-unsupported", "1.2.3"));
 }
 
 test "mac updater binds packaged releases to the installed bundle identity" {

@@ -60,6 +60,7 @@ pub const RawManifest = struct {
 pub const RawUpdates = struct {
     feed_url: ?[]const u8 = null,
     public_key: ?[]const u8 = null,
+    public_keys: []const []const u8 = &.{},
     check_on_start: bool = false,
 };
 

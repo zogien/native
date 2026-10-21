@@ -105,15 +105,15 @@ pub fn main(init: std.process.Init) !void {
         };
     } else if (std.mem.eql(u8, command, "update")) {
         tooling.update.run(allocator, init.io, args[2..]) catch |err| switch (err) {
-            error.InvalidArguments => fail("usage: native update keygen [--private-key path] | sign --archive app.zip --url https://example.com/app.zip --target macos-aarch64|macos-x86_64 [--manifest app.json] [--private-key path] [--notes text] [--output native-update.json]"),
+            error.InvalidArguments => fail("usage: native update keygen [--private-key path] | sign --archive app.zip --url https://example.com/app.zip --target macos-aarch64|macos-x86_64|windows-x86_64|windows-aarch64 [--manifest app.json] [--private-key path] [--notes text] [--output native-update.json] [--allow-loopback-http]"),
             error.KeyAlreadyExists => fail("the private update key already exists; choose another --private-key path or move the existing key explicitly"),
-            error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS and be at most 4096 bytes"),
-            error.InvalidTarget => fail("update target must be macos-aarch64 or macos-x86_64"),
+            error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS and be at most 4096 bytes (--allow-loopback-http also admits http://127.0.0.1, http://[::1] and http://localhost for local testing)"),
+            error.InvalidTarget => fail("update target must be macos-aarch64, macos-x86_64, windows-x86_64 or windows-aarch64"),
             error.UpdateArchitectureMismatch => fail("the update archive executable does not contain the architecture named by --target"),
-            error.InvalidArchive => fail("the update archive must be a non-empty .zip containing the packaged .app bundle"),
+            error.InvalidArchive => fail("the update archive must be the .zip `native package --update-archive` writes: the packaged .app bundle for macOS, the installed app image for Windows"),
             error.UpdatesNotConfigured => fail("the app manifest has no updates block; add feed_url and public_key before signing releases"),
             error.InvalidManifestVersion => fail("the app manifest version must use canonical X.Y.Z numeric components without leading zeroes"),
-            error.InvalidUpdatePublicKey => fail("the app manifest update public_key is not a valid base64 Ed25519 public key"),
+            error.InvalidUpdatePublicKey => fail("the app manifest update public_key or a public_keys entry is not a valid base64 Ed25519 public key"),
             error.UpdateKeyMismatch => fail("the private update key does not match the public_key embedded in the app manifest"),
             error.GeneratedFeedInvalid => fail("the generated update feed failed its own verification; no feed was written"),
             else => return err,
@@ -204,9 +204,9 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("bundled {d} assets into {s}\n", .{ stats.asset_count, output_dir });
     } else if (std.mem.eql(u8, command, "package")) {
         checkVerbFlags("package", args[2..], .{
-            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive]",
+            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive] [--installer]",
             .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--service-binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--notary-profile", "--optimize" },
-            .bool_flags = &.{ "--cef-auto-install", "--notarize", "--archive", "--update-archive" },
+            .bool_flags = &.{ "--cef-auto-install", "--notarize", "--archive", "--update-archive", "--installer" },
         });
         const manifest_path = try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(init.io) orelse "app.json";
         const metadata = tooling.manifest.readMetadata(allocator, init.io, manifest_path) catch |err| switch (err) {
@@ -283,6 +283,7 @@ pub fn main(init: std.process.Init) !void {
             .archive = archive,
             .notarize = flagBool(args, "--notarize"),
             .update_archive = flagBool(args, "--update-archive"),
+            .installer = flagBool(args, "--installer"),
             .env_map = init.environ_map,
         });
         tooling.package.printDiagnostic(stats);
@@ -485,7 +486,7 @@ fn usage() void {
         \\  doctor [--strict] [--manifest app.json] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.json|app.zon]
         \\  bundle-assets [app.json|app.zon] [assets] [output]
-        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive]
+        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive] [--installer]
         \\  dev [--manifest app.json] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
         \\  package-windows [--output path] [--binary path] [--service-binary path]
         \\  package-linux [--output path] [--binary path] [--service-binary path]

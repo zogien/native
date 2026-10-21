@@ -1,21 +1,65 @@
 //! Explicit native external-producer capabilities. Portable app state and
 //! channel lifecycle stay in the app; `native-sdk.process.samples` owns a
-//! detached OS sampler, and `native-sdk.app.launches` hands the channel to
-//! the single-instance listener (single_instance.zig).
+//! detached OS sampler, `native-sdk.app.launches` hands the channel to
+//! the single-instance listener (single_instance.zig), and
+//! `native-sdk.updates` receives the updater's status records
+//! (updater/engine.zig).
 const std = @import("std");
 const builtin = @import("builtin");
 const effects = @import("effects.zig");
 const clock = @import("clock.zig");
 const single_instance = @import("single_instance.zig");
+const update_engine = @import("../updater/engine.zig");
 const sample_interval_ms = 500;
 const max_line_bytes = 96;
 
 pub fn start(name: []const u8, payload: []const u8, handle: effects.ChannelHandle) !void {
     if (std.mem.eql(u8, name, single_instance.source_name)) return single_instance.attach(payload, handle);
+    if (std.mem.eql(u8, name, update_engine.channel_source)) return attachUpdates(payload, handle);
     if (!std.mem.eql(u8, name, "native-sdk.process.samples")) return error.UnknownChannelSource;
     if (payload.len != 0) return error.InvalidChannelSourceArguments;
     if (comptime builtin.single_threaded) return error.UnsupportedChannelSource;
     try startSamplerThread(handle);
+}
+
+/// The open `native-sdk.updates` channels, each the engine's sink. A slot
+/// frees itself when its channel answers `.closed`.
+const UpdateChannel = struct {
+    handle: effects.ChannelHandle = undefined,
+    used: std.atomic.Value(bool) = .init(false),
+
+    fn post(context: *anyopaque, bytes: []const u8) update_engine.Posted {
+        const self: *UpdateChannel = @ptrCast(@alignCast(context));
+        return switch (self.handle.post(bytes)) {
+            .accepted => .delivered,
+            .dropped_full, .dropped_oversized => .dropped,
+            .closed => {
+                self.used.store(false, .release);
+                return .closed;
+            },
+        };
+    }
+};
+var update_channels: [4]UpdateChannel = .{UpdateChannel{}} ** 4;
+
+comptime {
+    // Every status record fits one post; notes travel by request.
+    std.debug.assert(update_engine.max_status_bytes <= effects.max_effect_channel_bytes);
+}
+
+fn attachUpdates(payload: []const u8, handle: effects.ChannelHandle) !void {
+    if (payload.len != 0) return error.InvalidChannelSourceArguments;
+    for (&update_channels) |*channel| {
+        if (channel.used.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            channel.handle = handle;
+            update_engine.attach(.{ .context = channel, .post = UpdateChannel.post }) catch {
+                channel.used.store(false, .release);
+                return error.UnsupportedChannelSource;
+            };
+            return;
+        }
+    }
+    return error.UnsupportedChannelSource;
 }
 
 fn startSamplerThread(handle: effects.ChannelHandle) std.Thread.SpawnError!void {

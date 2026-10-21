@@ -647,8 +647,14 @@ pub const PackageMetadata = struct {
 pub const UpdateConfig = struct {
     feed_url: ?[]const u8 = null,
     public_key: ?[]const u8 = null,
+    /// Further trusted keys beside `public_key`, so a release signed with
+    /// a key being rotated out still verifies on installs that know it.
+    public_keys: []const []const u8 = &.{},
     check_on_start: bool = false,
 };
+
+/// `public_key` plus at most this many `public_keys`.
+pub const max_update_public_keys: usize = 3;
 
 pub const PersistRestore = struct {
     ok: []const u8,

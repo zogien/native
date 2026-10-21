@@ -2,8 +2,9 @@
     .id = "dev.native_sdk.runner_fixture",
     .name = "runner-fixture",
     .updates = .{
-        .feed_url = "https://example.com/native-update.json",
+        .feed_url = "https://example.com/releases/{target}/native-update.json",
         .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        .public_keys = .{"wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo="},
         .check_on_start = true,
     },
     .commands = .{

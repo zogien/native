@@ -43,6 +43,12 @@ pub fn createModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     tooling.addImport("android_host", module(b, target, optimize, "src/platform/android/files.zig"));
     tooling.addImport("sqlite_engine", module(b, target, optimize, "src/runtime/sqlite_engine.zig"));
     tooling.addImport("update_feed", module(b, target, optimize, "src/updater/feed.zig"));
+    tooling.addImport("windows_install_config", module(b, target, optimize, "src/windows_install/config.zig"));
+    tooling.addImport("windows_install_payload", module(b, target, optimize, "src/windows_install/payload.zig"));
+    // `native package --installer` writes the Windows setup program and
+    // launcher from these prebuilt copies, so packaging needs no compiler.
+    tooling.addAnonymousImport("windows_launcher_x86_64", .{ .root_source_file = windowsLauncher(b, .x86_64).getEmittedBin() });
+    tooling.addAnonymousImport("windows_launcher_aarch64", .{ .root_source_file = windowsLauncher(b, .aarch64).getEmittedBin() });
     tooling.addIncludePath(b.path("third_party/sqlite"));
     tooling.addCSourceFile(.{
         .file = b.path("third_party/sqlite/sqlite3.c"),
@@ -99,6 +105,22 @@ pub fn buildCommit(b: *std.Build) []const u8 {
     const trimmed = std.mem.trim(u8, output, " \n\r\t");
     if (trimmed.len == 0) return "unknown";
     return trimmed;
+}
+
+/// The Windows setup program, launcher and uninstaller of installed apps
+/// (src/windows_install), built for one Windows architecture.
+fn windowsLauncher(b: *std.Build, arch: std.Target.Cpu.Arch) *std.Build.Step.Compile {
+    const launcher = b.addExecutable(.{
+        .name = "native-launcher",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/windows_install/main.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .windows }),
+            .optimize = .ReleaseSmall,
+            .strip = true,
+        }),
+    });
+    launcher.subsystem = .windows;
+    return launcher;
 }
 
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {

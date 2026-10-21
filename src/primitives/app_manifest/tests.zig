@@ -125,6 +125,32 @@ test "updates require paired HTTPS feed and Ed25519 public key" {
     }));
 }
 
+test "update feed URLs may name the target and installed version" {
+    const key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
+    try validateUpdates(.{ .feed_url = "https://example.com/releases/{target}/native-update.json", .public_key = key });
+    try validateUpdates(.{ .feed_url = "https://example.com/feed?target={target}&from={current_version}", .public_key = key });
+    try std.testing.expectError(error.InvalidUrl, validateUpdates(.{ .feed_url = "https://example.com/{arch}/native-update.json", .public_key = key }));
+    try std.testing.expectError(error.InvalidUrl, validateUpdates(.{ .feed_url = "https://example.com/{target/native-update.json", .public_key = key }));
+    try std.testing.expectError(error.InvalidUrl, validateUpdates(.{ .feed_url = "https://example.com/target}/native-update.json", .public_key = key }));
+    try std.testing.expectError(error.InvalidUrl, validateUpdates(.{ .feed_url = "https://{target}.example.com/native-update.json", .public_key = key }));
+}
+
+test "update public_keys add distinct trusted keys beside public_key" {
+    const key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
+    const other = "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=";
+    const rotated = [_][]const u8{other};
+    try validateUpdates(.{ .feed_url = "https://example.com/native-update.json", .public_key = key, .public_keys = &rotated });
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{ .public_keys = &rotated }));
+    const repeated = [_][]const u8{key};
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{ .feed_url = "https://example.com/native-update.json", .public_key = key, .public_keys = &repeated }));
+    const duplicated = [_][]const u8{ other, other };
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{ .feed_url = "https://example.com/native-update.json", .public_key = key, .public_keys = &duplicated }));
+    const malformed = [_][]const u8{"not-a-public-key"};
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{ .feed_url = "https://example.com/native-update.json", .public_key = key, .public_keys = &malformed }));
+    const too_many = [_][]const u8{ other, "IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9frc=", "+AzM3OSuHAeuIIoq35mjEK5CB+Awb6AjYRCwaCe7uNA=", "n0lDnp2wlbxBEe0l01eV2DG8VaBH9LHX9q7jd3u0EiA=" };
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{ .feed_url = "https://example.com/native-update.json", .public_key = key, .public_keys = &too_many }));
+}
+
 test "accessory startup requires the tray capability" {
     const tray_capabilities = [_]Capability{.tray};
     try validateManifest(.{

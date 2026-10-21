@@ -9,6 +9,7 @@ const diagnostics = @import("diagnostics");
 const ios_tool = @import("ios.zig");
 const manifest_tool = @import("manifest.zig");
 const web_engine_tool = @import("web_engine.zig");
+const windows_installer = @import("windows_installer.zig");
 const xcodeproj_tool = @import("xcodeproj.zig");
 
 /// The SDK's default app icon (kept in sync by `zig build generate-icon`):
@@ -86,9 +87,14 @@ pub const PackageOptions = struct {
     /// then staple and validate its ticket. Requires identity signing and a
     /// notarytool Keychain profile in `signing.profile`.
     notarize: bool = false,
-    /// Emit the ZIP consumed by the native updater. macOS only; unlike the
-    /// user-facing DMG, this archive contains exactly the packaged .app.
+    /// Emit the ZIP consumed by the native updater. On macOS it contains
+    /// exactly the packaged .app (unlike the user-facing DMG); on Windows
+    /// it is the install image a setup program carries
+    /// (windows_installer.zig).
     update_archive: bool = false,
+    /// Emit a per-user setup program beside a Windows artifact
+    /// (windows_installer.zig). Windows only.
+    installer: bool = false,
     /// The process environment, when the caller has one (the CLI). The
     /// Android artifact probes it for the SDK/NDK toolchain to assemble
     /// the debug APK; without it the generated project is still complete
@@ -161,6 +167,7 @@ pub const PackageStats = struct {
     web_layer: ?manifest_tool.WebLayer = null,
     archive_path: ?[]const u8 = null,
     update_archive_path: ?[]const u8 = null,
+    installer_path: ?[]const u8 = null,
     /// The Windows subsystem verdict: `console` when the package
     /// wrapped a CONSOLE-subsystem exe (the app will flash a terminal
     /// window behind itself on every launch), `gui` for a GUI-subsystem
@@ -278,11 +285,49 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
         stats.notarized = true;
     }
     if (options.update_archive) {
-        if (options.target != .macos) return error.UnsupportedUpdateTarget;
         if (!options.metadata.updates.enabled()) return error.UpdatesNotConfigured;
-        stats.update_archive_path = try createUpdateArchive(allocator, io, options);
+        stats.update_archive_path = switch (options.target) {
+            .macos => try createUpdateArchive(allocator, io, options),
+            .windows => try createWindowsImageFile(allocator, io, options, .update_archive),
+            else => return error.UnsupportedUpdateTarget,
+        };
+    }
+    if (options.installer) {
+        if (options.target != .windows) return error.UnsupportedInstallerTarget;
+        stats.installer_path = try createWindowsImageFile(allocator, io, options, .setup);
     }
     return stats;
+}
+
+/// The per-user setup program or the update archive, beside the artifact
+/// directory, for the architecture of the packaged executable.
+fn createWindowsImageFile(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions, kind: enum { setup, update_archive }) ![]const u8 {
+    const binary_path = options.binary_path orelse {
+        std.debug.print("error: --installer and --update-archive need the app executable; pass --binary\n", .{});
+        return error.MissingBinary;
+    };
+    const arch: windows_installer.Arch = if (try peExecutableIsArm64(io, binary_path)) .aarch64 else .x86_64;
+    const executable = try std.fmt.allocPrint(allocator, "{s}.exe", .{options.metadata.name});
+    defer allocator.free(executable);
+    const file_name = switch (kind) {
+        .setup => try windows_installer.setupFileName(allocator, options.metadata, arch),
+        .update_archive => try windows_installer.updateArchiveFileName(allocator, options.metadata, arch),
+    };
+    defer allocator.free(file_name);
+    const path = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(options.output_path) orelse ".", file_name });
+    errdefer allocator.free(path);
+    const image_options: windows_installer.Options = .{
+        .artifact_dir = options.output_path,
+        .metadata = options.metadata,
+        .executable = executable,
+        .arch = arch,
+        .output_path = path,
+    };
+    switch (kind) {
+        .setup => try windows_installer.createSetup(allocator, io, image_options),
+        .update_archive => try windows_installer.createUpdateArchive(allocator, io, image_options),
+    }
+    return path;
 }
 
 fn metadataHasCapability(metadata: manifest_tool.Metadata, name: []const u8) bool {
@@ -331,6 +376,9 @@ pub fn printDiagnostic(stats: PackageStats) void {
     }
     if (stats.update_archive_path) |archive| {
         std.debug.print("  update archive: {s}\n", .{archive});
+    }
+    if (stats.installer_path) |installer| {
+        std.debug.print("  installer: {s}\n", .{installer});
     }
 }
 
@@ -500,7 +548,7 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try makeExecutable(dir, io, service_subpath);
     }
 
-    const assets_output = try assetOutputPath(allocator, options.output_path, "resources", options);
+    const assets_output = try desktopAssetOutputPath(allocator, options);
     defer allocator.free(assets_output);
     const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
     try writeFile(dir, io, "README.txt", artifactReadme(options.target));
@@ -785,6 +833,20 @@ fn macosAssetOutputPath(allocator: std.mem.Allocator, options: PackageOptions) !
         return std.fs.path.join(allocator, &.{ options.output_path, "Contents/Resources", subpath });
     }
     return std.fs.path.join(allocator, &.{ options.output_path, "Contents/Resources" });
+}
+
+/// Where a Windows or Linux artifact carries the app's assets: the macOS
+/// bundle's layout (macosAssetOutputPath) under resources/. The packaged
+/// runner and Windows host resolve relative asset paths against the
+/// resources/ directory beside the executable's bin/, so a relative path
+/// the app reads ("assets/fonts/mono.ttf") names the same file it names
+/// in a dev run.
+fn desktopAssetOutputPath(allocator: std.mem.Allocator, options: PackageOptions) ![]const u8 {
+    if (options.frontend != null) return assetOutputPath(allocator, options.output_path, "resources", options);
+    if (appRelativeAssetSubpath(options.assets_dir)) |subpath| {
+        return std.fs.path.join(allocator, &.{ options.output_path, "resources", subpath });
+    }
+    return std.fs.path.join(allocator, &.{ options.output_path, "resources" });
 }
 
 /// The asset directory as an app-relative bundle subpath, or null when
@@ -1465,7 +1527,7 @@ fn elfStringAt(strtab: []const u8, offset: u64) ?[]const u8 {
 /// Whether a PE executable targets arm64, read from the COFF machine
 /// field. Anything unrecognized falls back to x64, the default Windows
 /// build target.
-fn peExecutableIsArm64(io: std.Io, path: []const u8) !bool {
+pub fn peExecutableIsArm64(io: std.Io, path: []const u8) !bool {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     var read_buffer: [4096]u8 = undefined;
@@ -1798,7 +1860,7 @@ fn appendFmt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), comptime for
     try out.appendSlice(allocator, text);
 }
 
-fn trimExtensionDot(extension: []const u8) []const u8 {
+pub fn trimExtensionDot(extension: []const u8) []const u8 {
     if (extension.len > 0 and extension[0] == '.') return extension[1..];
     return extension;
 }
@@ -2109,7 +2171,7 @@ fn windowsRegistrationScript(allocator: std.mem.Allocator, metadata: manifest_to
     return out.toOwnedSlice(allocator);
 }
 
-fn windowsProgId(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, association: manifest_tool.FileAssociationMetadata) ![]const u8 {
+pub fn windowsProgId(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, association: manifest_tool.FileAssociationMetadata) ![]const u8 {
     const app = try windowsIdentifierComponentAlloc(allocator, metadata.id);
     defer allocator.free(app);
     const name = try windowsIdentifierComponentAlloc(allocator, association.name);
@@ -3430,6 +3492,34 @@ test "macOS package mirrors app assets at their app-relative path" {
     const bundled = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-asset-layout/Demo.app/Contents/Resources/.zig-cache/test-package-asset-layout/assets/music/track.mp3");
     defer std.testing.allocator.free(bundled);
     try std.testing.expectEqualStrings("mp3-bytes", bundled);
+}
+
+test "windows and linux packages mirror app assets at their app-relative path" {
+    // The packaged runner resolves "assets/music/track.mp3" against the
+    // resources/ directory beside bin/, so the artifact keeps the asset
+    // tree at the relative path a dev run reads.
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-desktop-asset-layout";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets/music");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/assets/music/track.mp3", .data = "mp3-bytes" });
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.2.3" };
+    inline for (.{ PackageTarget.windows, PackageTarget.linux }) |target| {
+        const output = root ++ "/demo-" ++ @tagName(target);
+        const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+            .metadata = metadata,
+            .target = target,
+            .output_path = output,
+            .assets_dir = root ++ "/assets",
+        });
+        try std.testing.expectEqual(@as(usize, 1), stats.asset_count);
+        const packaged = try readPath(std.testing.allocator, std.testing.io, output ++ "/resources/" ++ root ++ "/assets/music/track.mp3");
+        defer std.testing.allocator.free(packaged);
+        try std.testing.expectEqualStrings("mp3-bytes", packaged);
+        try std.testing.expectError(error.FileNotFound, readPath(std.testing.allocator, std.testing.io, output ++ "/resources/music/track.mp3"));
+    }
 }
 
 test "app-relative asset subpaths accept plain trees and reject escapes" {

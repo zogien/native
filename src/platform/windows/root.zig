@@ -2727,6 +2727,43 @@ test "windows webview focus reports the focused child label" {
     try std.testing.expect(std.mem.indexOf(u8, host_source, "event.view_label = focused->second.label.c_str();") != null);
 }
 
+test "windows webview2 keeps its user data with the app's per-user data" {
+    // WebView2's default user data folder sits beside the executable,
+    // which is read-only under Program Files and is swapped away with
+    // the program files on update. Every environment the host creates
+    // names the folder beside the app_dirs roots instead, and an earlier
+    // "<exe>.WebView2" folder moves there once.
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "factory(nullptr, webViewUserDataFolder(host), nullptr,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "factory(nullptr, nullptr, nullptr,") == null);
+    const resolve_at = std.mem.indexOf(u8, host_source, "static const wchar_t *webViewUserDataFolder(Host *host) {") orelse return error.TestExpectedEqual;
+    const resolve = host_source[resolve_at..];
+    try std.testing.expect(std.mem.indexOf(u8, resolve, "GetEnvironmentVariableW(L\"LOCALAPPDATA\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resolve, "const std::wstring folder = app_root + L\"\\\\WebView2\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resolve, "MoveFileExW(legacy.c_str(), folder.c_str(), 0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "return path + L\".WebView2\";") != null);
+}
+
+test "windows webview assets resolve against the packaged resources beside bin" {
+    // `native package` stages bin\<exe> and the app-relative asset tree
+    // in resources\; a relative asset root names that tree when the app
+    // runs from a package and the working directory otherwise.
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "std::string path = assetRootPath(webview.asset_root);") != null);
+    const resources_at = std.mem.indexOf(u8, host_source, "static const std::wstring &packagedResourcesDirectory() {") orelse return error.TestExpectedEqual;
+    const resources = host_source[resources_at..];
+    try std.testing.expect(std.mem.indexOf(u8, resources, "CompareStringOrdinal(bin.c_str() + bin_slash + 1, -1, L\"bin\", -1, TRUE)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resources, "return bin.substr(0, bin_slash) + L\"\\\\resources\";") != null);
+}
+
+test "windows names the process by its bundle id for the taskbar" {
+    // The installer's Start menu shortcut carries the bundle id as its
+    // AppUserModelID; the process must claim the same id.
+    const host_source = @embedFile("webview2_host.cpp");
+    const create_at = std.mem.indexOf(u8, host_source, "host->bundle_id = slice(bundle_id, bundle_id_len);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, host_source[create_at..], "SetCurrentProcessExplicitAppUserModelID(app_user_model_id.c_str());") != null);
+}
+
 test "windows audio event maps kinds and payload" {
     var event = std.mem.zeroes(WindowsEvent);
     event.audio_kind = 1;
