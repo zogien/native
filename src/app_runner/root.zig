@@ -895,6 +895,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     native_sdk.runtime.launch_timing.lap("runner_main");
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
+    configureUpdates(app_info, init.environ_map);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
@@ -967,6 +968,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
 fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
+    configureUpdates(app_info, init.environ_map);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
@@ -1034,9 +1036,29 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     finishSessionRecorder(session_recorder);
 }
 
+/// Points the app-driven updater at this installation. Windows installs
+/// drive it; elsewhere it reports the platform as unsupported. Setting
+/// NATIVE_SDK_UPDATES_FEED_URL replaces the manifest's feed URL to test
+/// an update end to end, and may then name a loopback http:// server;
+/// the manifest's Ed25519 keys stay the authority over what installs.
+fn configureUpdates(app_info: native_sdk.platform.AppInfo, environ_map: *std.process.Environ.Map) void {
+    const override = environ_map.get("NATIVE_SDK_UPDATES_FEED_URL");
+    native_sdk.updater.engine.configure(.{
+        .feed_url = override orelse app_info.update_feed_url,
+        .public_keys = app_info.update_public_key,
+        .bundle_id = app_info.bundle_id,
+        .version = app_info.version,
+        .target = native_sdk.updater.feed.currentTarget(),
+        .policy = .{ .allow_loopback_http = override != null },
+        .backend = if (comptime std.mem.eql(u8, build_options.platform, "windows")) native_sdk.updater.windows.backend(app_info.bundle_id) else null,
+        .check_on_start = app_info.update_check_on_start,
+    });
+}
+
 fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
+    configureUpdates(app_info, init.environ_map);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address

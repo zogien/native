@@ -105,12 +105,12 @@ pub fn main(init: std.process.Init) !void {
         };
     } else if (std.mem.eql(u8, command, "update")) {
         tooling.update.run(allocator, init.io, args[2..]) catch |err| switch (err) {
-            error.InvalidArguments => fail("usage: native update keygen [--private-key path] | sign --archive app.zip --url https://example.com/app.zip --target macos-aarch64|macos-x86_64 [--manifest app.json] [--private-key path] [--notes text] [--output native-update.json]"),
+            error.InvalidArguments => fail("usage: native update keygen [--private-key path] | sign --archive app.zip --url https://example.com/app.zip --target macos-aarch64|macos-x86_64|windows-x86_64|windows-aarch64 [--manifest app.json] [--private-key path] [--notes text] [--output native-update.json] [--allow-loopback-http]"),
             error.KeyAlreadyExists => fail("the private update key already exists; choose another --private-key path or move the existing key explicitly"),
-            error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS and be at most 4096 bytes"),
-            error.InvalidTarget => fail("update target must be macos-aarch64 or macos-x86_64"),
+            error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS and be at most 4096 bytes (--allow-loopback-http also admits http://127.0.0.1, http://[::1] and http://localhost for local testing)"),
+            error.InvalidTarget => fail("update target must be macos-aarch64, macos-x86_64, windows-x86_64 or windows-aarch64"),
             error.UpdateArchitectureMismatch => fail("the update archive executable does not contain the architecture named by --target"),
-            error.InvalidArchive => fail("the update archive must be a non-empty .zip containing the packaged .app bundle"),
+            error.InvalidArchive => fail("the update archive must be the .zip `native package --update-archive` writes: the packaged .app bundle for macOS, the installed app image for Windows"),
             error.UpdatesNotConfigured => fail("the app manifest has no updates block; add feed_url and public_key before signing releases"),
             error.InvalidManifestVersion => fail("the app manifest version must use canonical X.Y.Z numeric components without leading zeroes"),
             error.InvalidUpdatePublicKey => fail("the app manifest update public_key or a public_keys entry is not a valid base64 Ed25519 public key"),

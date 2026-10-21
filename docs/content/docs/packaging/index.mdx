@@ -281,6 +281,8 @@ native package --target windows --manifest app.json --binary zig-out/bin/MyApp.e
 
 Running a setup program again reinstalls or replaces the installed version; the app must not be running. `--silent` installs without dialogs and without starting the app, and exits with code 2 while the app runs. The setup program checks its own payload against the SHA-256 it carries before installing anything.
 
+An installed app can update itself: add `--update-archive` to also write the archive the [updater](/docs/updates) downloads, the same install image as the setup program's.
+
 Uninstall from Settings > Apps, or run `<name>.exe --uninstall` (`--silent` skips the confirmation). It removes the shortcut, the registry entries and the install folder. The app's data under `%LOCALAPPDATA%\<bundle-id>` stays.
 
 The SDK does not sign the setup program or the launcher. Sign `bin\<name>.exe` before packaging and the setup program after it; the launcher the setup program installs stays unsigned. The installer installs per user only; a per-machine install under Program Files is not supported.

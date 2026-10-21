@@ -87,8 +87,10 @@ pub const PackageOptions = struct {
     /// then staple and validate its ticket. Requires identity signing and a
     /// notarytool Keychain profile in `signing.profile`.
     notarize: bool = false,
-    /// Emit the ZIP consumed by the native updater. macOS only; unlike the
-    /// user-facing DMG, this archive contains exactly the packaged .app.
+    /// Emit the ZIP consumed by the native updater. On macOS it contains
+    /// exactly the packaged .app (unlike the user-facing DMG); on Windows
+    /// it is the install image a setup program carries
+    /// (windows_installer.zig).
     update_archive: bool = false,
     /// Emit a per-user setup program beside a Windows artifact
     /// (windows_installer.zig). Windows only.
@@ -283,39 +285,49 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
         stats.notarized = true;
     }
     if (options.update_archive) {
-        if (options.target != .macos) return error.UnsupportedUpdateTarget;
         if (!options.metadata.updates.enabled()) return error.UpdatesNotConfigured;
-        stats.update_archive_path = try createUpdateArchive(allocator, io, options);
+        stats.update_archive_path = switch (options.target) {
+            .macos => try createUpdateArchive(allocator, io, options),
+            .windows => try createWindowsImageFile(allocator, io, options, .update_archive),
+            else => return error.UnsupportedUpdateTarget,
+        };
     }
     if (options.installer) {
         if (options.target != .windows) return error.UnsupportedInstallerTarget;
-        stats.installer_path = try createWindowsSetup(allocator, io, options);
+        stats.installer_path = try createWindowsImageFile(allocator, io, options, .setup);
     }
     return stats;
 }
 
-/// The per-user setup program, beside the artifact directory, for the
-/// architecture of the packaged executable.
-fn createWindowsSetup(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) ![]const u8 {
+/// The per-user setup program or the update archive, beside the artifact
+/// directory, for the architecture of the packaged executable.
+fn createWindowsImageFile(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions, kind: enum { setup, update_archive }) ![]const u8 {
     const binary_path = options.binary_path orelse {
-        std.debug.print("error: --installer needs the app executable; pass --binary\n", .{});
+        std.debug.print("error: --installer and --update-archive need the app executable; pass --binary\n", .{});
         return error.MissingBinary;
     };
     const arch: windows_installer.Arch = if (try peExecutableIsArm64(io, binary_path)) .aarch64 else .x86_64;
     const executable = try std.fmt.allocPrint(allocator, "{s}.exe", .{options.metadata.name});
     defer allocator.free(executable);
-    const file_name = try windows_installer.setupFileName(allocator, options.metadata, arch);
+    const file_name = switch (kind) {
+        .setup => try windows_installer.setupFileName(allocator, options.metadata, arch),
+        .update_archive => try windows_installer.updateArchiveFileName(allocator, options.metadata, arch),
+    };
     defer allocator.free(file_name);
-    const setup_path = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(options.output_path) orelse ".", file_name });
-    errdefer allocator.free(setup_path);
-    try windows_installer.createSetup(allocator, io, .{
+    const path = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(options.output_path) orelse ".", file_name });
+    errdefer allocator.free(path);
+    const image_options: windows_installer.Options = .{
         .artifact_dir = options.output_path,
         .metadata = options.metadata,
         .executable = executable,
         .arch = arch,
-        .output_path = setup_path,
-    });
-    return setup_path;
+        .output_path = path,
+    };
+    switch (kind) {
+        .setup => try windows_installer.createSetup(allocator, io, image_options),
+        .update_archive => try windows_installer.createUpdateArchive(allocator, io, image_options),
+    }
+    return path;
 }
 
 fn metadataHasCapability(metadata: manifest_tool.Metadata, name: []const u8) bool {

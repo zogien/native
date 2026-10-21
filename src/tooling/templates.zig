@@ -1597,6 +1597,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    package.addArgs(&.{ "--web-layer", if (web_layer) "include" else "exclude" });
         \\    if (cef_auto_install) package.addArg("--cef-auto-install");
         \\    if (app_config.updates_enabled and package_target == .macos and b.graph.host.result.os.tag == .macos) package.addArg("--update-archive");
+        \\    // Windows updates reach only installed apps, so an app with updates
+        \\    // ships the per-user setup program beside the archive its feed names.
+        \\    if (app_config.updates_enabled and package_target == .windows) package.addArgs(&.{ "--installer", "--update-archive" });
         \\    package.step.dependOn(&package_exe.step);
         \\    package.step.dependOn(&frontend_build.step);
         \\    const package_step = b.step("package", "Create a local package artifact");
@@ -4272,6 +4275,7 @@ test "writeDefaultApp emits Vite project files" {
     // the packaged artifact structurally agrees with the compiled exe.
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addArgs(&.{ \"--web-layer\", if (web_layer) \"include\" else \"exclude\" })") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addArg(\"--update-archive\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package_target == .windows) package.addArgs(&.{ \"--installer\", \"--update-archive\" })") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "options.addOption(bool, \"web_layer\", web_layer)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "std.json.parseFromSliceLeaky(InferenceManifest") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "fn appManifestModule") != null);

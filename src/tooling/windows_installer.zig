@@ -46,11 +46,45 @@ pub fn setupFileName(allocator: std.mem.Allocator, metadata: manifest_tool.Metad
     return std.fmt.allocPrint(allocator, "{s}-{s}-windows-{s}-setup.exe", .{ metadata.name, metadata.version, @tagName(arch) });
 }
 
+/// The update archive's file name: `<name>-<version>-windows-<arch>-update.zip`.
+pub fn updateArchiveFileName(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, arch: Arch) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}-{s}-windows-{s}-update.zip", .{ metadata.name, metadata.version, @tagName(arch) });
+}
+
 pub fn createSetup(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const image = try buildImage(arena, io, options);
 
+    const program = options.arch.launcher();
+    const trailer = setup_payload.encode(.{
+        .config_offset = program.len,
+        .config_size = image.config.len,
+        .zip_offset = program.len + image.config.len,
+        .zip_size = image.zip.len,
+        .sha256 = setup_payload.digest(image.config, image.zip),
+    });
+    try writeAtomically(io, options.output_path, &.{ program, image.config, image.zip, &trailer });
+}
+
+/// The ZIP of the install image the updater downloads: the same image a
+/// setup program carries, signed into a feed by `native update sign`.
+pub fn createUpdateArchive(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const image = try buildImage(arena_state.allocator(), io, options);
+    try writeAtomically(io, options.output_path, &.{image.zip});
+}
+
+const Image = struct {
+    config: []const u8,
+    zip: []const u8,
+};
+
+/// Adds the install configuration and launcher to the artifact directory
+/// and zips it, without the portable registration script.
+fn buildImage(arena: std.mem.Allocator, io: std.Io, options: Options) !Image {
     var artifact = try std.Io.Dir.cwd().openDir(io, options.artifact_dir, .{});
     defer artifact.close(io);
     const has_icon = if (artifact.access(io, "app-icon.ico", .{})) |_| true else |_| false;
@@ -73,25 +107,16 @@ pub fn createSetup(allocator: std.mem.Allocator, io: std.Io, options: Options) !
     }
     var zip: std.Io.Writer.Allocating = .init(arena);
     try zip_writer.write(arena, &zip.writer, image.items);
-    const zip_bytes = zip.written();
+    return .{ .config = config_bytes, .zip = zip.written() };
+}
 
-    const program = options.arch.launcher();
-    const trailer = setup_payload.encode(.{
-        .config_offset = program.len,
-        .config_size = config_bytes.len,
-        .zip_offset = program.len + config_bytes.len,
-        .zip_size = zip_bytes.len,
-        .sha256 = setup_payload.digest(config_bytes, zip_bytes),
-    });
-    if (std.fs.path.dirname(options.output_path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
-    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, options.output_path, .{ .make_path = true, .replace = true });
+fn writeAtomically(io: std.Io, path: []const u8, parts: []const []const u8) !void {
+    if (std.fs.path.dirname(path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
+    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .make_path = true, .replace = true });
     defer atomic.deinit(io);
     var buffer: [64 * 1024]u8 = undefined;
     var writer = atomic.file.writer(io, &buffer);
-    try writer.interface.writeAll(program);
-    try writer.interface.writeAll(config_bytes);
-    try writer.interface.writeAll(zip_bytes);
-    try writer.interface.writeAll(&trailer);
+    for (parts) |part| try writer.interface.writeAll(part);
     try writer.interface.flush();
     try atomic.replace(io);
 }
@@ -211,4 +236,10 @@ test "setup.exe carries the launcher, its configuration and the install image" {
     try std.testing.expectError(error.FileNotFound, extracted.access(io, "install/register-file-types.ps1", .{}));
     try extracted.access(io, "bin/notes.exe", .{});
     try extracted.access(io, install_config.file_name, .{});
+
+    // The updater downloads the very image the setup program carries.
+    try createUpdateArchive(allocator, io, .{ .artifact_dir = root ++ "/artifact", .metadata = metadata, .executable = "notes.exe", .arch = .x86_64, .output_path = root ++ "/notes-update.zip" });
+    const update_archive = try cwd.readFileAlloc(io, root ++ "/notes-update.zip", allocator, .unlimited);
+    defer allocator.free(update_archive);
+    try std.testing.expectEqualSlices(u8, zip_bytes, update_archive);
 }

@@ -89,6 +89,7 @@ pub const ERROR_FILE_NOT_FOUND: i32 = 2;
 pub const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
 pub const SYNCHRONIZE: DWORD = 0x0010_0000;
 pub const WAIT_OBJECT_0: DWORD = 0;
+pub const WAIT_ABANDONED: DWORD = 0x80;
 pub const CREATE_UNICODE_ENVIRONMENT: DWORD = 0x400;
 pub const CREATE_NO_WINDOW: DWORD = 0x0800_0000;
 
@@ -191,6 +192,8 @@ pub extern "kernel32" fn CreateProcessW(
 ) callconv(.winapi) BOOL;
 pub extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
+pub extern "kernel32" fn CreateMutexW(lpMutexAttributes: ?*anyopaque, bInitialOwner: BOOL, lpName: ?[*:0]const u16) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn ReleaseMutex(hMutex: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn OpenProcess(dwDesiredAccess: DWORD, bInheritHandle: BOOL, dwProcessId: DWORD) callconv(.winapi) ?HANDLE;
 pub extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 pub extern "kernel32" fn K32EnumProcesses(lpidProcess: [*]DWORD, cb: DWORD, lpcbNeeded: *DWORD) callconv(.winapi) BOOL;

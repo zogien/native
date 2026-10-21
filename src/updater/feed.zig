@@ -15,7 +15,7 @@ pub const max_feed_url_bytes: usize = 4096;
 pub const max_public_keys: usize = 4;
 
 /// The release targets a feed may name, one per installable build.
-pub const targets = [_][]const u8{ "macos-aarch64", "macos-x86_64" };
+pub const targets = [_][]const u8{ "macos-aarch64", "macos-x86_64", "windows-x86_64", "windows-aarch64" };
 
 pub fn isTarget(value: []const u8) bool {
     for (targets) |target| {
@@ -33,8 +33,33 @@ pub fn currentTarget() ?[]const u8 {
             .x86_64 => "macos-x86_64",
             else => null,
         },
+        .windows => switch (builtin.cpu.arch) {
+            .x86_64 => "windows-x86_64",
+            .aarch64 => "windows-aarch64",
+            else => null,
+        },
         else => null,
     };
+}
+
+/// Loosens the HTTPS rule for local testing: with `allow_loopback_http`,
+/// http:// URLs to 127.0.0.1, [::1] or localhost pass as well. The Ed25519
+/// signature stays the authority over what installs.
+pub const UrlPolicy = struct {
+    allow_loopback_http: bool = false,
+};
+
+pub fn urlAllowed(value: []const u8, policy: UrlPolicy) bool {
+    if (archiveUrlIsValid(value)) return true;
+    if (!policy.allow_loopback_http) return false;
+    if (value.len == 0 or value.len > max_archive_url_bytes) return false;
+    for (value) |byte| if (byte <= 0x20 or byte == 0x7f) return false;
+    const uri = std.Uri.parse(value) catch return false;
+    if (!std.mem.eql(u8, uri.scheme, "http")) return false;
+    const host = uri.host orelse return false;
+    var host_buffer: [64]u8 = undefined;
+    const host_name = host.toRaw(&host_buffer) catch return false;
+    return std.mem.eql(u8, host_name, "127.0.0.1") or std.mem.eql(u8, host_name, "[::1]") or std.mem.eql(u8, host_name, "::1") or std.ascii.eqlIgnoreCase(host_name, "localhost");
 }
 
 pub const Envelope = struct {
@@ -75,6 +100,16 @@ pub fn verifyEnvelope(
     envelope_bytes: []const u8,
     public_keys_base64: []const u8,
 ) !VerifiedRelease {
+    return verifyEnvelopeWithPolicy(allocator, envelope_bytes, public_keys_base64, .{});
+}
+
+/// `verifyEnvelope` with the release's archive URL held to `policy`.
+pub fn verifyEnvelopeWithPolicy(
+    allocator: std.mem.Allocator,
+    envelope_bytes: []const u8,
+    public_keys_base64: []const u8,
+    policy: UrlPolicy,
+) !VerifiedRelease {
     if (envelope_bytes.len == 0 or envelope_bytes.len > max_envelope_bytes) return error.InvalidUpdateFeed;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -102,7 +137,7 @@ pub fn verifyEnvelope(
 
     var parsed = std.json.parseFromSlice(Release, allocator, payload, .{ .ignore_unknown_fields = true }) catch return error.InvalidUpdatePayload;
     errdefer parsed.deinit();
-    try validateRelease(parsed.value);
+    try validateReleaseWithPolicy(parsed.value, policy);
     return .{
         .payload = payload,
         .release = parsed.value,
@@ -134,9 +169,18 @@ pub fn parsePublicKeys(list: []const u8, output: *[max_public_keys]Ed25519.Publi
 /// belong to the path and query; any other brace, or one in the scheme
 /// or host, is invalid.
 pub fn expandFeedUrl(output: []u8, template: []const u8, target: []const u8, current_version: []const u8) ![]const u8 {
-    const scheme = "https://";
-    if (!std.mem.startsWith(u8, template, scheme)) return error.InvalidUpdateFeedUrl;
-    const authority_end = std.mem.findAnyPos(u8, template, scheme.len, "/?#") orelse template.len;
+    return expandFeedUrlWithPolicy(output, template, target, current_version, .{});
+}
+
+/// `expandFeedUrl` with the result held to `policy`.
+pub fn expandFeedUrlWithPolicy(output: []u8, template: []const u8, target: []const u8, current_version: []const u8, policy: UrlPolicy) ![]const u8 {
+    const scheme_len: usize = if (std.mem.startsWith(u8, template, "https://"))
+        "https://".len
+    else if (policy.allow_loopback_http and std.mem.startsWith(u8, template, "http://"))
+        "http://".len
+    else
+        return error.InvalidUpdateFeedUrl;
+    const authority_end = std.mem.findAnyPos(u8, template, scheme_len, "/?#") orelse template.len;
     if (std.mem.findAny(u8, template[0..authority_end], "{}") != null) return error.InvalidUpdateFeedUrl;
     if (!isTarget(target)) return error.InvalidUpdateFeedUrl;
     _ = try parseVersion(current_version);
@@ -161,15 +205,19 @@ pub fn expandFeedUrl(output: []u8, template: []const u8, target: []const u8, cur
         index += consumed;
     }
     const expanded = output[0..length];
-    if (expanded.len > max_feed_url_bytes or !archiveUrlIsValid(expanded)) return error.InvalidUpdateFeedUrl;
+    if (expanded.len > max_feed_url_bytes or !urlAllowed(expanded, policy)) return error.InvalidUpdateFeedUrl;
     return expanded;
 }
 
 pub fn validateRelease(release: Release) !void {
+    return validateReleaseWithPolicy(release, .{});
+}
+
+pub fn validateReleaseWithPolicy(release: Release, policy: UrlPolicy) !void {
     if (release.bundle_id.len == 0 or release.bundle_id.len > 128) return error.InvalidUpdatePayload;
     _ = try parseVersion(release.version);
     if (!isTarget(release.target)) return error.InvalidUpdatePayload;
-    if (!archiveUrlIsValid(release.archive_url)) return error.InvalidUpdatePayload;
+    if (!urlAllowed(release.archive_url, policy)) return error.InvalidUpdatePayload;
     if (release.archive_bytes == 0 or release.archive_bytes > max_archive_bytes) return error.InvalidUpdatePayload;
     if (release.sha256.len != 64) return error.InvalidUpdatePayload;
     for (release.sha256) |byte| if (!(std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f'))) return error.InvalidUpdatePayload;
@@ -392,9 +440,25 @@ test "feed URLs expand the target and installed version" {
 
 test "only builds with a release format have an update target" {
     const target = currentTarget();
-    if (builtin.os.tag == .macos and (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64)) {
+    if ((builtin.os.tag == .macos or builtin.os.tag == .windows) and (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64)) {
         try std.testing.expect(isTarget(target.?));
     } else {
         try std.testing.expect(target == null);
     }
+}
+
+test "plain HTTP passes only to loopback hosts and only when testing asks for it" {
+    try std.testing.expect(!urlAllowed("http://127.0.0.1:8080/feed.json", .{}));
+    try std.testing.expect(urlAllowed("http://127.0.0.1:8080/feed.json", .{ .allow_loopback_http = true }));
+    try std.testing.expect(urlAllowed("http://localhost/feed.json", .{ .allow_loopback_http = true }));
+    try std.testing.expect(urlAllowed("http://[::1]:9000/feed.json", .{ .allow_loopback_http = true }));
+    try std.testing.expect(!urlAllowed("http://example.com/feed.json", .{ .allow_loopback_http = true }));
+    try std.testing.expect(!urlAllowed("http://127.0.0.1.example.com/feed.json", .{ .allow_loopback_http = true }));
+    try std.testing.expect(urlAllowed("https://example.com/feed.json", .{}));
+    var buffer: [max_feed_url_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "http://127.0.0.1:8080/windows-x86_64/feed.json",
+        try expandFeedUrlWithPolicy(&buffer, "http://127.0.0.1:8080/{target}/feed.json", "windows-x86_64", "1.0.0", .{ .allow_loopback_http = true }),
+    );
+    try std.testing.expectError(error.InvalidUpdateFeedUrl, expandFeedUrl(&buffer, "http://127.0.0.1:8080/{target}/feed.json", "windows-x86_64", "1.0.0"));
 }

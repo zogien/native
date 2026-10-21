@@ -52,6 +52,9 @@ pub fn main(init: std.process.Init) u8 {
     var context: Context = .{ .gpa = arena, .io = init.io, .silent = hasFlag(args, "--silent"), .title = "Setup" };
     const own_path = ownPath(arena) catch return exit_failed;
 
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "--apply-after")) {
+        return applyAfter(&context, own_path, args[1..]) catch |err| fail(&context, "The update could not be installed ({s}).", .{@errorName(err)});
+    }
     if (args.len >= 1 and std.mem.eql(u8, args[0], "--uninstall-finish")) {
         return uninstallFinish(&context, args[1..]) catch |err| fail(&context, "The app could not be removed completely ({s}).", .{@errorName(err)});
     }
@@ -72,17 +75,70 @@ fn launch(context: *Context, own_path: []const u8) !u8 {
     var root = try std.Io.Dir.cwd().openDir(context.io, root_path, .{});
     defer root.close(context.io);
 
-    // A staged version moves into place only while nothing runs from app\:
-    // Windows would rename the directory under a running app.
-    if (!try appRunning(context, root_path)) {
-        _ = install_switch.applyStaged(root, context.io) catch {};
-    }
+    applyPending(context, root, root_path);
+    return startApp(context, root, root_path, commandLineTail(std.mem.span(win.GetCommandLineW())));
+}
 
+/// The app asked to restart into a staged version: wait for it to exit,
+/// switch, and start the new version.
+fn applyAfter(context: *Context, own_path: []const u8, args: []const []const u8) !u8 {
+    if (args.len < 1) return error.InvalidArguments;
+    const pid = std.fmt.parseInt(win.DWORD, args[0], 10) catch return error.InvalidArguments;
+    if (win.OpenProcess(win.SYNCHRONIZE, 0, pid)) |handle| {
+        const exited = win.WaitForSingleObject(handle, 60_000) == win.WAIT_OBJECT_0;
+        _ = win.CloseHandle(handle);
+        // An app that did not quit keeps running, and its staged release
+        // waits for the next launch.
+        if (!exited) return exit_ok;
+    }
+    const root_path = std.fs.path.dirname(own_path) orelse return error.InvalidInstallRoot;
+    var root = try std.Io.Dir.cwd().openDir(context.io, root_path, .{});
+    defer root.close(context.io);
+    // Helper processes the app started (its services host) exit with it.
+    var waited: usize = 0;
+    while (waited < 40 and try appRunning(context, root_path)) : (waited += 1) win.Sleep(250);
+    applyPending(context, root, root_path);
+    return startApp(context, root, root_path, &.{});
+}
+
+/// Moves a staged version into place while nothing runs from app\
+/// (Windows would rename the directory under a running app), and records
+/// the switch for the new version's updater to report.
+fn applyPending(context: *Context, root: std.Io.Dir, root_path: []const u8) void {
+    const installed = readInstalledConfig(context, root) catch null;
+    // Launchers starting together (a restart and a click on the shortcut)
+    // take turns, so only one of them switches.
+    const lock = if (installed) |config| switchLock(context.gpa, config.bundle_id) else null;
+    defer if (lock) |handle| {
+        _ = win.ReleaseMutex(handle);
+        _ = win.CloseHandle(handle);
+    };
+    if (appRunning(context, root_path) catch true) return;
+    const before = if (installed) |config| config.version else "";
+    const outcome = install_switch.applyStaged(root, context.io) catch return;
+    if (outcome != .switched) return;
+    const after = (readInstalledConfig(context, root) catch return).version;
+    const record = std.fmt.allocPrint(context.gpa, "updated {s} {s}\n", .{ before, after }) catch return;
+    root.writeFile(context.io, .{ .sub_path = install_switch.update_result, .data = record }) catch {};
+}
+
+/// The per-app mutex a version switch holds, owned once this returns; null
+/// when it cannot be created or waited for, and the switch goes ahead.
+fn switchLock(allocator: std.mem.Allocator, bundle_id: []const u8) ?win.HANDLE {
+    const name = std.fmt.allocPrint(allocator, "Local\\native-sdk-switch-{s}", .{bundle_id}) catch return null;
+    const name_w = wide(allocator, name) catch return null;
+    const handle = win.CreateMutexW(null, 0, name_w) orelse return null;
+    const waited = win.WaitForSingleObject(handle, 30_000);
+    if (waited == win.WAIT_OBJECT_0 or waited == win.WAIT_ABANDONED) return handle;
+    _ = win.CloseHandle(handle);
+    return null;
+}
+
+fn startApp(context: *Context, root: std.Io.Dir, root_path: []const u8, arguments: []const u16) !u8 {
     const config = try readInstalledConfig(context, root);
     context.title = config.display_name;
     const executable = try std.fs.path.join(context.gpa, &.{ root_path, install_switch.current, "bin", config.executable });
-    const tail = commandLineTail(std.mem.span(win.GetCommandLineW()));
-    const process = try startProcess(context.gpa, executable, tail);
+    const process = try startProcess(context.gpa, executable, arguments);
     _ = win.AllowSetForegroundWindow(process.dwProcessId);
     _ = win.CloseHandle(process.hThread);
     _ = win.CloseHandle(process.hProcess);

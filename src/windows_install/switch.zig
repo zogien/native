@@ -23,6 +23,9 @@ pub const previous = "app.prev";
 pub const journal = ".native-switch";
 /// Written into app.next last, after every file of the staged version.
 pub const staged_marker = ".native-staged";
+/// `updated <from> <to>`, written by the launcher after it switched to a
+/// staged version, and read once by that version's updater.
+pub const update_result = ".native-update-result";
 
 pub const Outcome = enum {
     /// No complete staged version.

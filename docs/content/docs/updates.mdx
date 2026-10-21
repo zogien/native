@@ -2,17 +2,32 @@
 title: "Updates"
 ---
 
-Native SDK includes its own signed updater for packaged macOS apps. It does not use Sparkle or another updater framework.
+Native SDK includes its own signed updater. It does not use Sparkle, Squirrel, or another updater framework: a release is a ZIP archive described by a feed signed with Ed25519, and an installed app verifies the feed with the keys in its manifest before it downloads anything.
 
-An enabled app gets:
+Who runs the update depends on the platform:
 
-- **Check for Updates…** in the macOS application menu.
-- Optional background checks after launch.
-- A standard update-available prompt with release notes.
-- Download progress, signed metadata verification, archive size and SHA-256 verification.
-- In-place app replacement, rollback when replacement or the relaunch request fails, and relaunch into the new version.
-
-The first backend supports macOS apps using the system host (`web_engine: "system"`). Windows, Linux, and the macOS Chromium host do not install updates yet.
+<table>
+  <thead>
+    <tr>
+      <th>Platform</th>
+      <th>Flow</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>macOS</td>
+      <td>The host runs it: <strong>Check for Updates…</strong> in the application menu, optional background checks after launch, an update prompt with release notes, download progress, in-place replacement with rollback, and relaunch into the new version. Apps using the system host (<code>web_engine: "system"</code>).</td>
+    </tr>
+    <tr>
+      <td>Windows</td>
+      <td>The app runs it: it asks the updater to check, download, and restart, follows its progress, and shows its own UI (see <a href="#drive-updates-from-the-app-on-windows">Drive updates from the app on Windows</a>). Apps installed by the SDK's <a href="/docs/packaging#per-user-installer">per-user setup program</a>. A downloaded release is staged beside the installed one and moves into place when the app restarts or next launches.</td>
+    </tr>
+    <tr>
+      <td>Linux, macOS Chromium host</td>
+      <td>Not supported yet.</td>
+    </tr>
+  </tbody>
+</table>
 
 ## Configure the app
 
@@ -50,6 +65,8 @@ Legacy `app.zon` uses the same fields:
 },
 ```
 
+`check_on_start` checks after launch. On macOS the check is quiet: no-update results stay silent and failures go to the app log. On Windows the app sees its result like any other check's.
+
 Each installed app expands two placeholders in the path or query of `feed_url` before it checks:
 
 <table>
@@ -62,7 +79,7 @@ Each installed app expands two placeholders in the path or query of `feed_url` b
   <tbody>
     <tr>
       <td><code>{"{target}"}</code></td>
-      <td>The release target of the running build: <code>macos-aarch64</code> or <code>macos-x86_64</code></td>
+      <td>The release target of the running build: <code>macos-aarch64</code>, <code>macos-x86_64</code>, <code>windows-x86_64</code>, or <code>windows-aarch64</code></td>
     </tr>
     <tr>
       <td><code>{"{current_version}"}</code></td>
@@ -71,11 +88,13 @@ Each installed app expands two placeholders in the path or query of `feed_url` b
   </tbody>
 </table>
 
-A feed holds the release for one target, so `{target}` lets one manifest serve every build: Apple silicon installs read `releases/macos-aarch64/native-update.json` and Intel installs read `releases/macos-x86_64/native-update.json`. A `feed_url` without placeholders serves a single target.
+A feed holds the release for one target, so `{target}` lets one manifest serve every build: Apple silicon installs read `releases/macos-aarch64/native-update.json`, x64 Windows installs read `releases/windows-x86_64/native-update.json`, and so on. A `feed_url` without placeholders serves a single target.
 
 Both URLs in the release path—the feed URL and archive URL—must use HTTPS. The Ed25519 signature remains the authority if the server or TLS endpoint is compromised.
 
 ## Build the update archive
+
+### macOS
 
 Package the app with the same signing identity as the installed release and request the updater ZIP:
 
@@ -96,6 +115,24 @@ zig-out/package/my-app-1.1.0-macos-ReleaseFast-update.zip
 
 That ZIP contains exactly the packaged `.app`. Do not use the user-facing DMG as the update archive. When the manifest enables updates, `zig build package` also requests this updater ZIP automatically; use the direct `native package` command when you need Developer ID signing flags.
 
+### Windows
+
+Package the app with the setup program for new installs and the update archive for existing ones:
+
+```bash
+native build
+native package --target windows --installer --update-archive
+```
+
+Beside the artifact directory, the command writes:
+
+```text
+zig-out/package/my-app-1.1.0-windows-x86_64-setup.exe
+zig-out/package/my-app-1.1.0-windows-x86_64-update.zip
+```
+
+The update archive is the same install image the setup program carries. Code-sign `zig-out/bin/my-app.exe` before `native package` so both carry the signed executable. When the manifest enables updates, `zig build package` on Windows requests both.
+
 ## Sign the release feed
 
 Upload the ZIP to its final HTTPS URL, then sign its immutable URL, size, digest, app identity, version, target, and release notes:
@@ -111,9 +148,9 @@ native update sign \
   --output native-update.json
 ```
 
-Use `macos-aarch64` for Apple silicon and `macos-x86_64` for Intel. Publish the resulting `native-update.json` at the manifest's `feed_url` with `{target}` replaced by that target. Sign and publish one feed per target.
+Use `macos-aarch64` for Apple silicon, `macos-x86_64` for Intel, `windows-x86_64` for x64 Windows, and `windows-aarch64` for Arm64 Windows. Publish the resulting `native-update.json` at the manifest's `feed_url` with `{target}` replaced by that target. Sign and publish one feed per target.
 
-`native update sign` refuses a private key that the manifest does not trust (its `public_key` or one of its `public_keys`), and refuses an archive whose executable does not contain the architecture named by `--target`.
+`native update sign` refuses a private key that the manifest does not trust (its `public_key` or one of its `public_keys`), and refuses an archive whose executable does not contain the architecture named by `--target`. A Windows archive must be the install image `--update-archive` wrote for this app and version.
 
 Installed apps ignore feed fields they do not know, so later SDK versions can add fields to the feed without breaking existing installs. Apps built with SDK versions up to `0.11.0-fork.3` reject unknown fields; keep their feed URLs serving feeds signed by those versions.
 
@@ -136,11 +173,9 @@ Installs verify a feed against every key their manifest trusts: `public_key` plu
 
 A lost private key cannot be rotated away from: installs that trust only that key cannot verify any later release. Keep a backup of every private key a supported release trusts.
 
-## Trigger a check
+## Trigger a check on macOS
 
-The stock application-menu item requires no app code. `check_on_start` performs a quiet startup check: no-update results stay silent and failures go to the app log.
-
-To place the action in another menu, tray item, shortcut, or native control, dispatch the reserved command:
+The stock application-menu item requires no app code. To place the action in another menu, tray item, shortcut, or native control, dispatch the reserved command:
 
 ```text
 app.check-for-updates
@@ -148,24 +183,218 @@ app.check-for-updates
 
 The runtime consumes this command as a host action. Do not map it through a TypeScript core's `commandMsg` or a Zig app's `on_command`.
 
+## Drive updates from the app on Windows
+
+On Windows the updater shows no UI and never quits the app on its own. The app sends requests and follows a channel; what to show, when to download, and when to restart are the app's decisions.
+
+<table>
+  <thead>
+    <tr>
+      <th>Request</th>
+      <th>What it does</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>native-sdk.updates.status</code></td>
+      <td>Answers the current status</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.updates.check</code></td>
+      <td>Starts a check. While a release is staged it does nothing; <code>discard</code> the release to look again.</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.updates.download</code></td>
+      <td>Downloads, verifies, and stages the release a check found, or retries a failed download</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.updates.cancel</code></td>
+      <td>Stops a download; the release stays <code>available</code></td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.updates.discard</code></td>
+      <td>Drops a staged release</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.updates.restart</code></td>
+      <td>Starts a helper and quits the app; once the app has exited, the helper moves the staged release into place and starts it</td>
+    </tr>
+    <tr>
+      <td><code>native-sdk.updates.notes</code></td>
+      <td>Answers the release notes of the release a check found, as plain text</td>
+    </tr>
+  </tbody>
+</table>
+
+Every request takes an empty payload and answers at once. `status` answers the current status and `notes` the release notes; the other requests answer an empty `ok` once accepted, and checks and downloads then run in the background. The `err` arm receives `unsupported`, `busy`, `not_available`, `not_ready`, `not_downloading`, `invalid_request`, or `restart_failed`.
+
+The `native-sdk.updates` channel source, opened with empty arguments, delivers the current status when it opens, then a status at every change and about every percent of a download, in the order they happened. Follow the channel to keep a status current; a `status` answer is a one-off read. A status is UTF-8 lines of `name value`:
+
+<table>
+  <thead>
+    <tr>
+      <th>Line</th>
+      <th>Value</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>state</code></td>
+      <td><code>unsupported</code>, <code>idle</code>, <code>checking</code>, <code>up_to_date</code>, <code>available</code>, <code>downloading</code>, <code>ready</code>, or <code>error</code></td>
+    </tr>
+    <tr>
+      <td><code>installed</code></td>
+      <td>The running version</td>
+    </tr>
+    <tr>
+      <td><code>version</code></td>
+      <td>The release a check found or an earlier launch staged</td>
+    </tr>
+    <tr>
+      <td><code>size</code></td>
+      <td>The release archive's size in bytes, once a check named it</td>
+    </tr>
+    <tr>
+      <td><code>received</code>, <code>percent</code></td>
+      <td>Bytes downloaded and the percentage, while downloading</td>
+    </tr>
+    <tr>
+      <td><code>reason</code></td>
+      <td>Why updates are unsupported: <code>not_configured</code> (no <code>updates</code> block), <code>platform</code> (this platform's updater is not app-driven, as on macOS), <code>not_installed</code> (not running from an SDK installation, such as a development build or a copied folder), or <code>read_only</code> (the install folder is not writable)</td>
+    </tr>
+    <tr>
+      <td><code>error</code></td>
+      <td>Why the last check or download failed: <code>network</code>, <code>http_status</code>, <code>feed_invalid</code>, <code>signature_invalid</code>, <code>wrong_app</code>, <code>wrong_target</code>, <code>archive_size</code>, <code>archive_digest</code>, <code>archive_invalid</code>, or <code>disk</code></td>
+    </tr>
+    <tr>
+      <td><code>last updated</code></td>
+      <td><code>&lt;from&gt; &lt;to&gt;</code>, in the launch that moved a staged release into place</td>
+    </tr>
+  </tbody>
+</table>
+
+Read lines by name: later SDK versions may add lines. A TypeScript core opens the channel from `initialModel` and turns presses into requests:
+
+```ts:src/core.ts
+import { Cmd, asciiBytes } from "@native-sdk/core";
+
+export type ChannelState = "data" | "closed" | "rejected";
+export type ChannelSourceState = "started" | "skipped" | "failed";
+
+export interface Model {
+  readonly updateStatus: Uint8Array;
+}
+
+export type Msg =
+  | { readonly kind: "updatesOpened"; readonly key: number; readonly state: ChannelSourceState; readonly bytes: Uint8Array }
+  | { readonly kind: "updatesChanged"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number }
+  | { readonly kind: "updateAccepted"; readonly body: Uint8Array }
+  | { readonly kind: "updateRefused"; readonly reason: Uint8Array }
+  | { readonly kind: "checkForUpdates" }
+  | { readonly kind: "downloadUpdate" }
+  | { readonly kind: "restartToUpdate" };
+
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [
+    { updateStatus: new Uint8Array(0) },
+    Cmd.channelOpenSource(1, "native-sdk.updates", new Uint8Array(0), { event: "updatesChanged", started: "updatesOpened" }),
+  ];
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "updatesOpened":
+      return model;
+    case "updatesChanged":
+      return msg.state === "data" ? { ...model, updateStatus: msg.bytes } : model;
+    case "updateAccepted":
+    case "updateRefused":
+      return model;
+    case "checkForUpdates":
+      return [model, Cmd.request("native-sdk.updates.check", new Uint8Array(0), { ok: "updateAccepted", err: "updateRefused" })];
+    case "downloadUpdate":
+      return [model, Cmd.request("native-sdk.updates.download", new Uint8Array(0), { ok: "updateAccepted", err: "updateRefused" })];
+    case "restartToUpdate":
+      return [model, Cmd.request("native-sdk.updates.restart", new Uint8Array(0), { ok: "updateAccepted", err: "updateRefused" })];
+  }
+}
+
+// The value of one `name value` line of a status; empty when absent.
+function statusLine(status: Uint8Array, name: Uint8Array): Uint8Array {
+  let start = 0;
+  while (start < status.length) {
+    let end = start;
+    while (end < status.length && status[end] !== 10) end += 1;
+    if (end - start > name.length && status[start + name.length] === 32 && startsWithAt(status, start, name)) {
+      return status.subarray(start + name.length + 1, end);
+    }
+    start = end + 1;
+  }
+  return new Uint8Array(0);
+}
+
+function startsWithAt(bytes: Uint8Array, at: number, prefix: Uint8Array): boolean {
+  for (let i = 0; i < prefix.length; i++) {
+    if (bytes[at + i] !== prefix[i]) return false;
+  }
+  return true;
+}
+
+export function updateState(model: Model): Uint8Array {
+  return statusLine(model.updateStatus, asciiBytes("state"));
+}
+
+export function updateVersion(model: Model): Uint8Array {
+  return statusLine(model.updateStatus, asciiBytes("version"));
+}
+```
+
+A staged release waits in `ready` until the app asks to restart or until the next launch: the launcher the setup program installed moves it into place before it starts the app, whichever way the app is opened (Start menu, a document, a link). After `restart`, the helper waits up to a minute for the app to exit; an app that does not quit keeps running, and its release applies at the next launch.
+
+## Test an update locally
+
+Set `NATIVE_SDK_UPDATES_FEED_URL` to test an update end to end without publishing it: an installed app started with the variable checks that URL instead of the manifest's, and accepts loopback `http://` URLs for the feed and the archive. The manifest's keys still decide what installs.
+
+```bash
+native update sign \
+  --manifest app.json \
+  --private-key ~/Documents/my-app-update.key \
+  --archive zig-out/package/my-app-1.1.0-windows-x86_64-update.zip \
+  --url http://127.0.0.1:8080/my-app-1.1.0.zip \
+  --target windows-x86_64 \
+  --allow-loopback-http \
+  --output test-feed/windows-x86_64/native-update.json
+```
+
+Serve `test-feed`, with the archive at `my-app-1.1.0.zip`, on `127.0.0.1:8080`, then start an installed earlier version with `NATIVE_SDK_UPDATES_FEED_URL=http://127.0.0.1:8080/{target}/native-update.json`. Loopback hosts are `127.0.0.1`, `[::1]`, and `localhost`; `native update sign` refuses an `http://` archive URL without `--allow-loopback-http`, and installed apps refuse one unless the variable is set.
+
 ## Verification model
 
 The updater verifies every release in this order:
 
 1. Decode the bounded feed envelope.
 2. Verify its exact payload bytes with one of the app's trusted Ed25519 public keys.
-3. Match bundle ID, target architecture, and a newer semantic version.
+3. Match bundle ID, target, and a newer semantic version.
 4. Download through HTTPS and reject redirects away from HTTPS.
 5. Match the signed archive byte size and SHA-256 digest before extraction.
-6. Require exactly one top-level `.app` with the expected bundle ID and version.
-7. For Developer ID apps, require the update to retain the installed app's bundle identifier and Apple signing team.
-8. Exit the app, replace it in the containing directory, retain the old bundle as rollback, and relaunch.
+
+On macOS it then:
+
+6. Requires exactly one top-level `.app` with the expected bundle ID and version.
+7. For Developer ID apps, requires the update to retain the installed app's bundle identifier and Apple signing team.
+8. Exits the app, replaces it in the containing directory, retains the old bundle as rollback, and relaunches.
+
+On Windows it then:
+
+6. Unpacks the archive into `app.next\` beside the installed `app\`, and requires its install configuration to name this app, the signed version, and the same executable, built for this architecture.
+7. Marks the staged copy complete. With nothing running from `app\`, the launcher renames `app\` to `app.prev\` and `app.next\` to `app\`, and a launch after an interrupted switch finishes or reverts it.
 
 Unsigned and ad-hoc apps can use the Ed25519 trust path for development. Public releases should still be Developer ID signed and notarized so Gatekeeper can identify the developer and validate the downloaded app independently.
 
 ## Current limits
 
-- The containing directory must be writable by the current user. The updater does not request administrator privileges or install into an administrator-owned location.
-- The macOS system host is supported; Chromium, Windows, and Linux backends are pending.
+- macOS: the containing directory must be writable by the current user. The updater does not request administrator privileges or install into an administrator-owned location.
+- Windows: only apps installed per user by the SDK's setup program update; a development build or a copied folder reports `not_installed`. The updater does not check the Authenticode signature of a release, and the previous version stays in `app.prev\` without an automatic rollback.
+- The macOS Chromium host and Linux are pending.
 - Full ZIP releases are supported. Delta updates, channels, phased rollout, skipped-version preferences, and automatic background installation are not implemented yet.
 - An app renamed in Finder is supported; the update ZIP may keep its original bundle filename.

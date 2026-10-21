@@ -2211,6 +2211,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         package_run.addArgs(&.{ "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
         if (cef_auto_install) package_run.addArg("--cef-auto-install");
         if (app_config.updates_enabled and host_os == .macos) package_run.addArg("--update-archive");
+        // Windows updates reach only installed apps, so an app with updates
+        // ships the per-user setup program beside the archive its feed names.
+        if (app_config.updates_enabled and host_os == .windows) package_run.addArgs(&.{ "--installer", "--update-archive" });
         package_run.has_side_effects = true;
         const package_step = b.step("package", "Create a distributable package via the native CLI");
         package_step.dependOn(&package_run.step);
