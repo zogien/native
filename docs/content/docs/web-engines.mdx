@@ -45,6 +45,8 @@ System mode has no bundled browser dependency. It uses the OS web engine, so ren
 
 On Windows the system engine is WebView2, whose Evergreen runtime is preinstalled on Windows 11 and current Windows 10; older machines need the runtime installer from the WebView2 download page (`native doctor` checks for it). The build stages the small vendored `WebView2Loader.dll` next to the app executable automatically, and `native package` includes it in the Windows artifact.
 
+WebView2 keeps cookies, web storage, and caches in `%LOCALAPPDATA%\<bundle-id>\WebView2`, beside the app's other per-user data, so the app also works from a read-only install folder. Apps built with earlier SDK versions kept this data in a `<exe>.WebView2` folder next to the executable; the first launch moves it to the new location. An app on a different drive from `%LOCALAPPDATA%` cannot move the folder and keeps using it where it is. If the move fails for another reason, for example because another running copy of the app still has the folder open, that launch keeps using the old folder and the next launch tries again.
+
 ## Chromium (CEF)
 
 Set the app engine once:

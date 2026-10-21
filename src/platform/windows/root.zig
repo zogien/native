@@ -2727,6 +2727,23 @@ test "windows webview focus reports the focused child label" {
     try std.testing.expect(std.mem.indexOf(u8, host_source, "event.view_label = focused->second.label.c_str();") != null);
 }
 
+test "windows webview2 keeps its user data with the app's per-user data" {
+    // WebView2's default user data folder sits beside the executable,
+    // which is read-only under Program Files and is swapped away with
+    // the program files on update. Every environment the host creates
+    // names the folder beside the app_dirs roots instead, and an earlier
+    // "<exe>.WebView2" folder moves there once.
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "factory(nullptr, webViewUserDataFolder(host), nullptr,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "factory(nullptr, nullptr, nullptr,") == null);
+    const resolve_at = std.mem.indexOf(u8, host_source, "static const wchar_t *webViewUserDataFolder(Host *host) {") orelse return error.TestExpectedEqual;
+    const resolve = host_source[resolve_at..];
+    try std.testing.expect(std.mem.indexOf(u8, resolve, "GetEnvironmentVariableW(L\"LOCALAPPDATA\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resolve, "const std::wstring folder = app_root + L\"\\\\WebView2\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resolve, "MoveFileExW(legacy.c_str(), folder.c_str(), 0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "return path + L\".WebView2\";") != null);
+}
+
 test "windows audio event maps kinds and payload" {
     var event = std.mem.zeroes(WindowsEvent);
     event.audio_kind = 1;

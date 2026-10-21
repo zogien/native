@@ -746,6 +746,11 @@ struct Host {
     std::string window_title;
     std::string bundle_id;
     std::string icon_path;
+    /* The WebView2 user data folder every environment in this host
+     * shares, resolved once on first use (webViewUserDataFolder). Empty
+     * means WebView2's own default. */
+    bool webview_user_data_folder_resolved = false;
+    std::wstring webview_user_data_folder;
     EventCallback callback = nullptr;
     void *callback_context = nullptr;
     BridgeCallback bridge_callback = nullptr;
@@ -5524,6 +5529,81 @@ static CreateEnvironmentFn webView2Factory() {
     return reinterpret_cast<CreateEnvironmentFn>(GetProcAddress(loader, "CreateCoreWebView2EnvironmentWithOptions"));
 }
 
+static bool webViewDirectoryExists(const std::wstring &path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+/* The folder WebView2 picks when none is given: "<exe>.WebView2" beside
+ * the executable. Earlier hosts left their data there. */
+static std::wstring webViewLegacyUserDataFolder() {
+    std::wstring path(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(nullptr, path.data(), (DWORD)path.size());
+        if (length == 0) return std::wstring();
+        if (length < path.size()) {
+            path.resize(length);
+            return path + L".WebView2";
+        }
+        if (path.size() >= 32768) return std::wstring();
+        path.resize(path.size() * 2);
+    }
+}
+
+/* WebView2 keeps cookies, storage and caches in its user data folder.
+ * Its default sits beside the executable, which is read-only under
+ * Program Files and is replaced together with the program files when
+ * an installed app updates. Keep it with the app's other per-user data
+ * instead: %LOCALAPPDATA%\<bundle id>\WebView2, next to the Data, Cache,
+ * State and Logs folders app_dirs resolves from the same variable and
+ * bundle id. A folder left beside the executable by an earlier host
+ * moves there once. A folder on another volume cannot be renamed there,
+ * so that install keeps its old folder; when the move fails for another
+ * reason (another process still has the folder open) this launch keeps
+ * the old folder and the next launch tries again. Either way no data is
+ * lost. Without LOCALAPPDATA or a usable bundle id, WebView2 keeps its
+ * default. */
+static const wchar_t *webViewUserDataFolder(Host *host) {
+    if (host->webview_user_data_folder_resolved) {
+        return host->webview_user_data_folder.empty() ? nullptr : host->webview_user_data_folder.c_str();
+    }
+    host->webview_user_data_folder_resolved = true;
+    const std::string &bundle_id = host->bundle_id;
+    if (bundle_id.empty() || bundle_id == "." || bundle_id == ".." ||
+        bundle_id.find_first_of("\\/:*?\"<>|") != std::string::npos) return nullptr;
+    for (unsigned char ch : bundle_id) {
+        if (ch < 0x20) return nullptr;
+    }
+    const DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
+    if (needed <= 1) return nullptr;
+    std::wstring local_app_data((size_t)needed, L'\0');
+    const DWORD written = GetEnvironmentVariableW(L"LOCALAPPDATA", local_app_data.data(), needed);
+    if (written == 0 || written >= needed) return nullptr;
+    local_app_data.resize(written);
+    while (!local_app_data.empty() && (local_app_data.back() == L'\\' || local_app_data.back() == L'/')) local_app_data.pop_back();
+    if (local_app_data.empty()) return nullptr;
+
+    const std::wstring app_root = local_app_data + L"\\" + widen(bundle_id);
+    const std::wstring folder = app_root + L"\\WebView2";
+    SHCreateDirectoryExW(nullptr, app_root.c_str(), nullptr);
+    if (!webViewDirectoryExists(app_root)) return nullptr;
+
+    if (!webViewDirectoryExists(folder)) {
+        const std::wstring legacy = webViewLegacyUserDataFolder();
+        if (!legacy.empty() && webViewDirectoryExists(legacy) && !MoveFileExW(legacy.c_str(), folder.c_str(), 0)) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_NOT_SAME_DEVICE) {
+                fprintf(stderr, "native-sdk: keeping WebView2 data in %s for this launch; moving it to %s failed (error %lu)\n",
+                    narrow(legacy).c_str(), narrow(folder).c_str(), static_cast<unsigned long>(error));
+            }
+            host->webview_user_data_folder = legacy;
+            return host->webview_user_data_folder.c_str();
+        }
+    }
+    host->webview_user_data_folder = folder;
+    return host->webview_user_data_folder.c_str();
+}
+
 static void cleanupPendingChildWebView(Host *host, const std::string &key) {
     if (!host) return;
     auto found = host->webviews.find(key);
@@ -5552,7 +5632,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
     HWND parent = found->second.hwnd;
     const uint64_t generation = found->second.window_drag_generation;
     std::weak_ptr<HostLifetime> lifetime = host->lifetime;
-    HRESULT hr = factory(nullptr, nullptr, nullptr, Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+    HRESULT hr = factory(nullptr, webViewUserDataFolder(host), nullptr, Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
         [host, key, parent, lifetime, generation](HRESULT result, ICoreWebView2Environment *environment) -> HRESULT {
             auto token = lifetime.lock();
             if (!token) return S_OK;
