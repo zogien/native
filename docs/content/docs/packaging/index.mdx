@@ -219,6 +219,7 @@ An explicit list must contain exactly one `app`; its optional `name` changes onl
 Linux packaging creates an install tree:
 
 - `bin/<name>` -- the executable
+- `resources/assets/` -- the app's asset tree, mirrored at its app-relative path (`resources/dist/` for frontend assets)
 - `share/applications/<name>.desktop` -- desktop entry file
 - `share/icons/hicolor/.../<name>.png` -- icons at standard sizes
 - `share/mime/packages/<name>.xml` -- shared MIME metadata when file associations are configured
@@ -236,6 +237,8 @@ native package --target windows --manifest app.json --binary zig-out/bin/MyApp.e
 ```
 
 Windows packaging is in early development. The packager copies the binary and assets into a distributable directory structure and writes a multi-size `app-icon.ico` generated from your icon source (or copies a prebuilt `.ico` from `.icons` untouched). When file associations or URL schemes are configured, the artifact also includes `install/register-file-types.ps1`, which registers the package-local executable under the current user's `HKCU\Software\Classes` registry keys.
+
+The artifact keeps the executable in `bin\` and mirrors the asset tree at its app-relative path under `resources\` (`resources\assets\`, or `resources\dist\` for frontend assets). When the executable runs from `bin\`, the packaged app reads relative asset paths such as `assets/fonts/mono.ttf`, and serves a relative WebView asset root, from that `resources\` directory, whatever the working directory of the launch. A development binary outside `bin\`, or an asset missing from the package, keeps resolving against the working directory. Linux artifacts use the same layout for startup asset reads; the Linux WebView host still serves its asset root from the working directory.
 
 ## Frontend assets
 

@@ -1179,8 +1179,57 @@ static std::string bridgeOriginForWebViewUrl(const ChildWebView &webview, const 
     return isInternalAssetUrl(webview, url) ? assetOrigin(webview) : originForUrl(url);
 }
 
+/* The resources\ directory of a packaged Windows artifact: `native
+ * package` stages the executable in bin\ and the app-relative asset tree
+ * in resources\ beside it. Empty when the executable is not in a bin\
+ * directory. */
+static const std::wstring &packagedResourcesDirectory() {
+    static const std::wstring directory = [] {
+        std::wstring path(MAX_PATH, L'\0');
+        for (;;) {
+            const DWORD length = GetModuleFileNameW(nullptr, path.data(), (DWORD)path.size());
+            if (length == 0) return std::wstring();
+            if (length < path.size()) {
+                path.resize(length);
+                break;
+            }
+            if (path.size() >= 32768) return std::wstring();
+            path.resize(path.size() * 2);
+        }
+        const size_t exe_slash = path.find_last_of(L"\\/");
+        if (exe_slash == std::wstring::npos) return std::wstring();
+        const std::wstring bin = path.substr(0, exe_slash);
+        const size_t bin_slash = bin.find_last_of(L"\\/");
+        if (bin_slash == std::wstring::npos || CompareStringOrdinal(bin.c_str() + bin_slash + 1, -1, L"bin", -1, TRUE) != CSTR_EQUAL) return std::wstring();
+        return bin.substr(0, bin_slash) + L"\\resources";
+    }();
+    return directory;
+}
+
+/* A relative WebView asset root names a directory of the packaged asset
+ * tree when the app runs from a package, the tree the macOS host finds
+ * in its bundle's Resources. In development it stays relative to the
+ * working directory. */
+static std::string assetRootPath(const std::string &root) {
+    const bool absolute = !root.empty() && (root[0] == '\\' || root[0] == '/' || (root.size() > 1 && root[1] == ':'));
+    if (!absolute) {
+        const std::wstring &resources = packagedResourcesDirectory();
+        if (!resources.empty()) {
+            std::wstring candidate = resources;
+            if (!root.empty() && root != ".") {
+                std::wstring relative = widen(root);
+                std::replace(relative.begin(), relative.end(), L'/', L'\\');
+                candidate += L"\\" + relative;
+            }
+            const DWORD attributes = GetFileAttributesW(candidate.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return narrow(candidate);
+        }
+    }
+    return root.empty() ? std::string(".") : root;
+}
+
 static std::wstring assetFilePath(const ChildWebView &webview, const std::string &relative) {
-    std::string path = webview.asset_root.empty() ? std::string(".") : webview.asset_root;
+    std::string path = assetRootPath(webview.asset_root);
     if (!path.empty() && path.back() != '/' && path.back() != '\\') path.push_back('\\');
     std::string native_relative = relative;
     std::replace(native_relative.begin(), native_relative.end(), '/', '\\');

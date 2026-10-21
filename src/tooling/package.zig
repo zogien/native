@@ -500,7 +500,7 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try makeExecutable(dir, io, service_subpath);
     }
 
-    const assets_output = try assetOutputPath(allocator, options.output_path, "resources", options);
+    const assets_output = try desktopAssetOutputPath(allocator, options);
     defer allocator.free(assets_output);
     const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
     try writeFile(dir, io, "README.txt", artifactReadme(options.target));
@@ -785,6 +785,20 @@ fn macosAssetOutputPath(allocator: std.mem.Allocator, options: PackageOptions) !
         return std.fs.path.join(allocator, &.{ options.output_path, "Contents/Resources", subpath });
     }
     return std.fs.path.join(allocator, &.{ options.output_path, "Contents/Resources" });
+}
+
+/// Where a Windows or Linux artifact carries the app's assets: the macOS
+/// bundle's layout (macosAssetOutputPath) under resources/. The packaged
+/// runner and Windows host resolve relative asset paths against the
+/// resources/ directory beside the executable's bin/, so a relative path
+/// the app reads ("assets/fonts/mono.ttf") names the same file it names
+/// in a dev run.
+fn desktopAssetOutputPath(allocator: std.mem.Allocator, options: PackageOptions) ![]const u8 {
+    if (options.frontend != null) return assetOutputPath(allocator, options.output_path, "resources", options);
+    if (appRelativeAssetSubpath(options.assets_dir)) |subpath| {
+        return std.fs.path.join(allocator, &.{ options.output_path, "resources", subpath });
+    }
+    return std.fs.path.join(allocator, &.{ options.output_path, "resources" });
 }
 
 /// The asset directory as an app-relative bundle subpath, or null when
@@ -3430,6 +3444,34 @@ test "macOS package mirrors app assets at their app-relative path" {
     const bundled = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-asset-layout/Demo.app/Contents/Resources/.zig-cache/test-package-asset-layout/assets/music/track.mp3");
     defer std.testing.allocator.free(bundled);
     try std.testing.expectEqualStrings("mp3-bytes", bundled);
+}
+
+test "windows and linux packages mirror app assets at their app-relative path" {
+    // The packaged runner resolves "assets/music/track.mp3" against the
+    // resources/ directory beside bin/, so the artifact keeps the asset
+    // tree at the relative path a dev run reads.
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-desktop-asset-layout";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets/music");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/assets/music/track.mp3", .data = "mp3-bytes" });
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.2.3" };
+    inline for (.{ PackageTarget.windows, PackageTarget.linux }) |target| {
+        const output = root ++ "/demo-" ++ @tagName(target);
+        const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+            .metadata = metadata,
+            .target = target,
+            .output_path = output,
+            .assets_dir = root ++ "/assets",
+        });
+        try std.testing.expectEqual(@as(usize, 1), stats.asset_count);
+        const packaged = try readPath(std.testing.allocator, std.testing.io, output ++ "/resources/" ++ root ++ "/assets/music/track.mp3");
+        defer std.testing.allocator.free(packaged);
+        try std.testing.expectEqualStrings("mp3-bytes", packaged);
+        try std.testing.expectError(error.FileNotFound, readPath(std.testing.allocator, std.testing.io, output ++ "/resources/music/track.mp3"));
+    }
 }
 
 test "app-relative asset subpaths accept plain trees and reject escapes" {

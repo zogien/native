@@ -2744,6 +2744,18 @@ test "windows webview2 keeps its user data with the app's per-user data" {
     try std.testing.expect(std.mem.indexOf(u8, host_source, "return path + L\".WebView2\";") != null);
 }
 
+test "windows webview assets resolve against the packaged resources beside bin" {
+    // `native package` stages bin\<exe> and the app-relative asset tree
+    // in resources\; a relative asset root names that tree when the app
+    // runs from a package and the working directory otherwise.
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "std::string path = assetRootPath(webview.asset_root);") != null);
+    const resources_at = std.mem.indexOf(u8, host_source, "static const std::wstring &packagedResourcesDirectory() {") orelse return error.TestExpectedEqual;
+    const resources = host_source[resources_at..];
+    try std.testing.expect(std.mem.indexOf(u8, resources, "CompareStringOrdinal(bin.c_str() + bin_slash + 1, -1, L\"bin\", -1, TRUE)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resources, "return bin.substr(0, bin_slash) + L\"\\\\resources\";") != null);
+}
+
 test "windows audio event maps kinds and payload" {
     var event = std.mem.zeroes(WindowsEvent);
     event.audio_kind = 1;
