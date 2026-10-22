@@ -100,6 +100,7 @@ pub const RunOptions = struct {
             .update_feed_url = manifestUpdateString("feed_url"),
             .update_public_key = manifestUpdatePublicKeys(),
             .update_check_on_start = manifestUpdateCheckOnStart(),
+            .update_mode = manifestUpdateMode(),
             .main_window = .{
                 .id = 1,
                 .label = "main",
@@ -187,6 +188,13 @@ fn manifestUpdateCheckOnStart() bool {
     if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return false;
     if (comptime !@hasField(@TypeOf(app_manifest.updates), "check_on_start")) return false;
     return app_manifest.updates.check_on_start;
+}
+
+fn manifestUpdateMode() native_sdk.platform.UpdateMode {
+    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return .host;
+    if (comptime !@hasField(@TypeOf(app_manifest.updates), "mode")) return .host;
+    return comptime std.meta.stringToEnum(native_sdk.platform.UpdateMode, app_manifest.updates.mode) orelse
+        @compileError("app manifest updates.mode must be \"host\" or \"app\"");
 }
 
 const CommandStorage = struct {
@@ -1039,7 +1047,12 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
 /// Points the app-driven updater at this installation (see
 /// `updater.configureApp`).
 fn configureUpdates(app_info: *native_sdk.platform.AppInfo, environ_map: *std.process.Environ.Map) void {
-    const host: native_sdk.updater.Host = comptime if (std.mem.eql(u8, build_options.platform, "windows")) .windows else .other;
+    const host: native_sdk.updater.Host = comptime if (std.mem.eql(u8, build_options.platform, "windows"))
+        .windows
+    else if (std.mem.eql(u8, build_options.platform, "macos") and std.mem.eql(u8, build_options.web_engine, "system"))
+        .macos_appkit
+    else
+        .other;
     native_sdk.updater.configureApp(host, app_info, environ_map);
 }
 
@@ -1342,6 +1355,7 @@ test "RunOptions resolves manifest commands menus and shortcuts" {
     try std.testing.expectEqualStrings("https://example.com/releases/{target}/native-update.json", app_info.update_feed_url);
     try std.testing.expectEqualStrings("11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=,wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=", app_info.update_public_key);
     try std.testing.expect(app_info.update_check_on_start);
+    try std.testing.expectEqual(native_sdk.platform.UpdateMode.app, app_info.update_mode);
 
     var command_storage: CommandStorage = .{};
     const commands = options.resolvedCommands(&command_storage);

@@ -1289,6 +1289,9 @@ pub const ViewInfo = struct {
     }
 };
 
+/// Who drives updates on macOS (the manifest's `updates.mode`).
+pub const UpdateMode = enum { host, app };
+
 pub const AppInfo = struct {
     app_name: []const u8 = "native-sdk",
     /// The human-facing application name (app.zon `display_name`) the
@@ -1329,6 +1332,9 @@ pub const AppInfo = struct {
     /// The trusted update keys: base64 Ed25519 public keys, comma-joined.
     update_public_key: []const u8 = "",
     update_check_on_start: bool = false,
+    /// `.app`: the app drives updates through `native-sdk.updates` and the
+    /// macOS host shows no update UI of its own.
+    update_mode: UpdateMode = .host,
     main_window: WindowOptions = .{},
     windows: []const WindowOptions = &.{},
 

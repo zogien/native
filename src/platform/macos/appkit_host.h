@@ -419,6 +419,15 @@ void native_sdk_appkit_set_dock_icon_rgba(native_sdk_appkit_host_t *host, const 
 void native_sdk_appkit_set_dock_icon_file(native_sdk_appkit_host_t *host, const char *path, size_t path_len);
 void native_sdk_appkit_configure_updates(native_sdk_appkit_host_t *host, const char *feed_url, size_t feed_url_len, const char *public_key, size_t public_key_len, int check_on_start, const char *target, size_t target_len);
 int native_sdk_appkit_check_for_updates(native_sdk_appkit_host_t *host, int user_initiated);
+// App-driven updates (src/updater/macos.zig); none of these shows UI.
+int native_sdk_macos_updates_eligibility(void);
+size_t native_sdk_macos_updates_staged_version(const char *bundle_id, size_t bundle_id_len, char *output, size_t capacity);
+size_t native_sdk_macos_updates_take_last(const char *bundle_id, size_t bundle_id_len, char *output, size_t capacity);
+int native_sdk_macos_updates_fetch(const char *url, size_t url_len, int allow_loopback_http, uint8_t *output, size_t capacity, size_t *output_len);
+int native_sdk_macos_updates_download(const char *url, size_t url_len, int allow_loopback_http, uint64_t limit, char *path_output, size_t path_capacity, size_t *path_len, void *context, void (*progress)(void *context, uint64_t received), int (*cancelled)(void *context));
+int native_sdk_macos_updates_stage(const char *archive_path, size_t archive_path_len, const char *bundle_id, size_t bundle_id_len, const char *version, size_t version_len);
+void native_sdk_macos_updates_discard(void);
+int native_sdk_macos_updates_install(const char *bundle_id, size_t bundle_id_len, const char *from_version, size_t from_version_len, int relaunch);
 void native_sdk_appkit_run(native_sdk_appkit_host_t *host, native_sdk_appkit_event_callback_t callback, void *context);
 // The host-side shutdown request: a failed event emit asks the host to
 // deliver SHUTDOWN and stop. While the run loop is live the delivery is

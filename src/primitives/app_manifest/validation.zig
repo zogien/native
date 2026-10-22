@@ -657,6 +657,7 @@ pub fn validateSecurity(security: SecurityConfig) ValidationError!void {
 pub fn validateUpdates(updates: UpdateConfig) ValidationError!void {
     if ((updates.feed_url == null) != (updates.public_key == null)) return error.MissingRequiredField;
     if (updates.check_on_start and updates.feed_url == null) return error.MissingRequiredField;
+    if (updates.mode == .app and updates.feed_url == null) return error.MissingRequiredField;
     if (updates.public_keys.len > 0 and updates.public_key == null) return error.MissingRequiredField;
     if (updates.public_keys.len > types.max_update_public_keys) return error.MissingRequiredField;
     if (updates.feed_url) |url| {

@@ -145,7 +145,8 @@
           "uniqueItems": true,
           "items": { "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$" }
         },
-        "check_on_start": { "type": "boolean", "default": false }
+        "check_on_start": { "type": "boolean", "default": false },
+        "mode": { "type": "string", "enum": ["host", "app"], "default": "host" }
       }
     },
     "bridge": {

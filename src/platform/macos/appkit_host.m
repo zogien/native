@@ -13271,6 +13271,372 @@ int native_sdk_appkit_check_for_updates(native_sdk_appkit_host_t *host, int user
     return 1;
 }
 
+// ---------------------------------------------------------------------------
+// App-driven updates (`updates.mode = "app"`): the platform half of
+// src/updater/engine.zig, reached through src/updater/macos.zig. Unlike the
+// host flow above, nothing here shows UI; the engine calls these from its
+// worker threads and from the app loop. The release stages beside the app,
+// `<parent>/.<App.app>.native-update/`, so installing it is a rename on the
+// same volume, and a helper installs it once this process exits.
+
+enum {
+    NativeSdkUpdateOk = 0,
+    NativeSdkUpdateNetwork = 1,
+    NativeSdkUpdateHttpStatus = 2,
+    NativeSdkUpdateTooLarge = 3,
+    NativeSdkUpdateCancelled = 4,
+    NativeSdkUpdateDisk = 5,
+};
+
+static NSString *NativeSdkUpdateString(const char *bytes, size_t length) {
+    if (!bytes || length == 0) return @"";
+    return [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding] ?: @"";
+}
+
+static size_t NativeSdkUpdateCopy(NSString *value, char *output, size_t capacity) {
+    const char *bytes = value.UTF8String;
+    const size_t length = bytes ? strlen(bytes) : 0;
+    if (length == 0 || length > capacity) return 0;
+    memcpy(output, bytes, length);
+    return length;
+}
+
+static NSString *NativeSdkUpdateBundlePath(void) {
+    return NSBundle.mainBundle.bundlePath.stringByStandardizingPath;
+}
+
+static NSString *NativeSdkUpdateSiblingPath(NSString *suffix) {
+    NSString *bundlePath = NativeSdkUpdateBundlePath();
+    return [bundlePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.%@", bundlePath.lastPathComponent, suffix]];
+}
+
+static NSString *NativeSdkUpdateResultPath(NSString *bundleIdentifier) {
+    NSURL *support = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    if (!support || bundleIdentifier.length == 0) return nil;
+    return [[support.path stringByAppendingPathComponent:bundleIdentifier] stringByAppendingPathComponent:@".native-update-result"];
+}
+
+static BOOL NativeSdkUpdateURLAllowed(NSURL *url, BOOL allowLoopbackHttp) {
+    NSString *scheme = url.scheme.lowercaseString;
+    if ([scheme isEqualToString:@"https"]) return url.host.length > 0;
+    if (!allowLoopbackHttp || ![scheme isEqualToString:@"http"]) return NO;
+    NSString *host = url.host.lowercaseString;
+    return [host isEqualToString:@"127.0.0.1"] || [host isEqualToString:@"::1"] || [host isEqualToString:@"localhost"];
+}
+
+/// The one app bundle a staged release unpacked to, when it is this app at
+/// `version`; Info.plist is read directly because NSBundle caches bundles
+/// by path and the staging path is reused.
+static NSString *NativeSdkUpdateStagedBundle(NSString *stagePath, NSString *bundleIdentifier, NSString *version) {
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSArray<NSString *> *entries = [manager contentsOfDirectoryAtPath:stagePath error:nil];
+    NSString *bundleName = nil;
+    for (NSString *entry in entries ?: @[]) {
+        if ([entry isEqualToString:@".native-staged"]) continue;
+        if (bundleName || ![[entry pathExtension].lowercaseString isEqualToString:@"app"]) return nil;
+        bundleName = entry;
+    }
+    if (!bundleName) return nil;
+    NSString *candidate = [stagePath stringByAppendingPathComponent:bundleName];
+    NSNumber *isDirectory = nil;
+    NSNumber *isSymlink = nil;
+    [[NSURL fileURLWithPath:candidate] getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+    [[NSURL fileURLWithPath:candidate] getResourceValue:&isSymlink forKey:NSURLIsSymbolicLinkKey error:nil];
+    if (!isDirectory.boolValue || isSymlink.boolValue) return nil;
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[candidate stringByAppendingPathComponent:@"Contents/Info.plist"]];
+    id identifier = info[@"CFBundleIdentifier"];
+    id bundleVersion = info[@"CFBundleVersion"];
+    if (![identifier isKindOfClass:[NSString class]] || ![identifier isEqualToString:bundleIdentifier]) return nil;
+    if (![bundleVersion isKindOfClass:[NSString class]] || ![bundleVersion isEqualToString:version]) return nil;
+    return candidate;
+}
+
+/// A Developer ID app accepts only a release signed by the same team, as
+/// the host flow does; unsigned and ad-hoc installs rely on the feed's
+/// Ed25519 signature alone.
+static BOOL NativeSdkUpdateSignatureMatches(NSString *candidate, NSString *bundleIdentifier) {
+    NSString *teamIdentifier = NativeSdkSigningTeamIdentifier(NativeSdkUpdateBundlePath());
+    if (teamIdentifier.length == 0) return YES;
+    if ([teamIdentifier rangeOfCharacterFromSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]].location != NSNotFound ||
+        [bundleIdentifier rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"\\\""]].location != NSNotFound) return NO;
+    NSString *requirement = [NSString stringWithFormat:@"anchor apple generic and certificate leaf[subject.OU] = \"%@\" and identifier \"%@\"", teamIdentifier, bundleIdentifier];
+    return NativeSdkRunTask(@"/usr/bin/codesign", @[ @"--verify", @"--deep", @"--strict", [@"-R=" stringByAppendingString:requirement], candidate ], NULL);
+}
+
+typedef void (*NativeSdkUpdateProgressFn)(void *context, uint64_t received);
+typedef int (*NativeSdkUpdateCancelledFn)(void *context);
+
+@interface NativeSdkUpdateTransfer : NSObject <NSURLSessionDataDelegate>
+@property(nonatomic) BOOL allowLoopbackHttp;
+@property(nonatomic) uint64_t limit;
+@property(nonatomic) uint64_t received;
+@property(atomic) int result;
+@property(nonatomic, strong) NSMutableData *data;
+@property(nonatomic, strong) NSFileHandle *file;
+@property(nonatomic) void *context;
+@property(nonatomic) NativeSdkUpdateProgressFn progress;
+@property(nonatomic, strong) dispatch_semaphore_t done;
+@end
+
+@implementation NativeSdkUpdateTransfer
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURLRequest *))completionHandler {
+    (void)session;
+    (void)response;
+    if (NativeSdkUpdateURLAllowed(request.URL, self.allowLoopbackHttp)) {
+        completionHandler(request);
+        return;
+    }
+    self.result = NativeSdkUpdateNetwork;
+    completionHandler(nil);
+    [task cancel];
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
+    (void)session;
+    (void)dataTask;
+    NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+    if (!http || !NativeSdkUpdateURLAllowed(response.URL, self.allowLoopbackHttp)) {
+        self.result = NativeSdkUpdateNetwork;
+    } else if (http.statusCode < 200 || http.statusCode >= 300) {
+        self.result = NativeSdkUpdateHttpStatus;
+    } else if (response.expectedContentLength > 0 && (uint64_t)response.expectedContentLength > self.limit) {
+        self.result = NativeSdkUpdateTooLarge;
+    }
+    completionHandler(self.result == NativeSdkUpdateOk ? NSURLSessionResponseAllow : NSURLSessionResponseCancel);
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+    (void)session;
+    if (self.result != NativeSdkUpdateOk) return;
+    if (data.length > self.limit - self.received) {
+        self.result = NativeSdkUpdateTooLarge;
+        [dataTask cancel];
+        return;
+    }
+    if (self.file) {
+        NSError *error = nil;
+        if (![self.file writeData:data error:&error]) {
+            self.result = NativeSdkUpdateDisk;
+            [dataTask cancel];
+            return;
+        }
+    } else {
+        [self.data appendData:data];
+    }
+    self.received += data.length;
+    if (self.progress) self.progress(self.context, self.received);
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    (void)session;
+    (void)task;
+    if (error && self.result == NativeSdkUpdateOk) self.result = NativeSdkUpdateNetwork;
+    dispatch_semaphore_signal(self.done);
+}
+
+@end
+
+/// GETs `url` through the user's network settings, waiting on the calling
+/// (worker) thread and honoring `cancelled` while the transfer stalls.
+static int NativeSdkUpdateTransferRun(NSURL *url, NativeSdkUpdateTransfer *transfer, void *context, NativeSdkUpdateCancelledFn cancelled) {
+    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration.timeoutIntervalForRequest = 30;
+    configuration.timeoutIntervalForResource = 60 * 60;
+    configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    NSOperationQueue *queue = [[NSOperationQueue alloc] init];
+    queue.maxConcurrentOperationCount = 1;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:transfer delegateQueue:queue];
+    transfer.done = dispatch_semaphore_create(0);
+    NSURLSessionDataTask *task = [session dataTaskWithURL:url];
+    [task resume];
+    while (dispatch_semaphore_wait(transfer.done, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0) {
+        if (cancelled && cancelled(context) && transfer.result == NativeSdkUpdateOk) {
+            transfer.result = NativeSdkUpdateCancelled;
+            [task cancel];
+        }
+    }
+    [session finishTasksAndInvalidate];
+    return transfer.result;
+}
+
+int native_sdk_macos_updates_eligibility(void) {
+    @autoreleasepool {
+        NSString *bundlePath = NativeSdkUpdateBundlePath();
+        if (![bundlePath.pathExtension.lowercaseString isEqualToString:@"app"]) return 1;
+        // A quarantined app Gatekeeper runs from a randomized read-only
+        // mount cannot replace itself until the user moves it.
+        if ([bundlePath rangeOfString:@"/AppTranslocation/"].location != NSNotFound) return 2;
+        if (![[NSFileManager defaultManager] isWritableFileAtPath:bundlePath.stringByDeletingLastPathComponent]) return 2;
+        return 0;
+    }
+}
+
+size_t native_sdk_macos_updates_staged_version(const char *bundle_id, size_t bundle_id_len, char *output, size_t capacity) {
+    @autoreleasepool {
+        NSString *stagePath = NativeSdkUpdateSiblingPath(@"native-update");
+        NSString *version = [NSString stringWithContentsOfFile:[stagePath stringByAppendingPathComponent:@".native-staged"] encoding:NSUTF8StringEncoding error:nil];
+        if (version.length == 0 || !NativeSdkUpdateStagedBundle(stagePath, NativeSdkUpdateString(bundle_id, bundle_id_len), version)) return 0;
+        return NativeSdkUpdateCopy(version, output, capacity);
+    }
+}
+
+size_t native_sdk_macos_updates_take_last(const char *bundle_id, size_t bundle_id_len, char *output, size_t capacity) {
+    @autoreleasepool {
+        NSString *resultPath = NativeSdkUpdateResultPath(NativeSdkUpdateString(bundle_id, bundle_id_len));
+        if (!resultPath) return 0;
+        NSString *record = [NSString stringWithContentsOfFile:resultPath encoding:NSUTF8StringEncoding error:nil];
+        if (!record) return 0;
+        [[NSFileManager defaultManager] removeItemAtPath:resultPath error:nil];
+        NSString *line = [record stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (![line hasPrefix:@"updated "]) return 0;
+        return NativeSdkUpdateCopy([line substringFromIndex:8], output, capacity);
+    }
+}
+
+int native_sdk_macos_updates_fetch(const char *url, size_t url_len, int allow_loopback_http, uint8_t *output, size_t capacity, size_t *output_len) {
+    @autoreleasepool {
+        NSURL *target = [NSURL URLWithString:NativeSdkUpdateString(url, url_len)];
+        if (!target || !NativeSdkUpdateURLAllowed(target, allow_loopback_http != 0)) return NativeSdkUpdateNetwork;
+        NativeSdkUpdateTransfer *transfer = [[NativeSdkUpdateTransfer alloc] init];
+        transfer.allowLoopbackHttp = allow_loopback_http != 0;
+        transfer.limit = capacity;
+        transfer.data = [NSMutableData data];
+        const int result = NativeSdkUpdateTransferRun(target, transfer, NULL, NULL);
+        if (result != NativeSdkUpdateOk) return result;
+        memcpy(output, transfer.data.bytes, transfer.data.length);
+        *output_len = transfer.data.length;
+        return NativeSdkUpdateOk;
+    }
+}
+
+int native_sdk_macos_updates_download(const char *url, size_t url_len, int allow_loopback_http, uint64_t limit, char *path_output, size_t path_capacity, size_t *path_len, void *context, NativeSdkUpdateProgressFn progress, NativeSdkUpdateCancelledFn cancelled) {
+    @autoreleasepool {
+        NSURL *target = [NSURL URLWithString:NativeSdkUpdateString(url, url_len)];
+        if (!target || !NativeSdkUpdateURLAllowed(target, allow_loopback_http != 0)) return NativeSdkUpdateNetwork;
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"native-update-%@.zip", NSUUID.UUID.UUIDString]];
+        NSFileManager *manager = [NSFileManager defaultManager];
+        if (![manager createFileAtPath:path contents:nil attributes:@{ NSFilePosixPermissions: @0600 }]) return NativeSdkUpdateDisk;
+        NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!file) {
+            [manager removeItemAtPath:path error:nil];
+            return NativeSdkUpdateDisk;
+        }
+        NativeSdkUpdateTransfer *transfer = [[NativeSdkUpdateTransfer alloc] init];
+        transfer.allowLoopbackHttp = allow_loopback_http != 0;
+        transfer.limit = limit;
+        transfer.file = file;
+        transfer.context = context;
+        transfer.progress = progress;
+        int result = NativeSdkUpdateTransferRun(target, transfer, context, cancelled);
+        if (![file closeAndReturnError:nil] && result == NativeSdkUpdateOk) result = NativeSdkUpdateDisk;
+        const size_t length = NativeSdkUpdateCopy(path, path_output, path_capacity);
+        if (result == NativeSdkUpdateOk && length == 0) result = NativeSdkUpdateDisk;
+        if (result != NativeSdkUpdateOk) {
+            [manager removeItemAtPath:path error:nil];
+            return result;
+        }
+        *path_len = length;
+        return NativeSdkUpdateOk;
+    }
+}
+
+int native_sdk_macos_updates_stage(const char *archive_path, size_t archive_path_len, const char *bundle_id, size_t bundle_id_len, const char *version, size_t version_len) {
+    @autoreleasepool {
+        NSFileManager *manager = [NSFileManager defaultManager];
+        NSString *bundleIdentifier = NativeSdkUpdateString(bundle_id, bundle_id_len);
+        NSString *expectedVersion = NativeSdkUpdateString(version, version_len);
+        NSString *stagePath = NativeSdkUpdateSiblingPath(@"native-update");
+        [manager removeItemAtPath:stagePath error:nil];
+        if (![manager createDirectoryAtPath:stagePath withIntermediateDirectories:NO attributes:nil error:nil]) return 2;
+        NSString *candidate = nil;
+        if (NativeSdkRunTask(@"/usr/bin/ditto", @[ @"-x", @"-k", NativeSdkUpdateString(archive_path, archive_path_len), stagePath ], NULL)) {
+            candidate = NativeSdkUpdateStagedBundle(stagePath, bundleIdentifier, expectedVersion);
+        }
+        if (!candidate || !NativeSdkUpdateSignatureMatches(candidate, bundleIdentifier)) {
+            [manager removeItemAtPath:stagePath error:nil];
+            return 1;
+        }
+        if (![expectedVersion writeToFile:[stagePath stringByAppendingPathComponent:@".native-staged"] atomically:YES encoding:NSUTF8StringEncoding error:nil]) {
+            [manager removeItemAtPath:stagePath error:nil];
+            return 2;
+        }
+        return 0;
+    }
+}
+
+void native_sdk_macos_updates_discard(void) {
+    @autoreleasepool {
+        [[NSFileManager defaultManager] removeItemAtPath:NativeSdkUpdateSiblingPath(@"native-update") error:nil];
+    }
+}
+
+/// Starts the helper that waits for this process to exit, replaces the app
+/// with the staged release (the old one returns if that fails), records
+/// the switch for the new version to report, and with `relaunch` opens it.
+int native_sdk_macos_updates_install(const char *bundle_id, size_t bundle_id_len, const char *from_version, size_t from_version_len, int relaunch) {
+    @autoreleasepool {
+        NSFileManager *manager = [NSFileManager defaultManager];
+        NSString *bundleIdentifier = NativeSdkUpdateString(bundle_id, bundle_id_len);
+        NSString *stagePath = NativeSdkUpdateSiblingPath(@"native-update");
+        NSString *version = [NSString stringWithContentsOfFile:[stagePath stringByAppendingPathComponent:@".native-staged"] encoding:NSUTF8StringEncoding error:nil];
+        NSString *candidate = version.length > 0 ? NativeSdkUpdateStagedBundle(stagePath, bundleIdentifier, version) : nil;
+        if (!candidate) return 0;
+        NSString *scriptPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"native-update-install-%@.sh", NSUUID.UUID.UUIDString]];
+        NSString *script = @"#!/bin/sh\n"
+            "set -u\n"
+            "pid=\"$1\"; current=\"$2\"; candidate=\"$3\"; backup=\"$4\"; stage=\"$5\"; relaunch=\"$6\"; result=\"$7\"; from=\"$8\"; to=\"$9\"\n"
+            "count=0\n"
+            "while /bin/kill -0 \"$pid\" 2>/dev/null; do\n"
+            "  count=$((count + 1))\n"
+            "  if [ \"$count\" -ge 600 ]; then /bin/rm -f \"$0\"; exit 1; fi\n"
+            "  /bin/sleep 0.1\n"
+            "done\n"
+            "/bin/rm -rf \"$backup\"\n"
+            "if /bin/mv \"$current\" \"$backup\"; then\n"
+            "  if /bin/mv \"$candidate\" \"$current\"; then\n"
+            "    if [ -n \"$result\" ]; then /bin/mkdir -p \"${result%/*}\" && /usr/bin/printf 'updated %s %s\\n' \"$from\" \"$to\" > \"$result\"; fi\n"
+            "    if [ \"$relaunch\" != 1 ] || /usr/bin/open \"$current\"; then\n"
+            "      /bin/rm -rf \"$backup\" \"$stage\"\n"
+            "      /bin/rm -f \"$0\"\n"
+            "      exit 0\n"
+            "    fi\n"
+            "    if [ -n \"$result\" ]; then /bin/rm -f \"$result\"; fi\n"
+            "    /bin/rm -rf \"$current\"\n"
+            "  fi\n"
+            "  /bin/mv \"$backup\" \"$current\"\n"
+            "fi\n"
+            "/bin/rm -rf \"$stage\"\n"
+            "if [ \"$relaunch\" = 1 ]; then /usr/bin/open \"$current\" >/dev/null 2>&1 || true; fi\n"
+            "/bin/rm -f \"$0\"\n"
+            "exit 1\n";
+        if (![script writeToFile:scriptPath atomically:YES encoding:NSUTF8StringEncoding error:nil] ||
+            ![manager setAttributes:@{ NSFilePosixPermissions: @0700 } ofItemAtPath:scriptPath error:nil]) {
+            [manager removeItemAtPath:scriptPath error:nil];
+            return 0;
+        }
+        NSTask *installer = [[NSTask alloc] init];
+        installer.executableURL = [NSURL fileURLWithPath:@"/bin/sh"];
+        installer.arguments = @[
+            scriptPath,
+            [NSString stringWithFormat:@"%d", getpid()],
+            NativeSdkUpdateBundlePath(),
+            candidate,
+            NativeSdkUpdateSiblingPath(@"native-update-backup"),
+            stagePath,
+            relaunch ? @"1" : @"0",
+            NativeSdkUpdateResultPath(bundleIdentifier) ?: @"",
+            NativeSdkUpdateString(from_version, from_version_len),
+            version,
+        ];
+        if (![installer launchAndReturnError:nil]) {
+            [manager removeItemAtPath:scriptPath error:nil];
+            return 0;
+        }
+        return 1;
+    }
+}
+
 void native_sdk_appkit_run(native_sdk_appkit_host_t *host, native_sdk_appkit_event_callback_t callback, void *context) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     [object runWithCallback:callback context:context];

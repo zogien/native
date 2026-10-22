@@ -2445,6 +2445,7 @@ fn runnerZig() []const u8 {
     \\            .update_feed_url = manifestUpdateString("feed_url"),
     \\            .update_public_key = manifestUpdatePublicKeys(),
     \\            .update_check_on_start = manifestUpdateCheckOnStart(),
+    \\            .update_mode = manifestUpdateMode(),
     \\        };
     \\        const windows = manifestWindowOptions(buffers);
     \\        if (windows.len > 0) {
@@ -2532,10 +2533,22 @@ fn runnerZig() []const u8 {
     \\    return keys;
     \\}
     \\
+    \\fn manifestUpdateMode() native_sdk.platform.UpdateMode {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return .host;
+    \\    if (comptime !@hasField(@TypeOf(app_manifest.updates), "mode")) return .host;
+    \\    return comptime std.meta.stringToEnum(native_sdk.platform.UpdateMode, app_manifest.updates.mode) orelse
+    \\        @compileError("app manifest updates.mode must be \"host\" or \"app\"");
+    \\}
+    \\
     \\/// Points the app-driven updater at this installation (see
     \\/// `updater.configureApp`).
     \\fn configureUpdates(app_info: *native_sdk.platform.AppInfo, environ_map: *std.process.Environ.Map) void {
-    \\    const host: native_sdk.updater.Host = comptime if (std.mem.eql(u8, build_options.platform, "windows")) .windows else .other;
+    \\    const host: native_sdk.updater.Host = comptime if (std.mem.eql(u8, build_options.platform, "windows"))
+    \\        .windows
+    \\    else if (std.mem.eql(u8, build_options.platform, "macos") and std.mem.eql(u8, build_options.web_engine, "system"))
+    \\        .macos_appkit
+    \\    else
+    \\        .other;
     \\    native_sdk.updater.configureApp(host, app_info, environ_map);
     \\}
     \\
@@ -4363,6 +4376,7 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_feed_url = manifestUpdateString(\"feed_url\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_public_key = manifestUpdatePublicKeys()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_check_on_start = manifestUpdateCheckOnStart()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_mode = manifestUpdateMode()") != null);
     // Ejected apps configure the app-driven updater on every desktop
     // platform.
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, runner_zig_text, "configureUpdates(&app_info, init.environ_map);"));

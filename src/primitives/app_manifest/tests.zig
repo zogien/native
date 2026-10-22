@@ -125,6 +125,15 @@ test "updates require paired HTTPS feed and Ed25519 public key" {
     }));
 }
 
+test "app-driven updates need a feed to drive" {
+    try validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+        .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        .mode = .app,
+    });
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{ .mode = .app }));
+}
+
 test "update feed URLs may name the target and installed version" {
     const key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
     try validateUpdates(.{ .feed_url = "https://example.com/releases/{target}/native-update.json", .public_key = key });

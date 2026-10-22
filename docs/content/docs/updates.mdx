@@ -16,11 +16,11 @@ Who runs the update depends on the platform:
   <tbody>
     <tr>
       <td>macOS</td>
-      <td>The host runs it: <strong>Check for Updates…</strong> in the application menu, optional background checks after launch, an update prompt with release notes, download progress, in-place replacement with rollback, and relaunch into the new version. Apps using the system host (<code>web_engine: "system"</code>).</td>
+      <td>By default the host runs it: <strong>Check for Updates…</strong> in the application menu, optional background checks after launch, an update prompt with release notes, download progress, in-place replacement with rollback, and relaunch into the new version. With <code>"mode": "app"</code> the app runs it instead, as on Windows; a downloaded release is staged beside the app and replaces it when the app restarts or quits. Apps using the system host (<code>web_engine: "system"</code>).</td>
     </tr>
     <tr>
       <td>Windows</td>
-      <td>The app runs it: it asks the updater to check, download, and restart, follows its progress, and shows its own UI (see <a href="#drive-updates-from-the-app-on-windows">Drive updates from the app on Windows</a>). Apps installed by the SDK's <a href="/docs/packaging#per-user-installer">per-user setup program</a>. A downloaded release is staged beside the installed one and moves into place when the app restarts or next launches.</td>
+      <td>The app runs it: it asks the updater to check, download, and restart, follows its progress, and shows its own UI (see <a href="#drive-updates-from-the-app">Drive updates from the app</a>). Apps installed by the SDK's <a href="/docs/packaging#per-user-installer">per-user setup program</a>. A downloaded release is staged beside the installed one and moves into place when the app restarts or next launches.</td>
     </tr>
     <tr>
       <td>Linux, macOS Chromium host</td>
@@ -65,7 +65,9 @@ Legacy `app.zon` uses the same fields:
 },
 ```
 
-`check_on_start` checks after launch. On macOS the check is quiet: no-update results stay silent and failures go to the app log. On Windows the app sees its result like any other check's.
+`check_on_start` checks after launch. With the macOS host's own flow the check is quiet: no-update results stay silent and failures go to the app log. When the app drives updates, it sees the result like any other check's.
+
+`mode` picks who drives updates on macOS: `"host"` (the default) keeps the host's menu item and prompts, and `"app"` turns them off and hands updates to the app through the same requests and channel Windows apps use (see [Drive updates from the app](#drive-updates-from-the-app)). Windows apps always drive updates themselves, whatever `mode` says.
 
 Each installed app expands two placeholders in the path or query of `feed_url` before it checks:
 
@@ -175,7 +177,7 @@ A lost private key cannot be rotated away from: installs that trust only that ke
 
 ## Trigger a check on macOS
 
-The stock application-menu item requires no app code. To place the action in another menu, tray item, shortcut, or native control, dispatch the reserved command:
+With the host's own flow (`mode` left at `"host"`), the stock application-menu item requires no app code. To place the action in another menu, tray item, shortcut, or native control, dispatch the reserved command:
 
 ```text
 app.check-for-updates
@@ -183,9 +185,9 @@ app.check-for-updates
 
 The runtime consumes this command as a host action. Do not map it through a TypeScript core's `commandMsg` or a Zig app's `on_command`.
 
-## Drive updates from the app on Windows
+## Drive updates from the app
 
-On Windows the updater shows no UI and never quits the app on its own. The app sends requests and follows a channel; what to show, when to download, and when to restart are the app's decisions.
+On Windows, and on macOS with `"mode": "app"`, the updater shows no UI and never quits the app on its own. The app sends requests and follows a channel; what to show, when to download, and when to restart are the app's decisions.
 
 <table>
   <thead>
@@ -260,7 +262,7 @@ The `native-sdk.updates` channel source, opened with empty arguments, delivers t
     </tr>
     <tr>
       <td><code>reason</code></td>
-      <td>Why updates are unsupported: <code>not_configured</code> (no <code>updates</code> block), <code>platform</code> (this platform's updater is not app-driven, as on macOS), <code>not_installed</code> (not running from an SDK installation, such as a development build or a copied folder), or <code>read_only</code> (the install folder is not writable)</td>
+      <td>Why updates are unsupported: <code>not_configured</code> (no <code>updates</code> block), <code>platform</code> (this platform's updater is not app-driven, as on macOS without <code>"mode": "app"</code>), <code>not_installed</code> (not running from an installation: on Windows a development build or a copied folder, on macOS a binary outside a <code>.app</code> bundle), or <code>read_only</code> (the folder holding the app is not writable, or macOS runs a quarantined app from a translocated copy until the user moves it)</td>
     </tr>
     <tr>
       <td><code>error</code></td>
@@ -349,7 +351,12 @@ export function updateVersion(model: Model): Uint8Array {
 }
 ```
 
-A staged release waits in `ready` until the app asks to restart or until the next launch: the launcher the setup program installed moves it into place before it starts the app, whichever way the app is opened (Start menu, a document, a link). After `restart`, the helper waits up to a minute for the app to exit; an app that does not quit keeps running, and its release applies at the next launch.
+A staged release waits in `ready` until the app asks to restart, and otherwise:
+
+- On Windows it applies at the next launch: the launcher the setup program installed moves it into place before it starts the app, whichever way the app is opened (Start menu, a document, a link).
+- On macOS it installs when the app quits normally: a helper replaces the `.app` once the process has exited, without reopening it. A release staged before a crash or a forced quit stays `ready` at the next launch and installs at the next quit.
+
+After `restart`, the helper waits up to a minute for the app to exit; an app that does not quit keeps running, and its release applies as above.
 
 ## Test an update locally
 
@@ -384,6 +391,8 @@ On macOS it then:
 7. For Developer ID apps, requires the update to retain the installed app's bundle identifier and Apple signing team.
 8. Exits the app, replaces it in the containing directory, retains the old bundle as rollback, and relaunches.
 
+With `"mode": "app"`, steps 6 and 7 run when the release is staged, beside the app in a hidden `.<App>.app.native-update` folder. Step 8 runs when the app restarts into the release, or, without relaunching, when it quits.
+
 On Windows it then:
 
 6. Unpacks the archive into `app.next\` beside the installed `app\`, and requires its install configuration to name this app, the signed version, and the same executable, built for this architecture.
@@ -393,7 +402,7 @@ Unsigned and ad-hoc apps can use the Ed25519 trust path for development. Public 
 
 ## Current limits
 
-- macOS: the containing directory must be writable by the current user. The updater does not request administrator privileges or install into an administrator-owned location.
+- macOS: the containing directory must be writable by the current user. The updater does not request administrator privileges or install into an administrator-owned location. A quarantined app running from a translocated copy updates only after the user moves it, for example into Applications.
 - Windows: only apps installed per user by the SDK's setup program update; a development build or a copied folder reports `not_installed`. The updater does not check the Authenticode signature of a release, and the previous version stays in `app.prev\` without an automatic rollback.
 - The macOS Chromium host and Linux are pending.
 - Full ZIP releases are supported. Delta updates, channels, phased rollout, skipped-version preferences, and automatic background installation are not implemented yet.

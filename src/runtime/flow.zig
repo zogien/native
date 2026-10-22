@@ -30,6 +30,7 @@ const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
 const host_flow = @import("host_flow_policy.zig");
 const native_reference = @import("flow_reference.zig");
+const update_engine = @import("../updater/engine.zig");
 const HostEventPump = @import("host_event_pump.zig").HostEventPump;
 const security = @import("../security/root.zig");
 
@@ -455,6 +456,11 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 },
                 .mark_stop => {
                     self.app_stop_delivered = true;
+                    // A release the app staged but did not restart into
+                    // installs as the app quits, where the platform
+                    // installs on exit (macOS); hosts may exit the process
+                    // right after this event, so it cannot wait for run().
+                    update_engine.finish();
                 },
                 .stop => {
                     try app.stop(self);
