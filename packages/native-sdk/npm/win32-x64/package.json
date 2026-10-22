@@ -1,6 +1,6 @@
 {
   "name": "@zogien/native-sdk-win32-x64",
-  "version": "0.11.0-fork.3",
+  "version": "0.11.0-fork.4",
   "description": "The native CLI binary for Windows x64",
   "os": [
     "win32"
