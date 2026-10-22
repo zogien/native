@@ -1,6 +1,6 @@
 {
   "name": "@zogien/native-sdk-win32-arm64",
-  "version": "0.11.0-fork.3",
+  "version": "0.11.0-fork.4",
   "description": "The native CLI binary for Windows on ARM (arm64)",
   "os": [
     "win32"

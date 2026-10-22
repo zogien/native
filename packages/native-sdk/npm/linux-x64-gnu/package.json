@@ -1,6 +1,6 @@
 {
   "name": "@zogien/native-sdk-linux-x64-gnu",
-  "version": "0.11.0-fork.3",
+  "version": "0.11.0-fork.4",
   "description": "The native CLI binary for Linux x64 (glibc)",
   "os": [
     "linux"
