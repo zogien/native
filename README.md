@@ -17,14 +17,14 @@ This fork is maintained for personal needs, including fixes and features. Curren
 Requires Node.js 24 or later. The CLI command remains `native`.
 
 ```bash
-npm install -g @zogien/native-sdk@fork
+npm install -g @zogien/native-sdk
 native version
 native init my_app
 cd my_app
 native dev
 ```
 
-`@fork` selects the latest fork release. To pin a version, install `@zogien/native-sdk@0.11.0-fork.3`.
+This installs the latest fork release. To pin a release, add its version to the package name: `@zogien/native-sdk@<version>`.
 
 ## Resources
 
