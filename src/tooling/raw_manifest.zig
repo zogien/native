@@ -62,6 +62,7 @@ pub const RawUpdates = struct {
     public_key: ?[]const u8 = null,
     public_keys: []const []const u8 = &.{},
     check_on_start: bool = false,
+    mode: ?[]const u8 = null,
 };
 
 pub const RawImages = struct {

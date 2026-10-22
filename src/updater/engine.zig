@@ -36,11 +36,13 @@
 //! A record fits one channel post (`max_status_bytes`); release notes,
 //! up to 16 KiB, come from the `notes` request instead.
 //!
-//! The engine never installs on its own and never quits the app: the app
-//! asks for `restart`, or the staged release applies at the next launch.
-//! A staged release stays `ready` until then; `check` while ready does
-//! nothing, and `discard` drops the release to look again. Platform work
-//! (fetching, staging, the restart helper) belongs to a `Backend`.
+//! The engine never quits the app: the app asks for `restart`, or the
+//! staged release applies without one, at the next launch (Windows: the
+//! launcher switches) or when the app quits (macOS: `finish` starts the
+//! helper). A staged release stays `ready` until then; `check` while
+//! ready does nothing, and `discard` drops the release to look again.
+//! Platform work (fetching, staging, the install helper) belongs to a
+//! `Backend`.
 
 const std = @import("std");
 const feed = @import("feed.zig");
@@ -139,6 +141,10 @@ pub const Backend = struct {
     /// Starts the helper that installs the staged release once this
     /// process exits, then starts it.
     prepare_restart: *const fn (context: *anyopaque) bool,
+    /// Starts the helper that installs the staged release once this
+    /// process exits, without starting it; called as the app quits with
+    /// a release ready. Null where the next launch installs it instead.
+    install_on_exit: ?*const fn (context: *anyopaque) void = null,
 };
 
 /// Where status records go: the open `native-sdk.updates` channels.
@@ -375,6 +381,19 @@ pub fn attach(sink: Sink) error{TooManyChannels}!void {
     const status = renderLocked(&status_buffer);
     engine.mutex.unlock();
     if (sink.post(sink.context, status) == .closed) detach(sink);
+}
+
+/// Called as the app quits normally. A ready release that no `restart`
+/// will install goes in now, where the backend installs on exit.
+pub fn finish() void {
+    engine.mutex.lock();
+    const backend = engine.backend;
+    const install = engine.state == .ready and !engine.restart_prepared;
+    engine.mutex.unlock();
+    if (!install) return;
+    const chosen = backend orelse return;
+    const install_on_exit = chosen.install_on_exit orelse return;
+    install_on_exit(chosen.context);
 }
 
 /// Waits for background work to finish (shutdown and tests).
@@ -631,6 +650,7 @@ const FakeBackend = struct {
     stage_calls: usize = 0,
     discarded: bool = false,
     restart_calls: usize = 0,
+    exit_installs: usize = 0,
     wait_for_cancel: bool = false,
 
     fn backend(self: *FakeBackend) Backend {
@@ -643,6 +663,7 @@ const FakeBackend = struct {
             .stage = stage,
             .discard = discard,
             .prepare_restart = prepareRestart,
+            .install_on_exit = installOnExit,
         };
     }
     fn get(context: *anyopaque) *FakeBackend {
@@ -680,6 +701,9 @@ const FakeBackend = struct {
     }
     fn discard(context: *anyopaque) void {
         get(context).discarded = true;
+    }
+    fn installOnExit(context: *anyopaque) void {
+        get(context).exit_installs += 1;
     }
     fn prepareRestart(context: *anyopaque) bool {
         get(context).restart_calls += 1;
@@ -889,4 +913,24 @@ test "a cancelled download returns to the available release" {
     try std.testing.expect(std.mem.startsWith(u8, handleRequest("native-sdk.updates.status", "", &output).bytes, "state available\n"));
     try std.testing.expectEqualStrings("not_downloading", handleRequest("native-sdk.updates.cancel", "", &output).bytes);
     try std.testing.expectEqualStrings("invalid_request", handleRequest("native-sdk.updates.check", "x", &output).bytes);
+}
+
+test "a ready release installs as the app quits unless a restart will" {
+    var output: [max_status_bytes]u8 = undefined;
+    var fake: FakeBackend = .{ .staged = "1.1.0" };
+    configure(testConfig(&fake, "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="));
+    finish();
+    try std.testing.expectEqual(@as(usize, 1), fake.exit_installs);
+
+    fake = .{ .staged = "1.1.0" };
+    configure(testConfig(&fake, "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="));
+    try std.testing.expect(handleRequest("native-sdk.updates.restart", "", &output).quit);
+    finish();
+    try std.testing.expectEqual(@as(usize, 0), fake.exit_installs);
+
+    // Nothing ready, nothing to install.
+    fake = .{};
+    configure(testConfig(&fake, "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="));
+    finish();
+    try std.testing.expectEqual(@as(usize, 0), fake.exit_installs);
 }

@@ -12,6 +12,7 @@ const runtime_automation_snapshot = @import("automation_snapshot.zig");
 const runtime_automation_widget_dispatch = @import("automation_widget_dispatch.zig");
 const automation_commands = @import("automation_command_policy.zig");
 const launch_timing = @import("launch_timing.zig");
+const update_engine = @import("../updater/engine.zig");
 const runtime_clock = @import("clock.zig");
 const runtime_state = @import("state.zig");
 const shell_layout = @import("shell_layout.zig");
@@ -524,6 +525,11 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .app_shutdown => {
                     try dispatchEvent(self, app, .{ .lifecycle = .stop });
                     if (self.options.extensions) |registry| try registry.stopAll(extensionContext(self));
+                    // A release the app staged but did not restart into
+                    // installs as the app quits, where the platform
+                    // installs on exit (macOS); hosts may exit the process
+                    // right after this event, so it cannot wait for run().
+                    update_engine.finish();
                     // Marked delivered BEFORE the call: if the hook itself
                     // errors, the run loop's exit path must not invoke it a
                     // second time (the hook contract is exactly-once).

@@ -100,6 +100,7 @@ pub const RunOptions = struct {
             .update_feed_url = manifestUpdateString("feed_url"),
             .update_public_key = manifestUpdatePublicKeys(),
             .update_check_on_start = manifestUpdateCheckOnStart(),
+            .update_mode = manifestUpdateMode(),
             .main_window = .{
                 .id = 1,
                 .label = "main",
@@ -187,6 +188,13 @@ fn manifestUpdateCheckOnStart() bool {
     if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return false;
     if (comptime !@hasField(@TypeOf(app_manifest.updates), "check_on_start")) return false;
     return app_manifest.updates.check_on_start;
+}
+
+fn manifestUpdateMode() native_sdk.platform.UpdateMode {
+    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return .host;
+    if (comptime !@hasField(@TypeOf(app_manifest.updates), "mode")) return .host;
+    return comptime std.meta.stringToEnum(native_sdk.platform.UpdateMode, app_manifest.updates.mode) orelse
+        @compileError("app manifest updates.mode must be \"host\" or \"app\"");
 }
 
 const CommandStorage = struct {
@@ -895,7 +903,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     native_sdk.runtime.launch_timing.lap("runner_main");
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    configureUpdates(app_info, init.environ_map);
+    configureUpdates(&app_info, init.environ_map);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
@@ -968,7 +976,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
 fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    configureUpdates(app_info, init.environ_map);
+    configureUpdates(&app_info, init.environ_map);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
@@ -1036,29 +1044,22 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     finishSessionRecorder(session_recorder);
 }
 
-/// Points the app-driven updater at this installation. Windows installs
-/// drive it; elsewhere it reports the platform as unsupported. Setting
-/// NATIVE_SDK_UPDATES_FEED_URL replaces the manifest's feed URL to test
-/// an update end to end, and may then name a loopback http:// server;
-/// the manifest's Ed25519 keys stay the authority over what installs.
-fn configureUpdates(app_info: native_sdk.platform.AppInfo, environ_map: *std.process.Environ.Map) void {
-    const override = environ_map.get("NATIVE_SDK_UPDATES_FEED_URL");
-    native_sdk.updater.engine.configure(.{
-        .feed_url = override orelse app_info.update_feed_url,
-        .public_keys = app_info.update_public_key,
-        .bundle_id = app_info.bundle_id,
-        .version = app_info.version,
-        .target = native_sdk.updater.feed.currentTarget(),
-        .policy = .{ .allow_loopback_http = override != null },
-        .backend = if (comptime std.mem.eql(u8, build_options.platform, "windows")) native_sdk.updater.windows.backend(app_info.bundle_id) else null,
-        .check_on_start = app_info.update_check_on_start,
-    });
+/// Points the app-driven updater at this installation (see
+/// `updater.configureApp`).
+fn configureUpdates(app_info: *native_sdk.platform.AppInfo, environ_map: *std.process.Environ.Map) void {
+    const host: native_sdk.updater.Host = comptime if (std.mem.eql(u8, build_options.platform, "windows"))
+        .windows
+    else if (std.mem.eql(u8, build_options.platform, "macos") and std.mem.eql(u8, build_options.web_engine, "system"))
+        .macos_appkit
+    else
+        .other;
+    native_sdk.updater.configureApp(host, app_info, environ_map);
 }
 
 fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    configureUpdates(app_info, init.environ_map);
+    configureUpdates(&app_info, init.environ_map);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
@@ -1354,6 +1355,7 @@ test "RunOptions resolves manifest commands menus and shortcuts" {
     try std.testing.expectEqualStrings("https://example.com/releases/{target}/native-update.json", app_info.update_feed_url);
     try std.testing.expectEqualStrings("11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=,wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=", app_info.update_public_key);
     try std.testing.expect(app_info.update_check_on_start);
+    try std.testing.expectEqual(native_sdk.platform.UpdateMode.app, app_info.update_mode);
 
     var command_storage: CommandStorage = .{};
     const commands = options.resolvedCommands(&command_storage);

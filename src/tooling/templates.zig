@@ -2443,8 +2443,9 @@ fn runnerZig() []const u8 {
     \\            .bundle_id = self.bundle_id,
     \\            .icon_path = self.icon_path,
     \\            .update_feed_url = manifestUpdateString("feed_url"),
-    \\            .update_public_key = manifestUpdateString("public_key"),
+    \\            .update_public_key = manifestUpdatePublicKeys(),
     \\            .update_check_on_start = manifestUpdateCheckOnStart(),
+    \\            .update_mode = manifestUpdateMode(),
     \\        };
     \\        const windows = manifestWindowOptions(buffers);
     \\        if (windows.len > 0) {
@@ -2519,6 +2520,36 @@ fn runnerZig() []const u8 {
     \\    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return false;
     \\    if (comptime !@hasField(@TypeOf(app_manifest.updates), "check_on_start")) return false;
     \\    return app_manifest.updates.check_on_start;
+    \\}
+    \\
+    \\/// The trusted update keys the updater verifies feeds against:
+    \\/// `public_key` followed by any `public_keys`, comma-joined.
+    \\fn manifestUpdatePublicKeys() []const u8 {
+    \\    const primary = comptime manifestUpdateString("public_key");
+    \\    if (comptime primary.len == 0) return "";
+    \\    if (comptime !@hasField(@TypeOf(app_manifest.updates), "public_keys")) return primary;
+    \\    comptime var keys: []const u8 = primary;
+    \\    inline for (app_manifest.updates.public_keys) |key| keys = keys ++ "," ++ key;
+    \\    return keys;
+    \\}
+    \\
+    \\fn manifestUpdateMode() native_sdk.platform.UpdateMode {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return .host;
+    \\    if (comptime !@hasField(@TypeOf(app_manifest.updates), "mode")) return .host;
+    \\    return comptime std.meta.stringToEnum(native_sdk.platform.UpdateMode, app_manifest.updates.mode) orelse
+    \\        @compileError("app manifest updates.mode must be \"host\" or \"app\"");
+    \\}
+    \\
+    \\/// Points the app-driven updater at this installation (see
+    \\/// `updater.configureApp`).
+    \\fn configureUpdates(app_info: *native_sdk.platform.AppInfo, environ_map: *std.process.Environ.Map) void {
+    \\    const host: native_sdk.updater.Host = comptime if (std.mem.eql(u8, build_options.platform, "windows"))
+    \\        .windows
+    \\    else if (std.mem.eql(u8, build_options.platform, "macos") and std.mem.eql(u8, build_options.web_engine, "system"))
+    \\        .macos_appkit
+    \\    else
+    \\        .other;
+    \\    native_sdk.updater.configureApp(host, app_info, environ_map);
     \\}
     \\
     \\const CommandStorage = struct {
@@ -3065,6 +3096,7 @@ fn runnerZig() []const u8 {
     \\fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
+    \\    configureUpdates(&app_info, init.environ_map);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     \\    // Heap wrapper, latch-gated free: worker threads hold this address
     \\    // as the channel wake context and an abandoned wake call may
@@ -3123,6 +3155,7 @@ fn runnerZig() []const u8 {
     \\fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
+    \\    configureUpdates(&app_info, init.environ_map);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     \\    // Heap wrapper, latch-gated free: worker threads hold this address
     \\    // as the channel wake context and an abandoned wake call may
@@ -3181,6 +3214,7 @@ fn runnerZig() []const u8 {
     \\fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
+    \\    configureUpdates(&app_info, init.environ_map);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     \\    // Heap wrapper, latch-gated free: worker threads hold this address
     \\    // as the channel wake context and an abandoned wake call may
@@ -4340,8 +4374,12 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn appInfo(self: RunOptions, buffers: *StateBuffers)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".version = manifestStringField(\"version\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_feed_url = manifestUpdateString(\"feed_url\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_public_key = manifestUpdateString(\"public_key\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_public_key = manifestUpdatePublicKeys()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_check_on_start = manifestUpdateCheckOnStart()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_mode = manifestUpdateMode()") != null);
+    // Ejected apps configure the app-driven updater on every desktop
+    // platform.
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, runner_zig_text, "configureUpdates(&app_info, init.environ_map);"));
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestWindowOptions") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.windows = windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "for (restored_windows, 0..)") != null);

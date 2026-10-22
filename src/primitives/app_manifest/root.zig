@@ -83,6 +83,7 @@ pub const FileAssociation = types.FileAssociation;
 pub const UrlScheme = types.UrlScheme;
 pub const PackageMetadata = types.PackageMetadata;
 pub const UpdateConfig = types.UpdateConfig;
+pub const UpdateMode = types.UpdateMode;
 pub const Manifest = types.Manifest;
 pub const ImagesConfig = types.ImagesConfig;
 pub const validateManifest = validation.validateManifest;

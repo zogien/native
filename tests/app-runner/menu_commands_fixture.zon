@@ -6,6 +6,7 @@
         .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
         .public_keys = .{"wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo="},
         .check_on_start = true,
+        .mode = "app",
     },
     .commands = .{
         .{ .id = "app.refresh", .title = "Refresh", .enabled = false, .checked = true },

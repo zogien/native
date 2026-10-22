@@ -214,6 +214,7 @@ pub const Metadata = struct {
         if (self.updates.public_key) |value| allocator.free(value);
         for (self.updates.public_keys) |value| allocator.free(value);
         if (self.updates.public_keys.len > 0) allocator.free(self.updates.public_keys);
+        if (self.updates.mode) |value| allocator.free(value);
         if (self.dmg.volume_name) |value| allocator.free(value);
         if (self.dmg.background) |value| allocator.free(value);
         for (self.dmg.items) |item| {
@@ -429,6 +430,8 @@ pub const UpdateMetadata = struct {
     public_key: ?[]const u8 = null,
     public_keys: []const []const u8 = &.{},
     check_on_start: bool = false,
+    /// `host` or `app`; null leaves the host default.
+    mode: ?[]const u8 = null,
 
     pub fn enabled(self: UpdateMetadata) bool {
         return self.feed_url != null;
@@ -619,7 +622,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer allocator.free(file_associations);
     const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app manifest URL schemes are invalid" };
     defer allocator.free(url_schemes);
-    const updates_message = "app manifest updates are invalid - updates require an HTTPS feed_url and a base64 Ed25519 public_key; public_keys adds at most 3 further distinct keys; feed_url may name {target} and {current_version} in its path or query; check_on_start requires both";
+    const updates_message = "app manifest updates are invalid - updates require an HTTPS feed_url and a base64 Ed25519 public_key; public_keys adds at most 3 further distinct keys; feed_url may name {target} and {current_version} in its path or query; check_on_start requires both; mode is \"host\" or \"app\"";
     const updates = convertUpdates(metadata.updates) catch return .{ .ok = false, .message = updates_message };
     app_manifest.validateUpdates(updates) catch return .{ .ok = false, .message = updates_message };
     // General manifest validation owns only values the app explicitly
@@ -794,16 +797,18 @@ fn duplicateRawUpdates(allocator: std.mem.Allocator, raw: RawUpdates) !UpdateMet
         .public_key = try duplicateOptionalString(allocator, raw.public_key),
         .public_keys = try duplicateStringList(allocator, raw.public_keys),
         .check_on_start = raw.check_on_start,
+        .mode = try duplicateOptionalString(allocator, raw.mode),
     };
 }
 
 fn convertUpdates(updates: UpdateMetadata) !app_manifest.UpdateConfig {
-    if (updates.feed_url == null and updates.public_key == null and updates.public_keys.len == 0 and !updates.check_on_start) return .{};
+    if (updates.feed_url == null and updates.public_key == null and updates.public_keys.len == 0 and !updates.check_on_start and updates.mode == null) return .{};
     const feed_url = updates.feed_url orelse return error.InvalidUpdates;
     const public_key = updates.public_key orelse return error.InvalidUpdates;
     if (!std.mem.startsWith(u8, feed_url, "https://")) return error.InvalidUpdates;
     if (public_key.len == 0) return error.InvalidUpdates;
-    return .{ .feed_url = feed_url, .public_key = public_key, .public_keys = updates.public_keys, .check_on_start = updates.check_on_start };
+    const mode: app_manifest.UpdateMode = if (updates.mode) |value| std.meta.stringToEnum(app_manifest.UpdateMode, value) orelse return error.InvalidUpdates else .host;
+    return .{ .feed_url = feed_url, .public_key = public_key, .public_keys = updates.public_keys, .check_on_start = updates.check_on_start, .mode = mode };
 }
 
 fn duplicateRawServicePackages(allocator: std.mem.Allocator, packages: []const raw_manifest.RawServicePackage) ![]const ServicePackageMetadata {
@@ -2606,12 +2611,15 @@ test "JSON manifest parser carries per-target feeds and rotated update keys" {
         \\  "updates": {
         \\    "feed_url": "https://example.com/releases/{target}/native-update.json",
         \\    "public_key": "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=",
-        \\    "public_keys": ["11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="]
+        \\    "public_keys": ["11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="],
+        \\    "mode": "app"
         \\  }
         \\}
     );
     defer metadata.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("https://example.com/releases/{target}/native-update.json", metadata.updates.feed_url.?);
+    try std.testing.expectEqualStrings("app", metadata.updates.mode.?);
+    try std.testing.expectEqual(app_manifest.UpdateMode.app, (try convertUpdates(metadata.updates)).mode);
     try std.testing.expect(metadata.updates.trustsPublicKey("wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo="));
     try std.testing.expect(metadata.updates.trustsPublicKey("11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="));
     try std.testing.expect(!metadata.updates.trustsPublicKey("IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9frc="));
@@ -2637,6 +2645,22 @@ test "manifest validation names the update rules" {
     const result = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.json");
     try std.testing.expect(!result.ok);
     try std.testing.expect(std.mem.indexOf(u8, result.message, "{target} and {current_version}") != null);
+
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.json", .data =
+        \\{
+        \\  "id": "com.example.updates",
+        \\  "name": "updates",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/{target}/native-update.json",
+        \\    "public_key": "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFo=",
+        \\    "mode": "automatic"
+        \\  }
+        \\}
+    });
+    const mode_result = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.json");
+    try std.testing.expect(!mode_result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, mode_result.message, "mode is \"host\" or \"app\"") != null);
 }
 
 test "JSON file validation rejects null with a teaching diagnostic regardless of extension case" {
