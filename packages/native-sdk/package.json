@@ -72,7 +72,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "fork",
+    "tag": "latest",
     "registry": "https://registry.npmjs.org/"
   }
 }

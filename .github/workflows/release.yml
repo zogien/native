@@ -40,7 +40,7 @@ jobs:
           const tag = 'fork/v' + pkg.version;
           if (process.env.GITHUB_REF_TYPE === 'tag') assert.equal(process.env.GITHUB_REF_NAME, tag);
           const channel = pkg.publishConfig.tag;
-          assert.equal(channel, pkg.version.split('-')[1]?.split('.')[0] ?? 'latest');
+          assert.equal(channel, 'latest');
           appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + pkg.version + '\ntag=' + tag + '\nchannel=' + channel + '\n');
           JS
       - run: npm --prefix packages/native-sdk run version:check
@@ -92,13 +92,13 @@ jobs:
         with:
           name: native-binaries
           path: release-binaries
+      # Publishing uses each package's GitHub Actions trusted publisher (OIDC)
+      # through the job's id-token permission. There is no npm token, so a
+      # package without a trusted publisher fails here instead of falling back.
       - name: Publish platform packages, then main package
         env:
           VERSION: ${{ needs.build.outputs.version }}
           CHANNEL: ${{ needs.build.outputs.channel }}
-          # First publication may use a granular write token. Subsequent
-          # releases use each package's GitHub Actions trusted publisher.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           publish_package() {
             name="$1"
@@ -115,12 +115,12 @@ jobs:
             publish_package "$name"
           done
           publish_package "@zogien/native-sdk"
-      - name: Create GitHub prerelease
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.build.outputs.tag }}
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --title "$TAG" --prerelease --generate-notes
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
           fi
           gh release upload "$TAG" release-binaries/* release-packages/*.tgz --clobber
