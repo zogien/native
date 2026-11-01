@@ -5800,7 +5800,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 [host, key, bridge_window_id, bridge_label, lifetime](ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventArgs *args) -> HRESULT {
                                     auto token = lifetime.lock();
                                     if (!token) return S_OK;
-                                    std::lock_guard<std::recursive_mutex> guard(token->mutex);
+                                    std::unique_lock<std::recursive_mutex> guard(token->mutex);
                                     if (!token->alive || !args || !host->bridge_callback) return S_OK;
 
                                     LPWSTR message_bytes = nullptr;
@@ -5821,8 +5821,17 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                             : bridgeOriginForWebViewUrl(source_webview->second, source_url);
                                     }
 
-                                    host->bridge_callback(
-                                        host->bridge_context,
+                                    // WebView callbacks and host teardown run on the
+                                    // loop thread. Copy the call inputs under the
+                                    // lifetime lock, then release it before entering
+                                    // the app: a command may join a worker whose
+                                    // final wake needs this same lock. Do not touch
+                                    // host or its WebViews after the app callback.
+                                    const BridgeCallback callback = host->bridge_callback;
+                                    void *context = host->bridge_context;
+                                    guard.unlock();
+                                    callback(
+                                        context,
                                         bridge_window_id,
                                         bridge_label.c_str(),
                                         bridge_label.size(),
