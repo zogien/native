@@ -143,8 +143,8 @@ extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, 
 extern fn native_sdk_windows_destroy(host: *WindowsHost) void;
 extern fn native_sdk_windows_run(host: *WindowsHost, callback: WindowsCallback, context: ?*anyopaque) void;
 extern fn native_sdk_windows_stop(host: *WindowsHost) void;
-extern fn native_sdk_windows_wake(host: *WindowsHost) void;
-extern fn native_sdk_windows_request_frame(host: *WindowsHost) void;
+extern fn native_sdk_windows_wake(host: *WindowsHost) c_int;
+extern fn native_sdk_windows_request_frame(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, max_pixels: usize, out_width: *usize, out_height: *usize) c_int;
 extern fn native_sdk_windows_load_webview(host: *WindowsHost, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
 extern fn native_sdk_windows_load_window_webview(host: *WindowsHost, window_id: u64, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) c_int;
@@ -901,13 +901,14 @@ fn emitWindowEvent(context: ?*anyopaque, window_id: platform_mod.WindowId, name:
     native_sdk_windows_emit_window_event(self.host, window_id, name.ptr, name.len, detail_json.ptr, detail_json.len);
 }
 
-/// Thread-safe: `PostMessageW` into the existing message loop (the
-/// enqueue-only shape the wake contract requires — never the
+/// Thread-safe: `PostMessageW` to the host's loop window (the
+/// enqueue-only shape the wake contract requires — no lock, never the
 /// synchronous `SendMessage`), whose window procedure emits `.wake` on
-/// the loop thread.
+/// the loop thread. A wake that could not be posted is an error, so the
+/// caller re-arms instead of assuming the nudge happened.
 fn wake(context: ?*anyopaque) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    native_sdk_windows_wake(self.host);
+    if (native_sdk_windows_wake(self.host) == 0) return error.WakeNotPosted;
 }
 
 /// Teardown abandoned an in-flight channel wake call: latch the flag
@@ -918,13 +919,14 @@ fn noteChannelWakeAbandoned(context: ?*anyopaque) void {
     self.channel_wake_abandoned.store(true, .seq_cst);
 }
 
-/// Thread-safe like `wake`: `PostMessage` into the message loop, whose
-/// window procedure emits one `.frame` event on the loop thread. The
-/// automation arrival watcher calls this when a command lands so
-/// consumption never depends on the host's own frame pump.
+/// Thread-safe like `wake`: `PostMessage` to the loop window, whose
+/// window procedure emits one `.frame` event on the loop thread;
+/// requests coalesce while one is queued. The automation arrival
+/// watcher calls this when a command lands so consumption never depends
+/// on the host's own frame pump.
 fn requestFrame(context: ?*anyopaque) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    native_sdk_windows_request_frame(self.host);
+    if (native_sdk_windows_request_frame(self.host) == 0) return error.FrameRequestNotPosted;
 }
 
 /// Headless image codec for session replay: the SAME WIC decode a live

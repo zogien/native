@@ -186,13 +186,13 @@ constexpr uint32_t kMenuCommandBase = 0x4000;
 constexpr uint32_t kTrayCommandBase = 0x5000;
 constexpr UINT kNotificationCallbackMessage = WM_APP + 42;
 /* Posted from any thread (effect worker threads) via
- * native_sdk_windows_wake; the window procedure emits kWake on the
- * message loop thread. */
+ * native_sdk_windows_wake; the loop window emits kWake on the message
+ * loop thread. */
 constexpr UINT kWakeMessage = WM_APP + 43;
-/* Posted from any thread via native_sdk_windows_request_frame; the
- * window procedure emits ONE kFrame on the message loop thread. The
- * automation arrival watcher uses it so a queued command wakes an idle
- * frame loop without depending on the 16 ms frame pump. */
+/* Posted from any thread via native_sdk_windows_request_frame; the loop
+ * window emits ONE kFrame on the message loop thread. The automation
+ * arrival watcher uses it so a queued command wakes an idle frame loop
+ * without depending on the 16 ms frame pump. */
 constexpr UINT kRequestFrameMessage = WM_APP + 44;
 /* Posted from Media Foundation worker threads (the audio backend's event
  * pump and source resolver); the window procedure hands the distilled
@@ -796,6 +796,15 @@ struct Host {
     AudioCaptureState captures[2];
     PendingContextMenu context_menu;
     std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
+    /* The message loop's own target: a message-only window created with
+     * the host on the loop thread and destroyed with it, so nothing
+     * posted to the loop depends on which app windows are open. Read
+     * from any thread (wake, frame requests), hence atomic; destroy
+     * clears it before tearing the window down. */
+    std::atomic<HWND> loop_window{nullptr};
+    /* A posted kRequestFrameMessage is still queued: requests coalesce
+     * until the loop window takes it. */
+    std::atomic<bool> frame_request_pending{false};
 };
 
 static std::string webViewKey(uint64_t window_id, const std::string &label);
@@ -6087,6 +6096,59 @@ static void clampChromelessMaximizedFrame(Host *host, HWND hwnd, WINDOWPOS *pos)
     pos->flags &= ~(SWP_NOMOVE | SWP_NOSIZE);
 }
 
+/* The loop window's procedure: everything marshalled onto the message
+ * loop lands here rather than on an app window, which may close at any
+ * time. Posted messages reach it from nested modal loops (dialogs, menus,
+ * the move/size loop) too, because those dispatch every window message of
+ * the thread; a thread message (PostThreadMessage) would be dropped by
+ * them, and a waitable handle would not be serviced by them at all. */
+static LRESULT CALLBACK loopWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_NCCREATE) {
+        auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    }
+    Host *host = hostFromWindow(hwnd);
+    switch (message) {
+        case kWakeMessage:
+            if (host && host->callback) {
+                WindowsEvent wake = {};
+                wake.kind = kWake;
+                wake.window_id = 1;
+                host->callback(host->callback_context, &wake);
+            }
+            return 0;
+        case kRequestFrameMessage:
+            if (host) {
+                /* Cleared before emitting: a request made while this frame
+                 * runs posts again instead of folding into a finished one. */
+                host->frame_request_pending.store(false, std::memory_order_release);
+                if (host->callback) {
+                    WindowsEvent frame = {};
+                    frame.kind = kFrame;
+                    frame.window_id = 1;
+                    host->callback(host->callback_context, &frame);
+                }
+            }
+            return 0;
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+static HWND createLoopWindow(Host *host) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = loopWindowProc;
+        wc.hInstance = host->instance;
+        wc.lpszClassName = L"NativeSdkLoopWindow";
+        registered = RegisterClassExW(&wc) != 0;
+    }
+    return CreateWindowExW(0, L"NativeSdkLoopWindow", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, host->instance, host);
+}
+
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
@@ -6219,22 +6281,6 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         }
     }
     switch (message) {
-        case kWakeMessage:
-            if (host) {
-                WindowsEvent wake = {};
-                wake.kind = kWake;
-                wake.window_id = 1;
-                if (host->callback) host->callback(host->callback_context, &wake);
-            }
-            return 0;
-        case kRequestFrameMessage:
-            if (host) {
-                WindowsEvent frame = {};
-                frame.kind = kFrame;
-                frame.window_id = 1;
-                if (host->callback) host->callback(host->callback_context, &frame);
-            }
-            return 0;
         case kAudioSessionMessage:
             if (host) audioHandleSessionMessage(host, wparam, lparam);
             return 0;
@@ -6691,6 +6737,16 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
      * RPC_E_CHANGED_MODE (an MTA got there first) leaves nothing to
      * balance. */
     host->com_initialized = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
+    /* The loop window exists before any app window and for the host's
+     * whole life, so wakes and timers have a target from the start. */
+    HWND loop_window = createLoopWindow(host);
+    if (!loop_window) {
+        const bool com_initialized = host->com_initialized;
+        delete host;
+        if (com_initialized) CoUninitialize();
+        return nullptr;
+    }
+    host->loop_window.store(loop_window, std::memory_order_release);
     /* One hardware Direct2D/DirectWrite resource domain for every canvas
      * child. Creation also requires the in-memory font and constrained
      * fallback seams: without them packet text cannot match engine layout,
@@ -6734,6 +6790,10 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
 void native_sdk_windows_destroy(Host *host) {
     if (!host) return;
     audioCaptureStopAll(host);
+    /* Retire the loop window first: a wake or frame request from here on
+     * finds no target and reports that, instead of posting into a queue
+     * nobody will pump again. */
+    HWND loop_window = host->loop_window.exchange(nullptr, std::memory_order_acq_rel);
     std::shared_ptr<HostLifetime> lifetime = host->lifetime;
     std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
     lifetime->alive = false;
@@ -6756,6 +6816,7 @@ void native_sdk_windows_destroy(Host *host) {
     removeNotificationIcon(host);
     destroyAllWindows(host);
     gpuSurfaceDestroyFrameWakeTimer(host);
+    if (loop_window) DestroyWindow(loop_window);
     const bool com_initialized = host->com_initialized;
     delete host;
     if (com_initialized) CoUninitialize();
@@ -6807,30 +6868,30 @@ void native_sdk_windows_stop(Host *host) {
     PostQuitMessage(0);
 }
 
-/* Thread-safe wake: posts kWakeMessage into the message loop, which
- * emits the kWake event on the loop thread. The lifetime mutex guards
- * the window map against concurrent create/destroy. */
-void native_sdk_windows_wake(Host *host) {
-    if (!host) return;
-    std::shared_ptr<HostLifetime> lifetime = host->lifetime;
-    std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
-    if (!lifetime->alive || !host->running) return;
-    HWND hwnd = parentWindow(host);
-    if (!hwnd) return;
-    PostMessageW(hwnd, kWakeMessage, 0, 0);
+/* Thread-safe wake: posts kWakeMessage to the loop window, which emits
+ * the kWake event on the loop thread. Enqueue-only, as the wake contract
+ * requires (PlatformServices.wake_fn): it takes no lock the loop thread
+ * could be holding, so a thread the loop is joining can always finish
+ * its wake. The host itself outlives every caller — the runtime fences
+ * its wake paths before teardown. Returns 0 when nothing was posted (the
+ * host is being destroyed, or the thread's queue is full). */
+int native_sdk_windows_wake(Host *host) {
+    if (!host) return 0;
+    HWND target = host->loop_window.load(std::memory_order_acquire);
+    return target && PostMessageW(target, kWakeMessage, 0, 0) ? 1 : 0;
 }
 
-/* Thread-safe frame request: posts kRequestFrameMessage into the message
- * loop, which emits one kFrame event on the loop thread — the automation
- * arrival watcher's wake, guarded exactly like native_sdk_windows_wake. */
-void native_sdk_windows_request_frame(Host *host) {
-    if (!host) return;
-    std::shared_ptr<HostLifetime> lifetime = host->lifetime;
-    std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
-    if (!lifetime->alive || !host->running) return;
-    HWND hwnd = parentWindow(host);
-    if (!hwnd) return;
-    PostMessageW(hwnd, kRequestFrameMessage, 0, 0);
+/* Thread-safe frame request: posts kRequestFrameMessage to the loop
+ * window, which emits one kFrame event on the loop thread — the
+ * automation arrival watcher's wake, enqueue-only like
+ * native_sdk_windows_wake. Requests coalesce while one is queued. */
+int native_sdk_windows_request_frame(Host *host) {
+    if (!host) return 0;
+    if (host->frame_request_pending.exchange(true, std::memory_order_acq_rel)) return 1;
+    HWND target = host->loop_window.load(std::memory_order_acquire);
+    if (target && PostMessageW(target, kRequestFrameMessage, 0, 0)) return 1;
+    host->frame_request_pending.store(false, std::memory_order_release);
+    return 0;
 }
 
 /* Platform image decoder: WIC (Windows Imaging Component) handles PNG,
