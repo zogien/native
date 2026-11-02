@@ -630,6 +630,26 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run package and framework tests");
+    if (b.graph.host.result.os.tag == .windows) {
+        // The Windows host's loop model against a real WebView, with the
+        // production host compiled into the harness (see
+        // src/platform/windows/host_loop_test.cpp). Like the macOS host
+        // probes below, it runs on hosts of its own platform only.
+        const app_build = @import("build/app.zig");
+        const loop_target = b.graph.host;
+        const loop_mod = b.createModule(.{ .target = loop_target, .optimize = optimize, .link_libc = true });
+        app_build.addWebView2HostIncludes(b, loop_mod, b.path("third_party/webview2/include"), loop_target);
+        loop_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/host_loop_test.cpp"), .flags = &.{"-std=c++17"} });
+        loop_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
+        app_build.linkWindowsHostLibraries(loop_mod, loop_target);
+        const loop_test = b.addExecutable(.{ .name = "windows-host-loop-test", .root_module = loop_mod });
+        loop_test.win32_manifest = b.path("assets/native-sdk.manifest");
+        const loop_run = b.addRunArtifact(loop_test);
+        loop_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
+        loop_run.expectExitCode(0);
+        b.step("test-windows-host-loop", "Verify the Windows host's loop model against a real WebView").dependOn(&loop_run.step);
+        test_step.dependOn(&loop_run.step);
+    }
     const window_drag_tests = b.addSystemCommand(&.{ "node", "--test" });
     window_drag_tests.addFileArg(b.path("scripts/webview-window-drag.test.mjs"));
     const window_drag_step = b.step("test-webview-window-drag", "Verify WebView drag declarations, configuration and native-authorized hit testing");
@@ -2020,7 +2040,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#else\n#include <WebView2.h>\n#include <wrl.h>\n#define NATIVE_SDK_HAS_WEBVIEW2 1" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "LoadLibraryW(L\"WebView2Loader.dll\")" },
         .{ .path = "build/app.zig", .pattern = ".system => if (web_layer) {" },
-        .{ .path = "build/app.zig", .pattern = "app_mod.addIncludePath(dep.path(\"third_party/webview2/include\"));" },
+        .{ .path = "build/app.zig", .pattern = "addWebView2HostIncludes(b, app_mod, dep.path(\"third_party/webview2/include\"), target);" },
+        .{ .path = "build/app.zig", .pattern = "module.addIncludePath(sdk_include);" },
         .{ .path = "build/app.zig", .pattern = "third_party/webview2/x64/WebView2Loader.dll" },
         .{ .path = "build/app.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB\"" },
         .{ .path = "src/tooling/templates.zig", .pattern = "third_party/webview2/include" },
@@ -2315,7 +2336,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/windows/root.zig", .pattern = ".canvas_frame_full_repaint = event.force_full_repaint != 0" },
         .{ .path = ".github/scripts/windows-canvas-smoke.sh", .pattern = "gpu_backend=direct2d" },
         .{ .path = ".github/scripts/windows-effects-smoke.sh", .pattern = "gpu_backend=direct2d" },
-        .{ .path = "build/app.zig", .pattern = "app_mod.linkSystemLibrary(\"d2d1\", .{})" },
+        .{ .path = "build/app.zig", .pattern = "linkWindowsHostLibraries(app_mod, target);" },
+        .{ .path = "build/app.zig", .pattern = "module.linkSystemLibrary(\"d2d1\", .{})" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-blur-effects", "Verify AppKit GPU packet presenter applies blur effects", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketApplyBlur" },

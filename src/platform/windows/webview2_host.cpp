@@ -25,6 +25,7 @@
 #include <cctype>
 #include <climits>
 #include <cmath>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -186,21 +187,21 @@ constexpr uint32_t kMenuCommandBase = 0x4000;
 constexpr uint32_t kTrayCommandBase = 0x5000;
 constexpr UINT kNotificationCallbackMessage = WM_APP + 42;
 /* Posted from any thread (effect worker threads) via
- * native_sdk_windows_wake; the window procedure emits kWake on the
- * message loop thread. */
+ * native_sdk_windows_wake; the loop window emits kWake on the message
+ * loop thread. */
 constexpr UINT kWakeMessage = WM_APP + 43;
-/* Posted from any thread via native_sdk_windows_request_frame; the
- * window procedure emits ONE kFrame on the message loop thread. The
- * automation arrival watcher uses it so a queued command wakes an idle
- * frame loop without depending on the 16 ms frame pump. */
+/* Posted from any thread via native_sdk_windows_request_frame; the loop
+ * window emits ONE kFrame on the message loop thread. The automation
+ * arrival watcher uses it so a queued command wakes an idle frame loop
+ * without depending on the 16 ms frame pump. */
 constexpr UINT kRequestFrameMessage = WM_APP + 44;
 /* Posted from Media Foundation worker threads (the audio backend's event
- * pump and source resolver); the window procedure hands the distilled
- * note to audioHandleSessionMessage on the message loop thread. */
+ * pump and source resolver); the loop window hands the distilled note to
+ * audioHandleSessionMessage on the message loop thread. */
 constexpr UINT kAudioSessionMessage = WM_APP + 45;
-/* Posted from the spectrum capture thread every ~40 ms; the window
- * procedure snapshots the analysis bands and emits one SPECTRUM report
- * on the loop thread. A posted message rather than a loop-thread timer
+/* Posted from the spectrum capture thread every ~40 ms; the loop window
+ * snapshots the analysis bands and emits one SPECTRUM report on the loop
+ * thread. A posted message rather than a loop-thread timer
  * on purpose: WM_TIMER is the lowest-priority message and a busy frame
  * loop starves it far below the contract cadence, while posted messages
  * keep their place in the queue. */
@@ -210,6 +211,10 @@ constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
  * menu on a fresh loop turn — the same deferral the macOS host's
  * dispatch_async performs before popUpMenuPositioningItem. */
 constexpr UINT kShowContextMenuMessage = WM_APP + 47;
+/* Posted by queueWebViewEvent when a WebView2 callback queued something
+ * for the app; the loop window delivers the queue on a fresh loop turn,
+ * after the WebView2 callback has returned. */
+constexpr UINT kDeliverWebViewEventsMessage = WM_APP + 48;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 constexpr int kViewWebView = 0;
@@ -608,14 +613,19 @@ struct TrayItem {
     bool enabled = true;
 };
 
+/* Whether the host still exists, for WebView2 completions and events
+ * that arrive after native_sdk_windows_destroy (they hold a weak
+ * reference to this). WebView2 raises every callback on the thread that
+ * created it, the loop thread, so a plain flag is enough: nothing off
+ * the loop thread reads it. */
 struct HostLifetime {
-    std::recursive_mutex mutex;
     bool alive = true;
 };
 
 /* App timers (runtime `startTimer`) on the Win32 message loop: each slot
  * owns the SetTimer id kAppTimerIdBase + slot index, scheduled on the
- * first live top-level window so WM_TIMER lands in windowProc. */
+ * host's loop window so WM_TIMER lands in loopWindowProc and closing an
+ * app window never stops one. */
 constexpr size_t kMaxAppTimers = 64;
 constexpr UINT_PTR kAppTimerIdBase = 0x1000;
 /* The 16 ms per-window frame-pump timer (SetTimer id on each top-level
@@ -683,11 +693,21 @@ struct AudioCaptureState {
     std::thread worker;
 };
 
+/* One URL load's hand-over slot. The Media Foundation resolver (worker
+ * thread) leaves the resolved source here and posts a note; the loop
+ * thread collects it, or closes the slot when the load is replaced or
+ * stopped and releases whatever arrives late. The mutex covers only the
+ * hand-over itself, never a call out of the host. */
+struct AudioSourceMailbox {
+    std::mutex mutex;
+    bool open = true;
+    IMFMediaSource *source = nullptr;
+};
+
 /* The app's single audio player (see the audio section further down for
  * the backend rationale). All fields are message-loop-thread state; the
- * lifetime mutex additionally guards `generation` and `source` because
- * the asynchronous URL source resolver hands its result over from a
- * Media Foundation worker thread. */
+ * asynchronous URL source resolver hands its result over through
+ * `resolve_mailbox` instead of writing here. */
 struct AudioState {
     /* Bumped on every load/stop: worker-thread stragglers (resolver
      * completions, retired-session events) carry the generation they
@@ -715,6 +735,7 @@ struct AudioState {
     IMFMediaSource *source = nullptr;
     IMFPresentationClock *clock = nullptr;
     std::shared_ptr<AudioDownloadCancel> download_cancel;
+    std::shared_ptr<AudioSourceMailbox> resolve_mailbox;
 };
 
 /* The one pending app context menu (menus are modal, so one at a time):
@@ -736,6 +757,38 @@ struct PendingContextMenu {
         bool separator = false;
     };
     std::vector<Item> items;
+};
+
+/* A keydown resolved against the app's key bindings, owned so the event
+ * can be emitted after the callback that saw the key has returned. The
+ * match itself happens while the key is current: the modifier state is
+ * read then, and a later turn could see different keys held. */
+struct ShortcutMatch {
+    int kind = 0; // kShortcut, kMenuCommand, or kTrayAction
+    uint64_t window_id = 0;
+    std::string shortcut_id;
+    std::string key;
+    uint32_t modifiers = 0;
+    std::string command;
+    uint32_t tray_item_id = 0;
+};
+
+/* Something a WebView2 callback learned that the app must see, copied out
+ * of the callback's arguments. WebView2 does not support running a nested
+ * message loop or modal UI inside its callbacks, and its other callbacks
+ * cannot run until the current one returns, so app code never runs there:
+ * the callback queues one of these and the loop window delivers it on a
+ * later turn (deliverWebViewEvents). */
+struct DeferredWebViewEvent {
+    enum class Kind { Bridge, Focus, Shortcut, OpenExternal };
+    Kind kind = Kind::Bridge;
+    uint64_t window_id = 0;
+    std::string view_key;
+    std::string label;
+    std::string message;
+    std::string origin;
+    ShortcutMatch shortcut;
+    std::wstring url;
 };
 
 struct Host {
@@ -796,6 +849,25 @@ struct Host {
     AudioCaptureState captures[2];
     PendingContextMenu context_menu;
     std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
+    /* The message loop's own target: a message-only window created with
+     * the host on the loop thread and destroyed with it, so nothing
+     * posted to the loop depends on which app windows are open. Read
+     * from any thread (wake, frame requests), hence atomic; destroy
+     * clears it before tearing the window down. */
+    std::atomic<HWND> loop_window{nullptr};
+    /* A posted kRequestFrameMessage is still queued: requests coalesce
+     * until the loop window takes it. */
+    std::atomic<bool> frame_request_pending{false};
+    /* WebView2 events waiting for the app, in arrival order. One delivery
+     * runs at a time: an event queued while the app is inside an earlier
+     * one (a Bridge command showing a modal dialog) waits for it, the way
+     * WebView2 itself holds later callbacks while one is running. */
+    std::deque<DeferredWebViewEvent> webview_events;
+    bool webview_events_posted = false;
+    bool delivering_webview_events = false;
+    /* WebView2 callbacks currently on the stack; app callbacks run only
+     * at zero (see DeferredWebViewEvent). */
+    int webview_callback_depth = 0;
 };
 
 static std::string webViewKey(uint64_t window_id, const std::string &label);
@@ -863,6 +935,13 @@ static HWND parentWindow(Host *host) {
         if (entry.second.hwnd) return entry.second.hwnd;
     }
     return nullptr;
+}
+
+/* Where loop-bound work goes: posted notes from worker threads and the
+ * app-level timers. Never an app window — those close independently of
+ * the loop, and their timers and queued posts die with them. */
+static HWND loopWindow(Host *host) {
+    return host ? host->loop_window.load(std::memory_order_acquire) : nullptr;
 }
 
 static void copyWideField(wchar_t *dest, size_t dest_len, const std::wstring &value) {
@@ -1767,7 +1846,10 @@ static void showTrayMenu(Host *host, HWND hwnd) {
     PostMessageW(hwnd, WM_NULL, 0, 0);
 }
 
-static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wparam) {
+/* Resolve a keydown against the app's shortcuts, then its menu and tray
+ * key equivalents. True when a binding claims the key; `out` then holds
+ * the event to emit. */
+static bool matchShortcutForWindow(Host *host, const Window *window, WPARAM wparam, ShortcutMatch *out) {
     if (!host || (host->shortcuts.empty() && host->menus.empty() && host->tray_items.empty())) return false;
     if (!window) return false;
     std::string key = shortcutKeyFromWParam(wparam);
@@ -1779,16 +1861,11 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
         for (const Shortcut &shortcut : host->shortcuts) {
             if (shortcut.key != key) continue;
             if (!shortcutModifiersMatch(shortcut.modifiers, allow_implicit_shift)) continue;
-            if (!host->callback) return true;
-            WindowsEvent event = {};
-            event.kind = kShortcut;
-            event.window_id = window->id;
-            event.shortcut_id = shortcut.id.c_str();
-            event.shortcut_id_len = shortcut.id.size();
-            event.shortcut_key = shortcut.key.c_str();
-            event.shortcut_key_len = shortcut.key.size();
-            event.shortcut_modifiers = shortcut.modifiers;
-            host->callback(host->callback_context, &event);
+            out->kind = kShortcut;
+            out->window_id = window->id;
+            out->shortcut_id = shortcut.id;
+            out->key = shortcut.key;
+            out->modifiers = shortcut.modifiers;
             return true;
         }
         /* Menu accelerators dispatch from the same keydown path: a menu
@@ -1801,13 +1878,9 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
                 if (item.separator || !item.enabled || item.key.empty()) continue;
                 if (item.key != key) continue;
                 if (!shortcutModifiersMatch(item.modifiers, allow_implicit_shift)) continue;
-                if (!host->callback) return true;
-                WindowsEvent event = {};
-                event.kind = kMenuCommand;
-                event.window_id = window->id;
-                event.command_name = item.command.c_str();
-                event.command_name_len = item.command.size();
-                host->callback(host->callback_context, &event);
+                out->kind = kMenuCommand;
+                out->window_id = window->id;
+                out->command = item.command;
                 return true;
             }
         }
@@ -1818,18 +1891,121 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
             if (item.separator || !item.enabled || item.key.empty()) continue;
             if (item.key != key) continue;
             if (!shortcutModifiersMatch(item.modifiers, allow_implicit_shift)) continue;
-            return emitTrayActionForCommandId(host, host->tray_items, item.command_id);
+            out->kind = kTrayAction;
+            out->window_id = window->id;
+            out->tray_item_id = item.id;
+            /* A tray binding claims the key only while someone listens. */
+            return host->callback != nullptr;
         }
     }
     return false;
+}
+
+static void emitShortcutMatch(Host *host, const ShortcutMatch &match) {
+    if (!host || !host->callback) return;
+    WindowsEvent event = {};
+    event.kind = match.kind;
+    if (match.kind == kShortcut) {
+        event.window_id = match.window_id;
+        event.shortcut_id = match.shortcut_id.c_str();
+        event.shortcut_id_len = match.shortcut_id.size();
+        event.shortcut_key = match.key.c_str();
+        event.shortcut_key_len = match.key.size();
+        event.shortcut_modifiers = match.modifiers;
+    } else if (match.kind == kMenuCommand) {
+        event.window_id = match.window_id;
+        event.command_name = match.command.c_str();
+        event.command_name_len = match.command.size();
+    } else {
+        event.tray_item_id = match.tray_item_id;
+    }
+    host->callback(host->callback_context, &event);
+}
+
+static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wparam) {
+    ShortcutMatch match;
+    if (!matchShortcutForWindow(host, window, wparam, &match)) return false;
+    emitShortcutMatch(host, match);
+    return true;
 }
 
 static bool emitShortcutForHwnd(Host *host, HWND hwnd, WPARAM wparam) {
     return emitShortcutForWindow(host, windowForHwnd(host, hwnd), wparam);
 }
 
-static bool emitShortcutForWindowId(Host *host, uint64_t window_id, WPARAM wparam) {
-    return emitShortcutForWindow(host, windowForId(host, window_id), wparam);
+/* Marks a WebView2 callback on the stack for its duration. */
+struct WebViewCallbackScope {
+    Host *host;
+    explicit WebViewCallbackScope(Host *host_in) : host(host_in) { host->webview_callback_depth += 1; }
+    ~WebViewCallbackScope() { host->webview_callback_depth -= 1; }
+    WebViewCallbackScope(const WebViewCallbackScope &) = delete;
+    WebViewCallbackScope &operator=(const WebViewCallbackScope &) = delete;
+};
+
+/* Called from WebView2 callbacks: queue the event and make sure a
+ * delivery is posted to the loop window. */
+static void queueWebViewEvent(Host *host, DeferredWebViewEvent event) {
+    host->webview_events.push_back(std::move(event));
+    if (host->webview_events_posted) return;
+    HWND target = loopWindow(host);
+    host->webview_events_posted = target && PostMessageW(target, kDeliverWebViewEventsMessage, 0, 0);
+}
+
+static void deliverWebViewEvent(Host *host, const DeferredWebViewEvent &event) {
+    switch (event.kind) {
+        case DeferredWebViewEvent::Kind::Bridge:
+            /* Delivered even if the view closed after sending it: the
+             * page sent the message while it was live, and a reply to a
+             * view that is gone is dropped where it is sent. */
+            if (!host->bridge_callback) return;
+            host->bridge_callback(
+                host->bridge_context,
+                event.window_id,
+                event.label.c_str(),
+                event.label.size(),
+                event.message.c_str(),
+                event.message.size(),
+                event.origin.c_str(),
+                event.origin.size());
+            return;
+        case DeferredWebViewEvent::Kind::Focus: {
+            /* Focus is state, not input: a view that is gone by now has
+             * nothing to report. */
+            if (!host->callback || host->webviews.find(event.view_key) == host->webviews.end()) return;
+            WindowsEvent focused = {};
+            focused.kind = kViewFocused;
+            focused.window_id = event.window_id;
+            focused.view_label = event.label.c_str();
+            focused.view_label_len = event.label.size();
+            host->callback(host->callback_context, &focused);
+            return;
+        }
+        case DeferredWebViewEvent::Kind::Shortcut:
+            emitShortcutMatch(host, event.shortcut);
+            return;
+        case DeferredWebViewEvent::Kind::OpenExternal:
+            /* The shell may show UI of its own (an app picker), which is
+             * why this waits for the loop rather than running inside
+             * NavigationStarting. */
+            ShellExecuteW(nullptr, L"open", event.url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return;
+    }
+}
+
+/* The loop window's kDeliverWebViewEventsMessage. A delivery that starts
+ * while another is running (the app is inside a modal loop it opened from
+ * an earlier event) leaves the queue to that outer delivery, so the app
+ * sees these events one at a time and in order. */
+static void deliverWebViewEvents(Host *host) {
+    host->webview_events_posted = false;
+    if (host->delivering_webview_events) return;
+    host->delivering_webview_events = true;
+    while (!host->webview_events.empty()) {
+        DeferredWebViewEvent event = std::move(host->webview_events.front());
+        host->webview_events.pop_front();
+        deliverWebViewEvent(host, event);
+    }
+    host->delivering_webview_events = false;
 }
 
 static std::string webViewKey(uint64_t window_id, const std::string &label) {
@@ -3957,8 +4133,7 @@ constexpr WPARAM kAudioNoteBufferingStarted = 6;
 constexpr WPARAM kAudioNoteBufferingStopped = 7;
 constexpr WPARAM kAudioNoteError = 8;
 
-/* Position tick on the first top-level window, outside the app-timer id
- * range; 500 ms is the shared coarse cadence (macOS and the null
+/* Position tick on the loop window, outside the app-timer id range; 500 ms is the shared coarse cadence (macOS and the null
  * platform tick the same), so frame-clock scrubber interpolation
  * behaves identically across hosts. */
 constexpr UINT_PTR kAudioPositionTimerId = 0x3000;
@@ -4081,20 +4256,20 @@ struct AudioSessionEventForwarder final : public IMFAsyncCallback {
     }
 };
 
-/* Completes an asynchronous URL source resolution (worker thread) and
- * hands the media source to the loop thread under the host lifetime
- * mutex; a stale generation — the playback was replaced or stopped
- * mid-resolve — shuts the source down right here instead. */
+/* Completes an asynchronous URL source resolution on a Media Foundation
+ * worker thread. The source goes into its load's mailbox and a note goes
+ * to the loop window; nothing here touches host state. A closed mailbox
+ * (the playback was replaced or stopped mid-resolve) means the source is
+ * shut down right here instead. */
 struct AudioSourceResolveForwarder final : public IMFAsyncCallback {
     LONG refs = 1;
     IMFSourceResolver *resolver = nullptr;
-    Host *host = nullptr;
-    std::shared_ptr<HostLifetime> lifetime;
+    std::shared_ptr<AudioSourceMailbox> mailbox;
     HWND hwnd = nullptr;
     uint64_t generation = 0;
 
-    AudioSourceResolveForwarder(IMFSourceResolver *resolver_in, Host *host_in, std::shared_ptr<HostLifetime> lifetime_in, HWND hwnd_in, uint64_t generation_in)
-        : resolver(resolver_in), host(host_in), lifetime(std::move(lifetime_in)), hwnd(hwnd_in), generation(generation_in) {
+    AudioSourceResolveForwarder(IMFSourceResolver *resolver_in, std::shared_ptr<AudioSourceMailbox> mailbox_in, HWND hwnd_in, uint64_t generation_in)
+        : resolver(resolver_in), mailbox(std::move(mailbox_in)), hwnd(hwnd_in), generation(generation_in) {
         resolver->AddRef();
     }
     ~AudioSourceResolveForwarder() { resolver->Release(); }
@@ -4126,23 +4301,24 @@ struct AudioSourceResolveForwarder final : public IMFAsyncCallback {
         IMFMediaSource *source = nullptr;
         if (SUCCEEDED(hr) && object) object->QueryInterface(kNativeSdkIID_IMFMediaSource, reinterpret_cast<void **>(&source));
         if (object) object->Release();
-        std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
-        const bool current = lifetime->alive && host->audio.active && host->audio.generation == generation;
-        if (!current) {
-            if (source) {
-                source->Shutdown();
-                source->Release();
+        bool open = false;
+        bool kept = false;
+        {
+            std::lock_guard<std::mutex> guard(mailbox->mutex);
+            open = mailbox->open;
+            if (open && source) {
+                /* Reference transferred to the mailbox. */
+                mailbox->source = source;
+                kept = true;
             }
-            return S_OK;
         }
-        if (!source) {
-            PostMessageW(hwnd, kAudioSessionMessage, kAudioNoteSourceFailed, (LPARAM)generation);
-            return S_OK;
+        if (!kept && source) {
+            source->Shutdown();
+            source->Release();
         }
-        /* Reference transferred; the loop thread attaches or (if it
-         * bumps the generation first) releases it in teardown. */
-        host->audio.source = source;
-        PostMessageW(hwnd, kAudioSessionMessage, kAudioNoteSourceResolved, (LPARAM)generation);
+        /* A destroyed loop window makes this a harmless no-op; a kept
+         * source then stays in the mailbox, which teardown closes. */
+        if (open) PostMessageW(hwnd, kAudioSessionMessage, kept ? kAudioNoteSourceResolved : kAudioNoteSourceFailed, (LPARAM)generation);
         return S_OK;
     }
 };
@@ -4316,7 +4492,7 @@ static void audioStopPositionTimer(Host *host) {
 static void audioStartPositionTimer(Host *host) {
     AudioState &audio = host->audio;
     if (audio.position_timer_armed) return;
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return;
     if (SetTimer(hwnd, kAudioPositionTimerId, kAudioPositionIntervalMs, nullptr)) {
         audio.timer_hwnd = hwnd;
@@ -4713,7 +4889,7 @@ static void audioSpectrumStartCapture(Host *host) {
     AudioSpectrumState &spectrum = host->spectrum;
     if (spectrum.shared) return;
     if (!audioSpectrumSupported()) return;
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return;
     spectrum.generation += 1;
     spectrum.shared = std::make_shared<AudioSpectrumShared>();
@@ -4899,7 +5075,6 @@ static void audioCaptureStopAll(Host *host) {
  * letting a straggler finish installs the cache entry the completed
  * play earned. */
 static void audioReleaseSession(Host *host, bool cancel_download) {
-    std::lock_guard<std::recursive_mutex> guard(host->lifetime->mutex);
     AudioState &audio = host->audio;
     audioStopPositionTimer(host);
     audioSpectrumStopCapture(host);
@@ -4926,6 +5101,22 @@ static void audioReleaseSession(Host *host, bool cancel_download) {
         audio.source->Release();
         audio.source = nullptr;
     }
+    if (audio.resolve_mailbox) {
+        /* Close the load's mailbox: a resolution still in flight now
+         * shuts its source down itself, and one that already arrived but
+         * was never collected is released here. */
+        IMFMediaSource *uncollected = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(audio.resolve_mailbox->mutex);
+            audio.resolve_mailbox->open = false;
+            uncollected = audio.resolve_mailbox->source;
+            audio.resolve_mailbox->source = nullptr;
+        }
+        if (uncollected) {
+            uncollected->Shutdown();
+            uncollected->Release();
+        }
+    }
     if (cancel_download && audio.download_cancel) audio.download_cancel->cancelled.store(true);
     const uint64_t generation = audio.generation;
     audio = AudioState{};
@@ -4940,7 +5131,7 @@ static bool audioAttachSession(Host *host) {
     AudioState &audio = host->audio;
     IMFMediaSource *source = audio.source;
     if (!source) return false;
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return false;
     IMFMediaSession *session = nullptr;
     if (FAILED(MFCreateMediaSession(nullptr, &session)) || !session) return false;
@@ -5105,7 +5296,7 @@ static int audioLoadUrlInternal(Host *host, const std::string &url, const std::s
         }
     }
     if (!audioEnsureMediaFoundation()) return 2;
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return 2;
     IMFSourceResolver *resolver = nullptr;
     if (FAILED(MFCreateSourceResolver(&resolver)) || !resolver) return 2;
@@ -5115,7 +5306,8 @@ static int audioLoadUrlInternal(Host *host, const std::string &url, const std::s
     /* A fresh stream has no bytes yet: buffering starts true and drops
      * when the session actually starts rolling. */
     audio.buffering = true;
-    AudioSourceResolveForwarder *forwarder = new AudioSourceResolveForwarder(resolver, host, host->lifetime, hwnd, audio.generation);
+    audio.resolve_mailbox = std::make_shared<AudioSourceMailbox>();
+    AudioSourceResolveForwarder *forwarder = new AudioSourceResolveForwarder(resolver, audio.resolve_mailbox, hwnd, audio.generation);
     const HRESULT hr = resolver->BeginCreateObjectFromURL(widen(url).c_str(), MF_RESOLUTION_MEDIASOURCE, nullptr, nullptr, forwarder, nullptr);
     forwarder->Release();
     resolver->Release();
@@ -5170,16 +5362,26 @@ static void audioFailed(Host *host) {
     audioEmitReport(host, kAudioEventFailed, 0, 0, 0, 0);
 }
 
+/* Loop thread, on kAudioNoteSourceResolved: take the resolved source
+ * out of the current load's mailbox. */
+static bool audioCollectResolvedSource(Host *host) {
+    AudioState &audio = host->audio;
+    if (!audio.resolve_mailbox) return false;
+    std::lock_guard<std::mutex> guard(audio.resolve_mailbox->mutex);
+    audio.source = audio.resolve_mailbox->source;
+    audio.resolve_mailbox->source = nullptr;
+    return audio.source != nullptr;
+}
+
 /* Distilled session notes, marshalled from Media Foundation worker
  * threads via PostMessage; loop thread. Stale generations (a replaced
  * or stopped playback's stragglers) are dropped here. */
 static void audioHandleSessionMessage(Host *host, WPARAM note, LPARAM generation) {
-    std::lock_guard<std::recursive_mutex> guard(host->lifetime->mutex);
     AudioState &audio = host->audio;
     if (!audio.active || (uint64_t)generation != audio.generation) return;
     switch (note) {
         case kAudioNoteSourceResolved:
-            if (!audioAttachSession(host)) audioFailed(host);
+            if (!audioCollectResolvedSource(host) || !audioAttachSession(host)) audioFailed(host);
             break;
         case kAudioNoteSourceFailed:
         case kAudioNoteError:
@@ -5685,8 +5887,8 @@ static bool createChildWebView(Host *host, const std::string &key) {
         [host, key, parent, lifetime, generation](HRESULT result, ICoreWebView2Environment *environment) -> HRESULT {
             auto token = lifetime.lock();
             if (!token) return S_OK;
-            std::lock_guard<std::recursive_mutex> guard(token->mutex);
             if (!token->alive) return S_OK;
+            WebViewCallbackScope scope(host);
             auto found = host->webviews.find(key);
             if (found == host->webviews.end() || found->second.hwnd != parent || found->second.window_drag_generation != generation || !IsWindow(parent)) return S_OK;
             if (FAILED(result) || !environment) {
@@ -5702,11 +5904,11 @@ static bool createChildWebView(Host *host, const std::string &key) {
                         if (controller) controller->Close();
                         return S_OK;
                     }
-                    std::lock_guard<std::recursive_mutex> guard(token->mutex);
                     if (!token->alive) {
                         if (controller) controller->Close();
                         return S_OK;
                     }
+                    WebViewCallbackScope scope(host);
                     auto found = host->webviews.find(key);
                     if (found == host->webviews.end() || found->second.window_drag_generation != generation) {
                         if (controller) controller->Close();
@@ -5733,16 +5935,16 @@ static bool createChildWebView(Host *host, const std::string &key) {
                         [host, key, lifetime](ICoreWebView2Controller *, IUnknown *) -> HRESULT {
                             auto token = lifetime.lock();
                             if (!token) return S_OK;
-                            std::lock_guard<std::recursive_mutex> guard(token->mutex);
                             if (!token->alive || !host->callback) return S_OK;
+                            WebViewCallbackScope scope(host);
                             auto focused = host->webviews.find(key);
                             if (focused == host->webviews.end()) return S_OK;
-                            WindowsEvent event = {};
-                            event.kind = kViewFocused;
+                            DeferredWebViewEvent event;
+                            event.kind = DeferredWebViewEvent::Kind::Focus;
                             event.window_id = focused->second.window_id;
-                            event.view_label = focused->second.label.c_str();
-                            event.view_label_len = focused->second.label.size();
-                            host->callback(host->callback_context, &event);
+                            event.view_key = key;
+                            event.label = focused->second.label;
+                            queueWebViewEvent(host, std::move(event));
                             return S_OK;
                         }).Get(), &focus_token);
                     if (found->second.webview) {
@@ -5771,8 +5973,8 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                     [host, key, lifetime, drag_generation](HRESULT result, LPCWSTR) -> HRESULT {
                                         auto token = lifetime.lock();
                                         if (!token) return S_OK;
-                                        std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                         if (!token->alive) return S_OK;
+                                        WebViewCallbackScope scope(host);
                                         auto current = host->webviews.find(key);
                                         if (current == host->webviews.end() || current->second.window_drag_generation != drag_generation) return S_OK;
                                         if (FAILED(result)) {
@@ -5800,8 +6002,8 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 [host, key, bridge_window_id, bridge_label, lifetime](ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventArgs *args) -> HRESULT {
                                     auto token = lifetime.lock();
                                     if (!token) return S_OK;
-                                    std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                     if (!token->alive || !args || !host->bridge_callback) return S_OK;
+                                    WebViewCallbackScope scope(host);
 
                                     LPWSTR message_bytes = nullptr;
                                     if (FAILED(args->TryGetWebMessageAsString(&message_bytes)) || !message_bytes) return S_OK;
@@ -5821,15 +6023,14 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                             : bridgeOriginForWebViewUrl(source_webview->second, source_url);
                                     }
 
-                                    host->bridge_callback(
-                                        host->bridge_context,
-                                        bridge_window_id,
-                                        bridge_label.c_str(),
-                                        bridge_label.size(),
-                                        message.c_str(),
-                                        message.size(),
-                                        origin.c_str(),
-                                        origin.size());
+                                    DeferredWebViewEvent event;
+                                    event.kind = DeferredWebViewEvent::Kind::Bridge;
+                                    event.window_id = bridge_window_id;
+                                    event.view_key = key;
+                                    event.label = bridge_label;
+                                    event.message = std::move(message);
+                                    event.origin = std::move(origin);
+                                    queueWebViewEvent(host, std::move(event));
                                     return S_OK;
                                 }).Get(), &bridge_token);
                         }
@@ -5839,16 +6040,21 @@ static bool createChildWebView(Host *host, const std::string &key) {
                             [host, accelerator_window_id, lifetime](ICoreWebView2Controller *, ICoreWebView2AcceleratorKeyPressedEventArgs *args) -> HRESULT {
                                 auto token = lifetime.lock();
                                 if (!token) return S_OK;
-                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive || !args) return S_OK;
+                                WebViewCallbackScope scope(host);
                                 COREWEBVIEW2_KEY_EVENT_KIND kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
                                 if (FAILED(args->get_KeyEventKind(&kind))) return S_OK;
                                 if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) return S_OK;
                                 UINT virtual_key = 0;
                                 if (FAILED(args->get_VirtualKey(&virtual_key))) return S_OK;
-                                if (emitShortcutForWindowId(host, accelerator_window_id, virtual_key)) {
-                                    args->put_Handled(TRUE);
-                                }
+                                /* Handled is decided now, from the key state
+                                 * of this keydown; the app hears it later. */
+                                DeferredWebViewEvent event;
+                                event.kind = DeferredWebViewEvent::Kind::Shortcut;
+                                if (!matchShortcutForWindow(host, windowForId(host, accelerator_window_id), virtual_key, &event.shortcut)) return S_OK;
+                                args->put_Handled(TRUE);
+                                event.window_id = accelerator_window_id;
+                                queueWebViewEvent(host, std::move(event));
                                 return S_OK;
                             }).Get(), &accelerator_token);
 
@@ -5858,8 +6064,8 @@ static bool createChildWebView(Host *host, const std::string &key) {
                             [host, key, environment_ref, lifetime](ICoreWebView2 *, ICoreWebView2WebResourceRequestedEventArgs *args) -> HRESULT {
                                 auto token = lifetime.lock();
                                 if (!token) return S_OK;
-                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive || !args) return S_OK;
+                                WebViewCallbackScope scope(host);
                                 auto found = host->webviews.find(key);
                                 if (found == host->webviews.end()) return S_OK;
                                 ComPtr<ICoreWebView2WebResourceRequest> request;
@@ -5880,8 +6086,8 @@ static bool createChildWebView(Host *host, const std::string &key) {
                             [host, key, lifetime](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
                                 auto token = lifetime.lock();
                                 if (!token) return S_OK;
-                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive) return S_OK;
+                                WebViewCallbackScope scope(host);
                                 LPWSTR uri_bytes = nullptr;
                                 if (!args || FAILED(args->get_Uri(&uri_bytes))) return S_OK;
                                 std::wstring uri_wide = uri_bytes ? std::wstring(uri_bytes) : std::wstring();
@@ -5891,7 +6097,10 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 if (found != host->webviews.end() && isInternalAssetUrl(found->second, uri)) return S_OK;
                                 if (uri.empty() || uri.rfind("about:", 0) == 0 || policyListMatches(host->allowed_origins, uri)) return S_OK;
                                 if (host->external_link_action == 1 && policyListMatches(host->allowed_external_urls, uri)) {
-                                    ShellExecuteW(nullptr, L"open", uri_wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                                    DeferredWebViewEvent event;
+                                    event.kind = DeferredWebViewEvent::Kind::OpenExternal;
+                                    event.url = uri_wide;
+                                    queueWebViewEvent(host, std::move(event));
                                 }
                                 args->put_Cancel(TRUE);
                                 return S_OK;
@@ -6078,6 +6287,72 @@ static void clampChromelessMaximizedFrame(Host *host, HWND hwnd, WINDOWPOS *pos)
     pos->flags &= ~(SWP_NOMOVE | SWP_NOSIZE);
 }
 
+/* The loop window's procedure: everything marshalled onto the message
+ * loop lands here rather than on an app window, which may close at any
+ * time. Posted messages reach it from nested modal loops (dialogs, menus,
+ * the move/size loop) too, because those dispatch every window message of
+ * the thread; a thread message (PostThreadMessage) would be dropped by
+ * them, and a waitable handle would not be serviced by them at all. */
+static LRESULT CALLBACK loopWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_NCCREATE) {
+        auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    }
+    Host *host = hostFromWindow(hwnd);
+    switch (message) {
+        case kWakeMessage:
+            if (host && host->callback) {
+                WindowsEvent wake = {};
+                wake.kind = kWake;
+                wake.window_id = 1;
+                host->callback(host->callback_context, &wake);
+            }
+            return 0;
+        case kRequestFrameMessage:
+            if (host) {
+                /* Cleared before emitting: a request made while this frame
+                 * runs posts again instead of folding into a finished one. */
+                host->frame_request_pending.store(false, std::memory_order_release);
+                if (host->callback) {
+                    WindowsEvent frame = {};
+                    frame.kind = kFrame;
+                    frame.window_id = 1;
+                    host->callback(host->callback_context, &frame);
+                }
+            }
+            return 0;
+        case kAudioSessionMessage:
+            if (host) audioHandleSessionMessage(host, wparam, lparam);
+            return 0;
+        case kAudioSpectrumMessage:
+            if (host) audioHandleSpectrumMessage(host, wparam);
+            return 0;
+        case kDeliverWebViewEventsMessage:
+            if (host) deliverWebViewEvents(host);
+            return 0;
+        case WM_TIMER:
+            if (host && handleAppTimerMessage(host, wparam)) return 0;
+            if (host && handleAudioTimerMessage(host, wparam)) return 0;
+            return 0;
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+static HWND createLoopWindow(Host *host) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = loopWindowProc;
+        wc.hInstance = host->instance;
+        wc.lpszClassName = L"NativeSdkLoopWindow";
+        registered = RegisterClassExW(&wc) != 0;
+    }
+    return CreateWindowExW(0, L"NativeSdkLoopWindow", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, host->instance, host);
+}
+
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
@@ -6210,28 +6485,6 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         }
     }
     switch (message) {
-        case kWakeMessage:
-            if (host) {
-                WindowsEvent wake = {};
-                wake.kind = kWake;
-                wake.window_id = 1;
-                if (host->callback) host->callback(host->callback_context, &wake);
-            }
-            return 0;
-        case kRequestFrameMessage:
-            if (host) {
-                WindowsEvent frame = {};
-                frame.kind = kFrame;
-                frame.window_id = 1;
-                if (host->callback) host->callback(host->callback_context, &frame);
-            }
-            return 0;
-        case kAudioSessionMessage:
-            if (host) audioHandleSessionMessage(host, wparam, lparam);
-            return 0;
-        case kAudioSpectrumMessage:
-            if (host) audioHandleSpectrumMessage(host, wparam);
-            return 0;
         case kShowContextMenuMessage:
             if (host) showAppContextMenu(host, hwnd);
             return 0;
@@ -6415,8 +6668,6 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             }
             break;
         case WM_TIMER:
-            if (host && handleAppTimerMessage(host, wparam)) return 0;
-            if (host && handleAudioTimerMessage(host, wparam)) return 0;
             if (host && wparam == kFrameTimerId) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
@@ -6682,6 +6933,16 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
      * RPC_E_CHANGED_MODE (an MTA got there first) leaves nothing to
      * balance. */
     host->com_initialized = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
+    /* The loop window exists before any app window and for the host's
+     * whole life, so wakes and timers have a target from the start. */
+    HWND loop_window = createLoopWindow(host);
+    if (!loop_window) {
+        const bool com_initialized = host->com_initialized;
+        delete host;
+        if (com_initialized) CoUninitialize();
+        return nullptr;
+    }
+    host->loop_window.store(loop_window, std::memory_order_release);
     /* One hardware Direct2D/DirectWrite resource domain for every canvas
      * child. Creation also requires the in-memory font and constrained
      * fallback seams: without them packet text cannot match engine layout,
@@ -6725,9 +6986,11 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
 void native_sdk_windows_destroy(Host *host) {
     if (!host) return;
     audioCaptureStopAll(host);
-    std::shared_ptr<HostLifetime> lifetime = host->lifetime;
-    std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
-    lifetime->alive = false;
+    /* Retire the loop window first: a wake or frame request from here on
+     * finds no target and reports that, instead of posting into a queue
+     * nobody will pump again. */
+    HWND loop_window = host->loop_window.exchange(nullptr, std::memory_order_acq_rel);
+    host->lifetime->alive = false;
     /* DestroyWindow below dispatches WM_DESTROY/WM_ACTIVATEAPP
      * synchronously through windowProc; the run loop's handler state is
      * already gone by the time destroy is called, so those teardown
@@ -6747,6 +7010,7 @@ void native_sdk_windows_destroy(Host *host) {
     removeNotificationIcon(host);
     destroyAllWindows(host);
     gpuSurfaceDestroyFrameWakeTimer(host);
+    if (loop_window) DestroyWindow(loop_window);
     const bool com_initialized = host->com_initialized;
     delete host;
     if (com_initialized) CoUninitialize();
@@ -6798,30 +7062,30 @@ void native_sdk_windows_stop(Host *host) {
     PostQuitMessage(0);
 }
 
-/* Thread-safe wake: posts kWakeMessage into the message loop, which
- * emits the kWake event on the loop thread. The lifetime mutex guards
- * the window map against concurrent create/destroy. */
-void native_sdk_windows_wake(Host *host) {
-    if (!host) return;
-    std::shared_ptr<HostLifetime> lifetime = host->lifetime;
-    std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
-    if (!lifetime->alive || !host->running) return;
-    HWND hwnd = parentWindow(host);
-    if (!hwnd) return;
-    PostMessageW(hwnd, kWakeMessage, 0, 0);
+/* Thread-safe wake: posts kWakeMessage to the loop window, which emits
+ * the kWake event on the loop thread. Enqueue-only, as the wake contract
+ * requires (PlatformServices.wake_fn): it takes no lock the loop thread
+ * could be holding, so a thread the loop is joining can always finish
+ * its wake. The host itself outlives every caller — the runtime fences
+ * its wake paths before teardown. Returns 0 when nothing was posted (the
+ * host is being destroyed, or the thread's queue is full). */
+int native_sdk_windows_wake(Host *host) {
+    if (!host) return 0;
+    HWND target = host->loop_window.load(std::memory_order_acquire);
+    return target && PostMessageW(target, kWakeMessage, 0, 0) ? 1 : 0;
 }
 
-/* Thread-safe frame request: posts kRequestFrameMessage into the message
- * loop, which emits one kFrame event on the loop thread — the automation
- * arrival watcher's wake, guarded exactly like native_sdk_windows_wake. */
-void native_sdk_windows_request_frame(Host *host) {
-    if (!host) return;
-    std::shared_ptr<HostLifetime> lifetime = host->lifetime;
-    std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
-    if (!lifetime->alive || !host->running) return;
-    HWND hwnd = parentWindow(host);
-    if (!hwnd) return;
-    PostMessageW(hwnd, kRequestFrameMessage, 0, 0);
+/* Thread-safe frame request: posts kRequestFrameMessage to the loop
+ * window, which emits one kFrame event on the loop thread — the
+ * automation arrival watcher's wake, enqueue-only like
+ * native_sdk_windows_wake. Requests coalesce while one is queued. */
+int native_sdk_windows_request_frame(Host *host) {
+    if (!host) return 0;
+    if (host->frame_request_pending.exchange(true, std::memory_order_acq_rel)) return 1;
+    HWND target = host->loop_window.load(std::memory_order_acquire);
+    if (target && PostMessageW(target, kRequestFrameMessage, 0, 0)) return 1;
+    host->frame_request_pending.store(false, std::memory_order_release);
+    return 0;
 }
 
 /* Platform image decoder: WIC (Windows Imaging Component) handles PNG,
@@ -7167,7 +7431,7 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
 void native_sdk_windows_start_timer(Host *host, uint64_t timer_id, uint64_t interval_ns, int repeats) {
     if (!host) return;
     native_sdk_windows_cancel_timer(host, timer_id);
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return;
     AppTimer *slot = nullptr;
     UINT_PTR win32_id = 0;
