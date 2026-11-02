@@ -2827,8 +2827,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 // The vendored WebView2 SDK header (third_party/webview2)
                 // turns on the host's embedded-WebView layer; the host
                 // fails the compile by design if it cannot be found.
-                app_mod.addIncludePath(dep.path("third_party/webview2/include"));
-                if (windowsSdkWinrtIncludeDir(b, target)) |winrt| app_mod.addSystemIncludePath(.{ .cwd_relative = winrt });
+                addWebView2HostIncludes(b, app_mod, dep.path("third_party/webview2/include"), target);
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} });
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
                 // WebView2Loader.dll rides next to the installed app
@@ -2871,36 +2870,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.lib", .{cef_dir})));
             },
         }
-        app_mod.linkSystemLibrary("c", .{});
-        // The MSVC target compiles the hosts against the toolchain's own
-        // STL, which pulls in msvcprt/vcruntime through its default-lib
-        // directives; Zig's libc++/libc++abi cannot be built against the
-        // MSVC CRT headers (cxxabi.h collides with vcruntime_typeinfo.h).
-        if (target.result.abi != .msvc) app_mod.linkSystemLibrary("c++", .{});
-        app_mod.linkSystemLibrary("user32", .{});
-        app_mod.linkSystemLibrary("gdi32", .{});
-        // Retained gpu_surface packets are composited into a hardware
-        // Direct2D target; DirectWrite draws the engine-measured text
-        // runs (including registered in-memory fonts) on that target.
-        app_mod.linkSystemLibrary("d2d1", .{});
-        app_mod.linkSystemLibrary("dwrite", .{});
-        app_mod.linkSystemLibrary("imm32", .{});
-        app_mod.linkSystemLibrary("comctl32", .{});
-        app_mod.linkSystemLibrary("ole32", .{});
-        app_mod.linkSystemLibrary("oleacc", .{});
-        app_mod.linkSystemLibrary("shell32", .{});
-        // TypeScript cores link ScriptC's host runtime, whose network-interface
-        // helpers use GetAdaptersAddresses and Winsock address conversion; the
-        // in-process service archive shares the same runtime and additionally
-        // reaches advapi32 (crypto-backed randomness).
-        app_mod.linkSystemLibrary("iphlpapi", .{});
-        app_mod.linkSystemLibrary("ws2_32", .{});
-        app_mod.linkSystemLibrary("advapi32", .{});
-        // The audio backend: Media Foundation (session + source resolver
-        // + streaming audio renderer) and WinHTTP (the cache fill).
-        app_mod.linkSystemLibrary("mf", .{});
-        app_mod.linkSystemLibrary("mfplat", .{});
-        app_mod.linkSystemLibrary("winhttp", .{});
+        linkWindowsHostLibraries(app_mod, target);
         if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
     }
 }
@@ -2928,6 +2898,53 @@ fn addPlatformLinkSearchPaths(b: *std.Build, platform: PlatformOption, web_engin
 
 /// The vendored WebView2Loader.dll for the target architecture, relative
 /// to the framework root.
+/// The system libraries the Windows host links, for an app executable
+/// and for the host's own test harness alike.
+pub fn linkWindowsHostLibraries(module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    module.linkSystemLibrary("c", .{});
+    // The MSVC target compiles the hosts against the toolchain's own
+    // STL, which pulls in msvcprt/vcruntime through its default-lib
+    // directives; Zig's libc++/libc++abi cannot be built against the
+    // MSVC CRT headers (cxxabi.h collides with vcruntime_typeinfo.h).
+    if (target.result.abi != .msvc) module.linkSystemLibrary("c++", .{});
+    module.linkSystemLibrary("user32", .{});
+    module.linkSystemLibrary("gdi32", .{});
+    // Retained gpu_surface packets are composited into a hardware
+    // Direct2D target; DirectWrite draws the engine-measured text
+    // runs (including registered in-memory fonts) on that target.
+    module.linkSystemLibrary("d2d1", .{});
+    module.linkSystemLibrary("dwrite", .{});
+    module.linkSystemLibrary("imm32", .{});
+    module.linkSystemLibrary("comctl32", .{});
+    module.linkSystemLibrary("ole32", .{});
+    module.linkSystemLibrary("oleacc", .{});
+    module.linkSystemLibrary("shell32", .{});
+    // TypeScript cores link ScriptC's host runtime, whose network-interface
+    // helpers use GetAdaptersAddresses and Winsock address conversion; the
+    // in-process service archive shares the same runtime and additionally
+    // reaches advapi32 (crypto-backed randomness).
+    module.linkSystemLibrary("iphlpapi", .{});
+    module.linkSystemLibrary("ws2_32", .{});
+    module.linkSystemLibrary("advapi32", .{});
+    // The audio backend: Media Foundation (session + source resolver
+    // + streaming audio renderer) and WinHTTP (the cache fill).
+    module.linkSystemLibrary("mf", .{});
+    module.linkSystemLibrary("mfplat", .{});
+    module.linkSystemLibrary("winhttp", .{});
+}
+
+/// The WebView2 host's include paths: the vendored WebView2 SDK header
+/// directory, plus WRL for MSVC targets (`windowsSdkWinrtIncludeDir`).
+pub fn addWebView2HostIncludes(b: *std.Build, module: *std.Build.Module, sdk_include: std.Build.LazyPath, target: std.Build.ResolvedTarget) void {
+    module.addIncludePath(sdk_include);
+    if (windowsSdkWinrtIncludeDir(b, target)) |winrt| module.addSystemIncludePath(.{ .cwd_relative = winrt });
+}
+
+/// The vendored WebView2Loader.dll's directory, relative to the SDK root.
+pub fn webView2LoaderDir(target: std.Build.ResolvedTarget) []const u8 {
+    return std.fs.path.dirname(webView2LoaderSubPath(target)).?;
+}
+
 fn webView2LoaderSubPath(target: std.Build.ResolvedTarget) []const u8 {
     return if (target.result.cpu.arch == .aarch64)
         "third_party/webview2/arm64/WebView2Loader.dll"
@@ -2957,8 +2974,7 @@ fn addWebView2RuntimeRunFiles(dep: *std.Build.Dependency, target: std.Build.Reso
     if (web_engine != .system) return;
     if (!web_layer) return;
     if (target.result.os.tag != .windows) return;
-    const loader_dir = std.fs.path.dirname(webView2LoaderSubPath(target)).?;
-    run.addPathDir(dep.builder.pathFromRoot(loader_dir));
+    run.addPathDir(dep.builder.pathFromRoot(webView2LoaderDir(target)));
 }
 
 fn addCefRuntimeRunFiles(b: *std.Build, target: std.Build.ResolvedTarget, run: *std.Build.Step.Run, exe: *std.Build.Step.Compile, web_engine: WebEngineOption, cef_dir: []const u8) void {

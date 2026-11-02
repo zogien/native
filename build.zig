@@ -631,22 +631,24 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run package and framework tests");
     if (b.graph.host.result.os.tag == .windows) {
-        const probe_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .windows, .abi = .msvc });
-        const probe_mod = b.createModule(.{ .target = probe_target, .optimize = optimize, .link_libc = true });
-        probe_mod.addIncludePath(b.path("third_party/webview2/include"));
-        const windows_sdk = std.zig.WindowsSdk.find(b.allocator, b.graph.io, probe_target.result.cpu.arch, &b.graph.environ_map) catch @panic("Windows SDK required for Bridge wake regression");
-        const installation = windows_sdk.windows10sdk orelse @panic("Windows SDK required for Bridge wake regression");
-        probe_mod.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ installation.path, "Include", installation.version, "winrt" }) });
-        probe_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/bridge_wake_test.cpp"), .flags = &.{"-std=c++17"} });
-        probe_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
-        for ([_][]const u8{ "user32", "gdi32", "d2d1", "dwrite", "imm32", "comctl32", "ole32", "oleacc", "shell32", "iphlpapi", "ws2_32", "advapi32", "mf", "mfplat", "winhttp" }) |library|
-            probe_mod.linkSystemLibrary(library, .{});
-        const probe = b.addExecutable(.{ .name = "windows-bridge-wake-test", .root_module = probe_mod });
-        probe.win32_manifest = b.path("assets/native-sdk.manifest");
-        const run_probe = b.addRunArtifact(probe);
-        run_probe.addPathDir(b.pathFromRoot(if (probe_target.result.cpu.arch == .aarch64) "third_party/webview2/arm64" else "third_party/webview2/x64"));
-        b.step("test-windows-bridge-wake", "Verify a real WebView Bridge callback can join a worker posting wake and frame").dependOn(&run_probe.step);
-        test_step.dependOn(&run_probe.step);
+        // The Windows host's loop model against a real WebView, with the
+        // production host compiled into the harness (see
+        // src/platform/windows/host_loop_test.cpp). Like the macOS host
+        // probes below, it runs on hosts of its own platform only.
+        const app_build = @import("build/app.zig");
+        const loop_target = b.graph.host;
+        const loop_mod = b.createModule(.{ .target = loop_target, .optimize = optimize, .link_libc = true });
+        app_build.addWebView2HostIncludes(b, loop_mod, b.path("third_party/webview2/include"), loop_target);
+        loop_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/host_loop_test.cpp"), .flags = &.{"-std=c++17"} });
+        loop_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
+        app_build.linkWindowsHostLibraries(loop_mod, loop_target);
+        const loop_test = b.addExecutable(.{ .name = "windows-host-loop-test", .root_module = loop_mod });
+        loop_test.win32_manifest = b.path("assets/native-sdk.manifest");
+        const loop_run = b.addRunArtifact(loop_test);
+        loop_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
+        loop_run.expectExitCode(0);
+        b.step("test-windows-host-loop", "Verify the Windows host's loop model against a real WebView").dependOn(&loop_run.step);
+        test_step.dependOn(&loop_run.step);
     }
     const window_drag_tests = b.addSystemCommand(&.{ "node", "--test" });
     window_drag_tests.addFileArg(b.path("scripts/webview-window-drag.test.mjs"));

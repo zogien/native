@@ -188,6 +188,11 @@ jobs:
       # include path, or a conformance error in the embedded layer — is a
       # compile failure here, not a silent WebViewNotFound at runtime.
       - run: zig build test-webview-system-link -Dplatform=windows
+      # The same host's loop model against a real WebView: Bridge commands
+      # reach the app outside WebView2 callbacks and may join a worker
+      # that wakes the loop, frame requests coalesce, and wakes and app
+      # timers keep arriving after the first window closes.
+      - run: zig build test-windows-host-loop
       # Effects.spawn is a pipe-backed background transport. Run its
       # Windows-only PowerShell probe natively so removing CREATE_NO_WINDOW
       # cannot leave the platform-neutral and Wine lanes green.
