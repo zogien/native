@@ -613,8 +613,12 @@ struct TrayItem {
     bool enabled = true;
 };
 
+/* Whether the host still exists, for WebView2 completions and events
+ * that arrive after native_sdk_windows_destroy (they hold a weak
+ * reference to this). WebView2 raises every callback on the thread that
+ * created it, the loop thread, so a plain flag is enough: nothing off
+ * the loop thread reads it. */
 struct HostLifetime {
-    std::recursive_mutex mutex;
     bool alive = true;
 };
 
@@ -689,11 +693,21 @@ struct AudioCaptureState {
     std::thread worker;
 };
 
+/* One URL load's hand-over slot. The Media Foundation resolver (worker
+ * thread) leaves the resolved source here and posts a note; the loop
+ * thread collects it, or closes the slot when the load is replaced or
+ * stopped and releases whatever arrives late. The mutex covers only the
+ * hand-over itself, never a call out of the host. */
+struct AudioSourceMailbox {
+    std::mutex mutex;
+    bool open = true;
+    IMFMediaSource *source = nullptr;
+};
+
 /* The app's single audio player (see the audio section further down for
  * the backend rationale). All fields are message-loop-thread state; the
- * lifetime mutex additionally guards `generation` and `source` because
- * the asynchronous URL source resolver hands its result over from a
- * Media Foundation worker thread. */
+ * asynchronous URL source resolver hands its result over through
+ * `resolve_mailbox` instead of writing here. */
 struct AudioState {
     /* Bumped on every load/stop: worker-thread stragglers (resolver
      * completions, retired-session events) carry the generation they
@@ -721,6 +735,7 @@ struct AudioState {
     IMFMediaSource *source = nullptr;
     IMFPresentationClock *clock = nullptr;
     std::shared_ptr<AudioDownloadCancel> download_cancel;
+    std::shared_ptr<AudioSourceMailbox> resolve_mailbox;
 };
 
 /* The one pending app context menu (menus are modal, so one at a time):
@@ -4241,20 +4256,20 @@ struct AudioSessionEventForwarder final : public IMFAsyncCallback {
     }
 };
 
-/* Completes an asynchronous URL source resolution (worker thread) and
- * hands the media source to the loop thread under the host lifetime
- * mutex; a stale generation — the playback was replaced or stopped
- * mid-resolve — shuts the source down right here instead. */
+/* Completes an asynchronous URL source resolution on a Media Foundation
+ * worker thread. The source goes into its load's mailbox and a note goes
+ * to the loop window; nothing here touches host state. A closed mailbox
+ * (the playback was replaced or stopped mid-resolve) means the source is
+ * shut down right here instead. */
 struct AudioSourceResolveForwarder final : public IMFAsyncCallback {
     LONG refs = 1;
     IMFSourceResolver *resolver = nullptr;
-    Host *host = nullptr;
-    std::shared_ptr<HostLifetime> lifetime;
+    std::shared_ptr<AudioSourceMailbox> mailbox;
     HWND hwnd = nullptr;
     uint64_t generation = 0;
 
-    AudioSourceResolveForwarder(IMFSourceResolver *resolver_in, Host *host_in, std::shared_ptr<HostLifetime> lifetime_in, HWND hwnd_in, uint64_t generation_in)
-        : resolver(resolver_in), host(host_in), lifetime(std::move(lifetime_in)), hwnd(hwnd_in), generation(generation_in) {
+    AudioSourceResolveForwarder(IMFSourceResolver *resolver_in, std::shared_ptr<AudioSourceMailbox> mailbox_in, HWND hwnd_in, uint64_t generation_in)
+        : resolver(resolver_in), mailbox(std::move(mailbox_in)), hwnd(hwnd_in), generation(generation_in) {
         resolver->AddRef();
     }
     ~AudioSourceResolveForwarder() { resolver->Release(); }
@@ -4286,23 +4301,24 @@ struct AudioSourceResolveForwarder final : public IMFAsyncCallback {
         IMFMediaSource *source = nullptr;
         if (SUCCEEDED(hr) && object) object->QueryInterface(kNativeSdkIID_IMFMediaSource, reinterpret_cast<void **>(&source));
         if (object) object->Release();
-        std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
-        const bool current = lifetime->alive && host->audio.active && host->audio.generation == generation;
-        if (!current) {
-            if (source) {
-                source->Shutdown();
-                source->Release();
+        bool open = false;
+        bool kept = false;
+        {
+            std::lock_guard<std::mutex> guard(mailbox->mutex);
+            open = mailbox->open;
+            if (open && source) {
+                /* Reference transferred to the mailbox. */
+                mailbox->source = source;
+                kept = true;
             }
-            return S_OK;
         }
-        if (!source) {
-            PostMessageW(hwnd, kAudioSessionMessage, kAudioNoteSourceFailed, (LPARAM)generation);
-            return S_OK;
+        if (!kept && source) {
+            source->Shutdown();
+            source->Release();
         }
-        /* Reference transferred; the loop thread attaches or (if it
-         * bumps the generation first) releases it in teardown. */
-        host->audio.source = source;
-        PostMessageW(hwnd, kAudioSessionMessage, kAudioNoteSourceResolved, (LPARAM)generation);
+        /* A destroyed loop window makes this a harmless no-op; a kept
+         * source then stays in the mailbox, which teardown closes. */
+        if (open) PostMessageW(hwnd, kAudioSessionMessage, kept ? kAudioNoteSourceResolved : kAudioNoteSourceFailed, (LPARAM)generation);
         return S_OK;
     }
 };
@@ -5059,7 +5075,6 @@ static void audioCaptureStopAll(Host *host) {
  * letting a straggler finish installs the cache entry the completed
  * play earned. */
 static void audioReleaseSession(Host *host, bool cancel_download) {
-    std::lock_guard<std::recursive_mutex> guard(host->lifetime->mutex);
     AudioState &audio = host->audio;
     audioStopPositionTimer(host);
     audioSpectrumStopCapture(host);
@@ -5085,6 +5100,22 @@ static void audioReleaseSession(Host *host, bool cancel_download) {
         if (!had_session) audio.source->Shutdown();
         audio.source->Release();
         audio.source = nullptr;
+    }
+    if (audio.resolve_mailbox) {
+        /* Close the load's mailbox: a resolution still in flight now
+         * shuts its source down itself, and one that already arrived but
+         * was never collected is released here. */
+        IMFMediaSource *uncollected = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(audio.resolve_mailbox->mutex);
+            audio.resolve_mailbox->open = false;
+            uncollected = audio.resolve_mailbox->source;
+            audio.resolve_mailbox->source = nullptr;
+        }
+        if (uncollected) {
+            uncollected->Shutdown();
+            uncollected->Release();
+        }
     }
     if (cancel_download && audio.download_cancel) audio.download_cancel->cancelled.store(true);
     const uint64_t generation = audio.generation;
@@ -5275,7 +5306,8 @@ static int audioLoadUrlInternal(Host *host, const std::string &url, const std::s
     /* A fresh stream has no bytes yet: buffering starts true and drops
      * when the session actually starts rolling. */
     audio.buffering = true;
-    AudioSourceResolveForwarder *forwarder = new AudioSourceResolveForwarder(resolver, host, host->lifetime, hwnd, audio.generation);
+    audio.resolve_mailbox = std::make_shared<AudioSourceMailbox>();
+    AudioSourceResolveForwarder *forwarder = new AudioSourceResolveForwarder(resolver, audio.resolve_mailbox, hwnd, audio.generation);
     const HRESULT hr = resolver->BeginCreateObjectFromURL(widen(url).c_str(), MF_RESOLUTION_MEDIASOURCE, nullptr, nullptr, forwarder, nullptr);
     forwarder->Release();
     resolver->Release();
@@ -5330,16 +5362,26 @@ static void audioFailed(Host *host) {
     audioEmitReport(host, kAudioEventFailed, 0, 0, 0, 0);
 }
 
+/* Loop thread, on kAudioNoteSourceResolved: take the resolved source
+ * out of the current load's mailbox. */
+static bool audioCollectResolvedSource(Host *host) {
+    AudioState &audio = host->audio;
+    if (!audio.resolve_mailbox) return false;
+    std::lock_guard<std::mutex> guard(audio.resolve_mailbox->mutex);
+    audio.source = audio.resolve_mailbox->source;
+    audio.resolve_mailbox->source = nullptr;
+    return audio.source != nullptr;
+}
+
 /* Distilled session notes, marshalled from Media Foundation worker
  * threads via PostMessage; loop thread. Stale generations (a replaced
  * or stopped playback's stragglers) are dropped here. */
 static void audioHandleSessionMessage(Host *host, WPARAM note, LPARAM generation) {
-    std::lock_guard<std::recursive_mutex> guard(host->lifetime->mutex);
     AudioState &audio = host->audio;
     if (!audio.active || (uint64_t)generation != audio.generation) return;
     switch (note) {
         case kAudioNoteSourceResolved:
-            if (!audioAttachSession(host)) audioFailed(host);
+            if (!audioCollectResolvedSource(host) || !audioAttachSession(host)) audioFailed(host);
             break;
         case kAudioNoteSourceFailed:
         case kAudioNoteError:
@@ -5845,7 +5887,6 @@ static bool createChildWebView(Host *host, const std::string &key) {
         [host, key, parent, lifetime, generation](HRESULT result, ICoreWebView2Environment *environment) -> HRESULT {
             auto token = lifetime.lock();
             if (!token) return S_OK;
-            std::lock_guard<std::recursive_mutex> guard(token->mutex);
             if (!token->alive) return S_OK;
             WebViewCallbackScope scope(host);
             auto found = host->webviews.find(key);
@@ -5863,7 +5904,6 @@ static bool createChildWebView(Host *host, const std::string &key) {
                         if (controller) controller->Close();
                         return S_OK;
                     }
-                    std::lock_guard<std::recursive_mutex> guard(token->mutex);
                     if (!token->alive) {
                         if (controller) controller->Close();
                         return S_OK;
@@ -5895,7 +5935,6 @@ static bool createChildWebView(Host *host, const std::string &key) {
                         [host, key, lifetime](ICoreWebView2Controller *, IUnknown *) -> HRESULT {
                             auto token = lifetime.lock();
                             if (!token) return S_OK;
-                            std::lock_guard<std::recursive_mutex> guard(token->mutex);
                             if (!token->alive || !host->callback) return S_OK;
                             WebViewCallbackScope scope(host);
                             auto focused = host->webviews.find(key);
@@ -5934,7 +5973,6 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                     [host, key, lifetime, drag_generation](HRESULT result, LPCWSTR) -> HRESULT {
                                         auto token = lifetime.lock();
                                         if (!token) return S_OK;
-                                        std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                         if (!token->alive) return S_OK;
                                         WebViewCallbackScope scope(host);
                                         auto current = host->webviews.find(key);
@@ -5964,7 +6002,6 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 [host, key, bridge_window_id, bridge_label, lifetime](ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventArgs *args) -> HRESULT {
                                     auto token = lifetime.lock();
                                     if (!token) return S_OK;
-                                    std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                     if (!token->alive || !args || !host->bridge_callback) return S_OK;
                                     WebViewCallbackScope scope(host);
 
@@ -6003,7 +6040,6 @@ static bool createChildWebView(Host *host, const std::string &key) {
                             [host, accelerator_window_id, lifetime](ICoreWebView2Controller *, ICoreWebView2AcceleratorKeyPressedEventArgs *args) -> HRESULT {
                                 auto token = lifetime.lock();
                                 if (!token) return S_OK;
-                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive || !args) return S_OK;
                                 WebViewCallbackScope scope(host);
                                 COREWEBVIEW2_KEY_EVENT_KIND kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
@@ -6028,7 +6064,6 @@ static bool createChildWebView(Host *host, const std::string &key) {
                             [host, key, environment_ref, lifetime](ICoreWebView2 *, ICoreWebView2WebResourceRequestedEventArgs *args) -> HRESULT {
                                 auto token = lifetime.lock();
                                 if (!token) return S_OK;
-                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive || !args) return S_OK;
                                 WebViewCallbackScope scope(host);
                                 auto found = host->webviews.find(key);
@@ -6051,7 +6086,6 @@ static bool createChildWebView(Host *host, const std::string &key) {
                             [host, key, lifetime](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
                                 auto token = lifetime.lock();
                                 if (!token) return S_OK;
-                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive) return S_OK;
                                 WebViewCallbackScope scope(host);
                                 LPWSTR uri_bytes = nullptr;
@@ -6956,9 +6990,7 @@ void native_sdk_windows_destroy(Host *host) {
      * finds no target and reports that, instead of posting into a queue
      * nobody will pump again. */
     HWND loop_window = host->loop_window.exchange(nullptr, std::memory_order_acq_rel);
-    std::shared_ptr<HostLifetime> lifetime = host->lifetime;
-    std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
-    lifetime->alive = false;
+    host->lifetime->alive = false;
     /* DestroyWindow below dispatches WM_DESTROY/WM_ACTIVATEAPP
      * synchronously through windowProc; the run loop's handler state is
      * already gone by the time destroy is called, so those teardown
