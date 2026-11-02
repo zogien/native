@@ -804,11 +804,27 @@ struct Host {
      * means WebView2's own default. */
     bool webview_user_data_folder_resolved = false;
     std::wstring webview_user_data_folder;
+    /* While the loop runs, callback is dispatchEventToRuntime with this
+     * host as its context; it forwards to runtime_callback. */
     EventCallback callback = nullptr;
     void *callback_context = nullptr;
+    EventCallback runtime_callback = nullptr;
+    void *runtime_context = nullptr;
     BridgeCallback bridge_callback = nullptr;
     void *bridge_context = nullptr;
     bool running = false;
+    /* Runtime dispatches on the stack (RuntimeDispatchScope). Above
+     * zero, the runtime queues a new event until the dispatch in
+     * progress commits, so nothing it is handed runs synchronously. */
+    int runtime_dispatch_depth = 0;
+    /* kShutdown has been delivered (or is being delivered). The run
+     * loop's exit and a session end can both reach it, and the app's
+     * stop hook runs exactly once (deliverShutdown). */
+    bool shutdown_delivered = false;
+    /* A session end arrived inside a runtime dispatch: its shutdown is
+     * queued behind that dispatch, and the loop exits once it unwinds
+     * (endSession). */
+    bool session_ending = false;
     std::map<uint64_t, Window> windows;
     std::map<std::string, ChildWebView> webviews;
     std::shared_ptr<WindowsGpuRenderer> gpu_renderer;
@@ -1933,6 +1949,27 @@ static bool emitShortcutForHwnd(Host *host, HWND hwnd, WPARAM wparam) {
     return emitShortcutForWindow(host, windowForHwnd(host, hwnd), wparam);
 }
 
+/* Marks a runtime dispatch on the stack for its duration. */
+struct RuntimeDispatchScope {
+    Host *host;
+    explicit RuntimeDispatchScope(Host *host_in) : host(host_in) { host->runtime_dispatch_depth += 1; }
+    ~RuntimeDispatchScope() { host->runtime_dispatch_depth -= 1; }
+    RuntimeDispatchScope(const RuntimeDispatchScope &) = delete;
+    RuntimeDispatchScope &operator=(const RuntimeDispatchScope &) = delete;
+};
+
+/* host->callback while the loop runs: every event the host emits enters
+ * the runtime here. Once the shutdown is handed over, nothing else
+ * reaches the app, as on macOS and Linux: an event raised by the stop
+ * hook's own work, or by a dialog closing while a session end unwinds a
+ * dispatch, would queue behind the shutdown and arrive after the hook. */
+static void dispatchEventToRuntime(void *context, const WindowsEvent *event) {
+    Host *host = static_cast<Host *>(context);
+    if (host->shutdown_delivered && event->kind != kShutdown) return;
+    RuntimeDispatchScope scope(host);
+    host->runtime_callback(host->runtime_context, event);
+}
+
 /* Marks a WebView2 callback on the stack for its duration. */
 struct WebViewCallbackScope {
     Host *host;
@@ -1953,11 +1990,13 @@ static void queueWebViewEvent(Host *host, DeferredWebViewEvent event) {
 
 static void deliverWebViewEvent(Host *host, const DeferredWebViewEvent &event) {
     switch (event.kind) {
-        case DeferredWebViewEvent::Kind::Bridge:
+        case DeferredWebViewEvent::Kind::Bridge: {
             /* Delivered even if the view closed after sending it: the
              * page sent the message while it was live, and a reply to a
-             * view that is gone is dropped where it is sent. */
-            if (!host->bridge_callback) return;
+             * view that is gone is dropped where it is sent. None goes
+             * to an app whose shutdown was handed over. */
+            if (!host->bridge_callback || host->shutdown_delivered) return;
+            RuntimeDispatchScope scope(host);
             host->bridge_callback(
                 host->bridge_context,
                 event.window_id,
@@ -1968,6 +2007,7 @@ static void deliverWebViewEvent(Host *host, const DeferredWebViewEvent &event) {
                 event.origin.c_str(),
                 event.origin.size());
             return;
+        }
         case DeferredWebViewEvent::Kind::Focus: {
             /* Focus is state, not input: a view that is gone by now has
              * nothing to report. */
@@ -6353,6 +6393,79 @@ static HWND createLoopWindow(Host *host) {
     return CreateWindowExW(0, L"NativeSdkLoopWindow", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, host->instance, host);
 }
 
+/* Deliver the app's shutdown at most once: the run loop's exit (a
+ * last-window close, quitApp) and a session end (endSession) both lead
+ * here, and the runtime's stop hook must run exactly once. */
+static void deliverShutdown(Host *host) {
+    if (host->shutdown_delivered || !host->callback) return;
+    host->shutdown_delivered = true;
+    WindowsEvent shutdown = {};
+    shutdown.kind = kShutdown;
+    shutdown.window_id = 1;
+    host->callback(host->callback_context, &shutdown);
+}
+
+/* Cancel a dialog the app's windows own, directly or through another
+ * dialog (the overwrite prompt a save dialog raises): its modal loop
+ * holds the dispatch that opened it. The enumeration runs top of the
+ * z-order first, so an inner dialog closes before its owner. */
+static BOOL CALLBACK closeOwnedDialog(HWND hwnd, LPARAM lparam) {
+    Host *host = reinterpret_cast<Host *>(lparam);
+    if (!IsWindowVisible(hwnd) || windowForHwnd(host, hwnd)) return TRUE;
+    for (HWND owner = GetWindow(hwnd, GW_OWNER); owner; owner = GetWindow(owner, GW_OWNER)) {
+        if (!windowForHwnd(host, owner)) continue;
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        break;
+    }
+    return TRUE;
+}
+
+/* A confirmed session end (WM_ENDSESSION, wParam TRUE): logoff, system
+ * shutdown or restart, or a Restart Manager close (ENDSESSION_CLOSEAPP)
+ * from an installer that needs the app's files. It is not the user's
+ * close, so close_policy does not apply: a window hidden behind the
+ * tray gets the message like a visible one.
+ *
+ * Every top-level window receives the message, so only the first acts,
+ * and a quit whose shutdown already ran finishes its own teardown.
+ *
+ * Outside any runtime dispatch (the common case) it delivers the same
+ * shutdown event a quit does, synchronously: at logoff or shutdown
+ * Windows may end the process any time after the message returns, so
+ * the stop hook, and the persistence flush and journal seal that run in
+ * the shutdown dispatch, finish first. The process then ends here
+ * instead of returning to the loop. Restart Manager waits for it to
+ * exit and sends WM_CLOSE as soon as this returns, and Windows considers
+ * a process that hides or destroys its windows ready to be killed, so
+ * the regular teardown would stop at an arbitrary point anyway.
+ * Chromium (SessionEnding), Electron, and tao end the process the same
+ * way. The tray icon goes first: the shell keeps a dead process's icon
+ * until the pointer crosses it, and after a Restart Manager close the
+ * session goes on.
+ *
+ * Inside a runtime dispatch (a dialog the app opened is in its modal
+ * loop) the runtime queues the shutdown until that dispatch commits, to
+ * keep events in causal order, so ending the process here would lose
+ * the stop hook. The host lets the dispatch unwind instead: it cancels
+ * the dialogs the app's windows own, ignores further closes, and
+ * returns. The dispatch finishes, the queued shutdown runs the stop
+ * hook, and the loop exits into the regular teardown. A Restart Manager
+ * close waits for that; at logoff or shutdown it races the session
+ * ending after this returns. */
+static void endSession(Host *host) {
+    if (host->shutdown_delivered) return;
+    if (host->runtime_dispatch_depth == 0) {
+        deliverShutdown(host);
+        removeNotificationIcon(host);
+        TerminateProcess(GetCurrentProcess(), 0);
+        return;
+    }
+    host->session_ending = true;
+    deliverShutdown(host);
+    host->running = false;
+    EnumThreadWindows(GetCurrentThreadId(), closeOwnedDialog, reinterpret_cast<LPARAM>(host));
+}
+
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
@@ -6723,7 +6836,21 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case WM_SYSCOLORCHANGE:
             if (host) emitAppearanceIfChanged(host, false);
             break;
+        case WM_QUERYENDSESSION:
+            /* Always yes: the SDK has no quit veto (close_policy governs
+             * the user's close only). Nothing happens until WM_ENDSESSION
+             * confirms the end; another application may still cancel. */
+            return TRUE;
+        case WM_ENDSESSION:
+            /* wParam FALSE: the session goes on. Nothing was done at the
+             * query, so there is nothing to undo. */
+            if (host && wparam) endSession(host);
+            return 0;
         case WM_CLOSE:
+            /* A session end is unwinding a dispatch (endSession): the
+             * loop exits once it does, so Restart Manager's follow-up
+             * close neither hides nor destroys anything. */
+            if (host && host->session_ending) return 0;
             /* close_policy .hide: the user's close (caption X, Alt+F4)
              * hides the window instead of destroying it — the hwnd and
              * every view stay live, the app keeps running behind its
@@ -7018,14 +7145,16 @@ void native_sdk_windows_destroy(Host *host) {
 
 void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
     if (!host) return;
-    host->callback = callback;
-    host->callback_context = context;
+    host->runtime_callback = callback;
+    host->runtime_context = context;
+    host->callback = dispatchEventToRuntime;
+    host->callback_context = host;
     host->running = true;
     if (!host->windows.empty()) createNativeWindow(host, host->windows.begin()->second);
     WindowsEvent start = {};
     start.kind = kStart;
     start.window_id = 1;
-    callback(context, &start);
+    host->callback(host->callback_context, &start);
     emitAppearanceIfChanged(host, true);
     for (auto &entry : host->windows) {
         emit(host, entry.second, kResize);
@@ -7050,10 +7179,7 @@ void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
         DispatchMessageW(&message);
         if (host->running) gpuSurfaceDrainDueFrameEmissions(host);
     }
-    WindowsEvent shutdown = {};
-    shutdown.kind = kShutdown;
-    shutdown.window_id = 1;
-    callback(context, &shutdown);
+    deliverShutdown(host);
 }
 
 void native_sdk_windows_stop(Host *host) {
@@ -8196,7 +8322,9 @@ int native_sdk_windows_close_view(Host *host, uint64_t window_id, const char *la
 
 WindowsOpenDialogResult native_sdk_windows_show_open_dialog(Host *host, const WindowsOpenDialogOpts *opts, char *buffer, size_t buffer_len) {
     WindowsOpenDialogResult result = {};
-    if (!host || !opts || !buffer || buffer_len == 0) return result;
+    /* A session end is unwinding the app's dispatch (endSession): a new
+     * dialog would hold it again, so it answers as cancelled. */
+    if (!host || !opts || !buffer || buffer_len == 0 || host->session_ending) return result;
     bool uninitialize = false;
     if (!initializeCom(&uninitialize)) return result;
 
@@ -8251,7 +8379,8 @@ WindowsOpenDialogResult native_sdk_windows_show_open_dialog(Host *host, const Wi
 }
 
 size_t native_sdk_windows_show_save_dialog(Host *host, const WindowsSaveDialogOpts *opts, char *buffer, size_t buffer_len) {
-    if (!host || !opts || !buffer || buffer_len == 0) return 0;
+    /* Cancelled during a session end, like the open dialog. */
+    if (!host || !opts || !buffer || buffer_len == 0 || host->session_ending) return 0;
     bool uninitialize = false;
     if (!initializeCom(&uninitialize)) return 0;
 
@@ -8294,8 +8423,14 @@ size_t native_sdk_windows_show_save_dialog(Host *host, const WindowsSaveDialogOp
     return written;
 }
 
+/* Returns the pressed button (0 primary, 1 secondary, 2 tertiary), or -1
+ * when a session end left the dialog unanswered: it was cancelled to let
+ * the app's dispatch unwind (endSession), or never shown because one is
+ * unwinding. Closing a task dialog otherwise reports the primary button,
+ * which must not stand in for an answer nobody gave. */
 int native_sdk_windows_show_message_dialog(Host *host, const WindowsMessageDialogOpts *opts) {
     if (!host || !opts) return 0;
+    if (host->session_ending) return -1;
     std::wstring title = widen(slice(opts->title, opts->title_len));
     std::wstring message = widen(slice(opts->message, opts->message_len));
     std::wstring informative = widen(slice(opts->informative_text, opts->informative_text_len));
@@ -8334,6 +8469,7 @@ int native_sdk_windows_show_message_dialog(Host *host, const WindowsMessageDialo
     if (task_dialog) {
         int pressed = 100;
         HRESULT hr = task_dialog(&config, &pressed, nullptr, nullptr);
+        if (host->session_ending) return -1;
         if (FAILED(hr)) return 0;
         if (pressed == 101) return 1;
         if (pressed == 102) return 2;
@@ -8350,6 +8486,7 @@ int native_sdk_windows_show_message_dialog(Host *host, const WindowsMessageDialo
         text += informative;
     }
     const int result = MessageBoxW(parentWindow(host), text.c_str(), title.empty() ? L"native-sdk" : title.c_str(), type);
+    if (host->session_ending) return -1;
     if (button_count == 3) {
         if (result == IDNO) return 1;
         if (result == IDCANCEL) return 2;
