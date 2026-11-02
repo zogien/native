@@ -2276,7 +2276,9 @@ test "windows tray carries lifecycle commands rich rows and key equivalents into
     try std.testing.expect(std.mem.indexOf(u8, host_source, "display_label += shortcutSuffix(item.key, item.modifiers);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "const std::vector<TrayItem> displayed_items = host->tray_items;") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "emitTrayActionForCommandId(host, displayed_items, command_id);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "return emitTrayActionForCommandId(host, host->tray_items, item.command_id);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "out->kind = kTrayAction;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "out->tray_item_id = item.id;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.tray_item_id = match.tray_item_id;") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "tray_event == NIN_SELECT || tray_event == NIN_KEYSELECT || tray_event == WM_LBUTTONUP") != null);
 }
 
@@ -2722,11 +2724,14 @@ test "windows window focus includes focused native child views" {
 test "windows webview focus reports the focused child label" {
     // WebView2 owns the page HWND and its input; GotFocus is the
     // controller-level edge that mirrors keyboard ownership back into
-    // the runtime's per-view register.
+    // the runtime's per-view register. The callback queues the focused
+    // view, and the loop window reports it once the callback returns.
     const host_source = @embedFile("webview2_host.cpp");
     try std.testing.expect(std.mem.indexOf(u8, host_source, "add_GotFocus(Callback<ICoreWebView2FocusChangedEventHandler>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.kind = kViewFocused;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.view_label = focused->second.label.c_str();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.kind = DeferredWebViewEvent::Kind::Focus;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.label = focused->second.label;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "focused.kind = kViewFocused;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "focused.view_label = event.label.c_str();") != null);
 }
 
 test "windows webview2 keeps its user data with the app's per-user data" {

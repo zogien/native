@@ -2040,7 +2040,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#else\n#include <WebView2.h>\n#include <wrl.h>\n#define NATIVE_SDK_HAS_WEBVIEW2 1" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "LoadLibraryW(L\"WebView2Loader.dll\")" },
         .{ .path = "build/app.zig", .pattern = ".system => if (web_layer) {" },
-        .{ .path = "build/app.zig", .pattern = "app_mod.addIncludePath(dep.path(\"third_party/webview2/include\"));" },
+        .{ .path = "build/app.zig", .pattern = "addWebView2HostIncludes(b, app_mod, dep.path(\"third_party/webview2/include\"), target);" },
+        .{ .path = "build/app.zig", .pattern = "module.addIncludePath(sdk_include);" },
         .{ .path = "build/app.zig", .pattern = "third_party/webview2/x64/WebView2Loader.dll" },
         .{ .path = "build/app.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB\"" },
         .{ .path = "src/tooling/templates.zig", .pattern = "third_party/webview2/include" },
@@ -2335,7 +2336,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/windows/root.zig", .pattern = ".canvas_frame_full_repaint = event.force_full_repaint != 0" },
         .{ .path = ".github/scripts/windows-canvas-smoke.sh", .pattern = "gpu_backend=direct2d" },
         .{ .path = ".github/scripts/windows-effects-smoke.sh", .pattern = "gpu_backend=direct2d" },
-        .{ .path = "build/app.zig", .pattern = "app_mod.linkSystemLibrary(\"d2d1\", .{})" },
+        .{ .path = "build/app.zig", .pattern = "linkWindowsHostLibraries(app_mod, target);" },
+        .{ .path = "build/app.zig", .pattern = "module.linkSystemLibrary(\"d2d1\", .{})" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-blur-effects", "Verify AppKit GPU packet presenter applies blur effects", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketApplyBlur" },
