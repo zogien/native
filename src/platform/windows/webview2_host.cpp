@@ -195,12 +195,12 @@ constexpr UINT kWakeMessage = WM_APP + 43;
  * without depending on the 16 ms frame pump. */
 constexpr UINT kRequestFrameMessage = WM_APP + 44;
 /* Posted from Media Foundation worker threads (the audio backend's event
- * pump and source resolver); the window procedure hands the distilled
- * note to audioHandleSessionMessage on the message loop thread. */
+ * pump and source resolver); the loop window hands the distilled note to
+ * audioHandleSessionMessage on the message loop thread. */
 constexpr UINT kAudioSessionMessage = WM_APP + 45;
-/* Posted from the spectrum capture thread every ~40 ms; the window
- * procedure snapshots the analysis bands and emits one SPECTRUM report
- * on the loop thread. A posted message rather than a loop-thread timer
+/* Posted from the spectrum capture thread every ~40 ms; the loop window
+ * snapshots the analysis bands and emits one SPECTRUM report on the loop
+ * thread. A posted message rather than a loop-thread timer
  * on purpose: WM_TIMER is the lowest-priority message and a busy frame
  * loop starves it far below the contract cadence, while posted messages
  * keep their place in the queue. */
@@ -615,7 +615,8 @@ struct HostLifetime {
 
 /* App timers (runtime `startTimer`) on the Win32 message loop: each slot
  * owns the SetTimer id kAppTimerIdBase + slot index, scheduled on the
- * first live top-level window so WM_TIMER lands in windowProc. */
+ * host's loop window so WM_TIMER lands in loopWindowProc and closing an
+ * app window never stops one. */
 constexpr size_t kMaxAppTimers = 64;
 constexpr UINT_PTR kAppTimerIdBase = 0x1000;
 /* The 16 ms per-window frame-pump timer (SetTimer id on each top-level
@@ -872,6 +873,13 @@ static HWND parentWindow(Host *host) {
         if (entry.second.hwnd) return entry.second.hwnd;
     }
     return nullptr;
+}
+
+/* Where loop-bound work goes: posted notes from worker threads and the
+ * app-level timers. Never an app window — those close independently of
+ * the loop, and their timers and queued posts die with them. */
+static HWND loopWindow(Host *host) {
+    return host ? host->loop_window.load(std::memory_order_acquire) : nullptr;
 }
 
 static void copyWideField(wchar_t *dest, size_t dest_len, const std::wstring &value) {
@@ -3966,8 +3974,7 @@ constexpr WPARAM kAudioNoteBufferingStarted = 6;
 constexpr WPARAM kAudioNoteBufferingStopped = 7;
 constexpr WPARAM kAudioNoteError = 8;
 
-/* Position tick on the first top-level window, outside the app-timer id
- * range; 500 ms is the shared coarse cadence (macOS and the null
+/* Position tick on the loop window, outside the app-timer id range; 500 ms is the shared coarse cadence (macOS and the null
  * platform tick the same), so frame-clock scrubber interpolation
  * behaves identically across hosts. */
 constexpr UINT_PTR kAudioPositionTimerId = 0x3000;
@@ -4325,7 +4332,7 @@ static void audioStopPositionTimer(Host *host) {
 static void audioStartPositionTimer(Host *host) {
     AudioState &audio = host->audio;
     if (audio.position_timer_armed) return;
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return;
     if (SetTimer(hwnd, kAudioPositionTimerId, kAudioPositionIntervalMs, nullptr)) {
         audio.timer_hwnd = hwnd;
@@ -4722,7 +4729,7 @@ static void audioSpectrumStartCapture(Host *host) {
     AudioSpectrumState &spectrum = host->spectrum;
     if (spectrum.shared) return;
     if (!audioSpectrumSupported()) return;
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return;
     spectrum.generation += 1;
     spectrum.shared = std::make_shared<AudioSpectrumShared>();
@@ -4949,7 +4956,7 @@ static bool audioAttachSession(Host *host) {
     AudioState &audio = host->audio;
     IMFMediaSource *source = audio.source;
     if (!source) return false;
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return false;
     IMFMediaSession *session = nullptr;
     if (FAILED(MFCreateMediaSession(nullptr, &session)) || !session) return false;
@@ -5114,7 +5121,7 @@ static int audioLoadUrlInternal(Host *host, const std::string &url, const std::s
         }
     }
     if (!audioEnsureMediaFoundation()) return 2;
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return 2;
     IMFSourceResolver *resolver = nullptr;
     if (FAILED(MFCreateSourceResolver(&resolver)) || !resolver) return 2;
@@ -6130,6 +6137,16 @@ static LRESULT CALLBACK loopWindowProc(HWND hwnd, UINT message, WPARAM wparam, L
                 }
             }
             return 0;
+        case kAudioSessionMessage:
+            if (host) audioHandleSessionMessage(host, wparam, lparam);
+            return 0;
+        case kAudioSpectrumMessage:
+            if (host) audioHandleSpectrumMessage(host, wparam);
+            return 0;
+        case WM_TIMER:
+            if (host && handleAppTimerMessage(host, wparam)) return 0;
+            if (host && handleAudioTimerMessage(host, wparam)) return 0;
+            return 0;
         default:
             break;
     }
@@ -6281,12 +6298,6 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         }
     }
     switch (message) {
-        case kAudioSessionMessage:
-            if (host) audioHandleSessionMessage(host, wparam, lparam);
-            return 0;
-        case kAudioSpectrumMessage:
-            if (host) audioHandleSpectrumMessage(host, wparam);
-            return 0;
         case kShowContextMenuMessage:
             if (host) showAppContextMenu(host, hwnd);
             return 0;
@@ -6470,8 +6481,6 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             }
             break;
         case WM_TIMER:
-            if (host && handleAppTimerMessage(host, wparam)) return 0;
-            if (host && handleAudioTimerMessage(host, wparam)) return 0;
             if (host && wparam == kFrameTimerId) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
@@ -7237,7 +7246,7 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
 void native_sdk_windows_start_timer(Host *host, uint64_t timer_id, uint64_t interval_ns, int repeats) {
     if (!host) return;
     native_sdk_windows_cancel_timer(host, timer_id);
-    HWND hwnd = parentWindow(host);
+    HWND hwnd = loopWindow(host);
     if (!hwnd) return;
     AppTimer *slot = nullptr;
     UINT_PTR win32_id = 0;
