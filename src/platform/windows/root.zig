@@ -1542,7 +1542,11 @@ fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOp
         .tertiary_button = options.tertiary_button.ptr,
         .tertiary_button_len = options.tertiary_button.len,
     };
-    return @enumFromInt(native_sdk_windows_show_message_dialog(self.host, &opts));
+    // Negative: a session end left the dialog unanswered (the host
+    // cancelled it to unwind this dispatch); no button stands in for it.
+    const pressed = native_sdk_windows_show_message_dialog(self.host, &opts);
+    if (pressed < 0) return error.SessionEnding;
+    return @enumFromInt(pressed);
 }
 
 fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOptions) anyerror!void {
@@ -2338,6 +2342,87 @@ test "windows WM_CLOSE hide consults the live tray state and downgrades to a rea
     // The consult sits INSIDE the close hook, BEFORE the hide.
     try std.testing.expect(consult_at.? < hide_at.?);
     try std.testing.expect(std.mem.indexOf(u8, close_hook, "downgraded to a real close") != null);
+}
+
+test "windows session end runs the stop hook once and bypasses the close policy" {
+    // C++ this suite cannot execute, pinned textually like the WM_CLOSE
+    // hook above. A confirmed WM_ENDSESSION (logoff, system shutdown, a
+    // Restart Manager close) never goes through the close-policy hide;
+    // the query only says yes; the run loop's exit and the session end
+    // share one exactly-once delivery.
+    const host_source = @embedFile("webview2_host.cpp");
+    const query_at = std.mem.indexOf(u8, host_source, "case WM_QUERYENDSESSION:") orelse return error.TestExpectedEqual;
+    const end_at = std.mem.indexOfPos(u8, host_source, query_at, "case WM_ENDSESSION:") orelse return error.TestExpectedEqual;
+    const close_at = std.mem.indexOfPos(u8, host_source, end_at, "case WM_CLOSE:") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, host_source[query_at..end_at], "return TRUE;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source[end_at..close_at], "if (host && wparam) endSession(host);") != null);
+    // While a session end unwinds a dispatch, closes are ignored before
+    // the close policy is consulted.
+    const ending_close_at = std.mem.indexOfPos(u8, host_source, close_at, "if (host && host->session_ending) return 0;") orelse return error.TestExpectedEqual;
+    const hide_at = std.mem.indexOfPos(u8, host_source, close_at, "ShowWindow(hwnd, SW_HIDE);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(ending_close_at < hide_at);
+
+    // Outside a runtime dispatch the shutdown runs synchronously, then
+    // the tray icon goes and the process ends. Inside one, the runtime
+    // queues the shutdown behind it, so the host marks the session
+    // ending, hands the shutdown over, stops the loop, and cancels the
+    // dialogs holding the dispatch, without ending the process.
+    const session_at = std.mem.indexOf(u8, host_source, "static void endSession(Host *host) {") orelse return error.TestExpectedEqual;
+    const session_end = std.mem.indexOfPos(u8, host_source, session_at, "\n}\n") orelse return error.TestExpectedEqual;
+    const session_fn = host_source[session_at..session_end];
+    const order = [_][]const u8{
+        "if (host->shutdown_delivered) return;",
+        "if (host->runtime_dispatch_depth == 0) {",
+        "deliverShutdown(host);",
+        "removeNotificationIcon(host);",
+        "TerminateProcess(GetCurrentProcess(), 0);",
+        "host->session_ending = true;",
+        "deliverShutdown(host);",
+        "host->running = false;",
+        "EnumThreadWindows(GetCurrentThreadId(), closeOwnedDialog,",
+    };
+    var cursor: usize = 0;
+    for (order) |needle| cursor = (std.mem.indexOfPos(u8, session_fn, cursor, needle) orelse return error.TestExpectedEqual) + needle.len;
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, session_fn, "TerminateProcess("));
+
+    const deliver_fn_at = std.mem.indexOf(u8, host_source, "static void deliverShutdown(Host *host) {") orelse return error.TestExpectedEqual;
+    const flag_at = std.mem.indexOfPos(u8, host_source, deliver_fn_at, "host->shutdown_delivered = true;") orelse return error.TestExpectedEqual;
+    const callback_at = std.mem.indexOfPos(u8, host_source, deliver_fn_at, "host->callback(host->callback_context, &shutdown);") orelse return error.TestExpectedEqual;
+    // The flag latches before the callback: a session end arriving while
+    // the stop hook runs (a modal loop inside it) must not deliver again.
+    try std.testing.expect(flag_at < callback_at);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host_source, "kind = kShutdown;"));
+
+    // The dispatch depth sees every call into the runtime: events through
+    // the counting trampoline the run loop installs, Bridge messages
+    // through their one delivery site.
+    const run_at = std.mem.indexOf(u8, host_source, "void native_sdk_windows_run(") orelse return error.TestExpectedEqual;
+    const run_end = std.mem.indexOfPos(u8, host_source, run_at, "\n}\n") orelse return error.TestExpectedEqual;
+    const run_fn = host_source[run_at..run_end];
+    try std.testing.expect(std.mem.indexOf(u8, run_fn, "host->callback = dispatchEventToRuntime;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run_fn, "deliverShutdown(host);") != null);
+    const trampoline_at = std.mem.indexOf(u8, host_source, "static void dispatchEventToRuntime(") orelse return error.TestExpectedEqual;
+    const scope_at = std.mem.indexOfPos(u8, host_source, trampoline_at, "RuntimeDispatchScope scope(host);") orelse return error.TestExpectedEqual;
+    const forward_at = std.mem.indexOfPos(u8, host_source, trampoline_at, "host->runtime_callback(host->runtime_context, event);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(scope_at < forward_at);
+    // Nothing enters the runtime after the shutdown was handed over, on
+    // every path: the stop hook's own events and a closing dialog's.
+    const gate_at = std.mem.indexOfPos(u8, host_source, trampoline_at, "if (host->shutdown_delivered && event->kind != kShutdown) return;") orelse return error.TestExpectedEqual;
+    try std.testing.expect(gate_at < forward_at);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "if (!host->bridge_callback || host->shutdown_delivered) return;") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host_source, "host->bridge_callback("));
+    const bridge_at = std.mem.indexOf(u8, host_source, "host->bridge_callback(") orelse return error.TestExpectedEqual;
+    const bridge_scope_at = std.mem.lastIndexOf(u8, host_source[0..bridge_at], "RuntimeDispatchScope scope(host);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(bridge_at - bridge_scope_at < 128);
+
+    // Dialogs the unwinding cancels, through any chain of owners, report
+    // no answer rather than a button, and new ones are not shown;
+    // session_end_test.cpp drives this on a Windows host.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "for (HWND owner = GetWindow(hwnd, GW_OWNER); owner; owner = GetWindow(owner, GW_OWNER)) {") != null);
+    const message_at = std.mem.indexOf(u8, host_source, "int native_sdk_windows_show_message_dialog(Host *host, const WindowsMessageDialogOpts *opts) {") orelse return error.TestExpectedEqual;
+    const message_end = std.mem.indexOfPos(u8, host_source, message_at, "\n}\n") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, host_source[message_at..message_end], "if (host->session_ending) return -1;"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, host_source, "|| buffer_len == 0 || host->session_ending) return"));
 }
 
 test "windows passive show never foregrounds or focuses the window" {

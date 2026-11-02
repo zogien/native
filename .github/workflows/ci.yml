@@ -193,6 +193,10 @@ jobs:
       # that wakes the loop, frame requests coalesce, and wakes and app
       # timers keep arriving after the first window closes.
       - run: zig build test-windows-host-loop
+      # Session end against the same host, sent from a second process:
+      # logoff and Restart Manager reach a tray-hidden window, run the
+      # stop hook once, and unwind a dialog the app has open first.
+      - run: zig build test-windows-session-end
       # Effects.spawn is a pipe-backed background transport. Run its
       # Windows-only PowerShell probe natively so removing CREATE_NO_WINDOW
       # cannot leave the platform-neutral and Wine lanes green.

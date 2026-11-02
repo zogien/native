@@ -649,6 +649,22 @@ pub fn build(b: *std.Build) void {
         loop_run.expectExitCode(0);
         b.step("test-windows-host-loop", "Verify the Windows host's loop model against a real WebView").dependOn(&loop_run.step);
         test_step.dependOn(&loop_run.step);
+
+        // Session end (logoff, shutdown, Restart Manager) against the same
+        // production host, sent from a second process the way Windows
+        // sends it (see src/platform/windows/session_end_test.cpp).
+        const session_mod = b.createModule(.{ .target = loop_target, .optimize = optimize, .link_libc = true });
+        app_build.addWebView2HostIncludes(b, session_mod, b.path("third_party/webview2/include"), loop_target);
+        session_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/session_end_test.cpp"), .flags = &.{"-std=c++17"} });
+        session_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
+        app_build.linkWindowsHostLibraries(session_mod, loop_target);
+        const session_test = b.addExecutable(.{ .name = "windows-session-end-test", .root_module = session_mod });
+        session_test.win32_manifest = b.path("assets/native-sdk.manifest");
+        const session_run = b.addRunArtifact(session_test);
+        session_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
+        session_run.expectExitCode(0);
+        b.step("test-windows-session-end", "Verify the Windows host's session end across processes").dependOn(&session_run.step);
+        test_step.dependOn(&session_run.step);
     }
     const window_drag_tests = b.addSystemCommand(&.{ "node", "--test" });
     window_drag_tests.addFileArg(b.path("scripts/webview-window-drag.test.mjs"));

@@ -134,6 +134,8 @@ Returns an optional path string.
 
 **MessageDialogResult**: `primary`, `secondary`, `tertiary`
 
+On Windows, a message dialog that the end of the session cancels (logoff, shutdown, or a Restart Manager close) fails with `error.SessionEnding` instead of returning a button, so no button stands in for an answer the user never gave. See the [close policy](/docs/windows#close-policy) notes on session end.
+
 ## FileFilter
 
 ```zig
