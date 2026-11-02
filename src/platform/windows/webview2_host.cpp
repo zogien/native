@@ -25,6 +25,7 @@
 #include <cctype>
 #include <climits>
 #include <cmath>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -210,6 +211,10 @@ constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
  * menu on a fresh loop turn — the same deferral the macOS host's
  * dispatch_async performs before popUpMenuPositioningItem. */
 constexpr UINT kShowContextMenuMessage = WM_APP + 47;
+/* Posted by queueWebViewEvent when a WebView2 callback queued something
+ * for the app; the loop window delivers the queue on a fresh loop turn,
+ * after the WebView2 callback has returned. */
+constexpr UINT kDeliverWebViewEventsMessage = WM_APP + 48;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 constexpr int kViewWebView = 0;
@@ -739,6 +744,38 @@ struct PendingContextMenu {
     std::vector<Item> items;
 };
 
+/* A keydown resolved against the app's key bindings, owned so the event
+ * can be emitted after the callback that saw the key has returned. The
+ * match itself happens while the key is current: the modifier state is
+ * read then, and a later turn could see different keys held. */
+struct ShortcutMatch {
+    int kind = 0; // kShortcut, kMenuCommand, or kTrayAction
+    uint64_t window_id = 0;
+    std::string shortcut_id;
+    std::string key;
+    uint32_t modifiers = 0;
+    std::string command;
+    uint32_t tray_item_id = 0;
+};
+
+/* Something a WebView2 callback learned that the app must see, copied out
+ * of the callback's arguments. WebView2 does not support running a nested
+ * message loop or modal UI inside its callbacks, and its other callbacks
+ * cannot run until the current one returns, so app code never runs there:
+ * the callback queues one of these and the loop window delivers it on a
+ * later turn (deliverWebViewEvents). */
+struct DeferredWebViewEvent {
+    enum class Kind { Bridge, Focus, Shortcut, OpenExternal };
+    Kind kind = Kind::Bridge;
+    uint64_t window_id = 0;
+    std::string view_key;
+    std::string label;
+    std::string message;
+    std::string origin;
+    ShortcutMatch shortcut;
+    std::wstring url;
+};
+
 struct Host {
     bool window_drag_initialization_failed = false;
     uint64_t next_window_drag_generation = 1;
@@ -806,6 +843,16 @@ struct Host {
     /* A posted kRequestFrameMessage is still queued: requests coalesce
      * until the loop window takes it. */
     std::atomic<bool> frame_request_pending{false};
+    /* WebView2 events waiting for the app, in arrival order. One delivery
+     * runs at a time: an event queued while the app is inside an earlier
+     * one (a Bridge command showing a modal dialog) waits for it, the way
+     * WebView2 itself holds later callbacks while one is running. */
+    std::deque<DeferredWebViewEvent> webview_events;
+    bool webview_events_posted = false;
+    bool delivering_webview_events = false;
+    /* WebView2 callbacks currently on the stack; app callbacks run only
+     * at zero (see DeferredWebViewEvent). */
+    int webview_callback_depth = 0;
 };
 
 static std::string webViewKey(uint64_t window_id, const std::string &label);
@@ -1784,7 +1831,10 @@ static void showTrayMenu(Host *host, HWND hwnd) {
     PostMessageW(hwnd, WM_NULL, 0, 0);
 }
 
-static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wparam) {
+/* Resolve a keydown against the app's shortcuts, then its menu and tray
+ * key equivalents. True when a binding claims the key; `out` then holds
+ * the event to emit. */
+static bool matchShortcutForWindow(Host *host, const Window *window, WPARAM wparam, ShortcutMatch *out) {
     if (!host || (host->shortcuts.empty() && host->menus.empty() && host->tray_items.empty())) return false;
     if (!window) return false;
     std::string key = shortcutKeyFromWParam(wparam);
@@ -1796,16 +1846,11 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
         for (const Shortcut &shortcut : host->shortcuts) {
             if (shortcut.key != key) continue;
             if (!shortcutModifiersMatch(shortcut.modifiers, allow_implicit_shift)) continue;
-            if (!host->callback) return true;
-            WindowsEvent event = {};
-            event.kind = kShortcut;
-            event.window_id = window->id;
-            event.shortcut_id = shortcut.id.c_str();
-            event.shortcut_id_len = shortcut.id.size();
-            event.shortcut_key = shortcut.key.c_str();
-            event.shortcut_key_len = shortcut.key.size();
-            event.shortcut_modifiers = shortcut.modifiers;
-            host->callback(host->callback_context, &event);
+            out->kind = kShortcut;
+            out->window_id = window->id;
+            out->shortcut_id = shortcut.id;
+            out->key = shortcut.key;
+            out->modifiers = shortcut.modifiers;
             return true;
         }
         /* Menu accelerators dispatch from the same keydown path: a menu
@@ -1818,13 +1863,9 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
                 if (item.separator || !item.enabled || item.key.empty()) continue;
                 if (item.key != key) continue;
                 if (!shortcutModifiersMatch(item.modifiers, allow_implicit_shift)) continue;
-                if (!host->callback) return true;
-                WindowsEvent event = {};
-                event.kind = kMenuCommand;
-                event.window_id = window->id;
-                event.command_name = item.command.c_str();
-                event.command_name_len = item.command.size();
-                host->callback(host->callback_context, &event);
+                out->kind = kMenuCommand;
+                out->window_id = window->id;
+                out->command = item.command;
                 return true;
             }
         }
@@ -1835,18 +1876,121 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
             if (item.separator || !item.enabled || item.key.empty()) continue;
             if (item.key != key) continue;
             if (!shortcutModifiersMatch(item.modifiers, allow_implicit_shift)) continue;
-            return emitTrayActionForCommandId(host, host->tray_items, item.command_id);
+            out->kind = kTrayAction;
+            out->window_id = window->id;
+            out->tray_item_id = item.id;
+            /* A tray binding claims the key only while someone listens. */
+            return host->callback != nullptr;
         }
     }
     return false;
+}
+
+static void emitShortcutMatch(Host *host, const ShortcutMatch &match) {
+    if (!host || !host->callback) return;
+    WindowsEvent event = {};
+    event.kind = match.kind;
+    if (match.kind == kShortcut) {
+        event.window_id = match.window_id;
+        event.shortcut_id = match.shortcut_id.c_str();
+        event.shortcut_id_len = match.shortcut_id.size();
+        event.shortcut_key = match.key.c_str();
+        event.shortcut_key_len = match.key.size();
+        event.shortcut_modifiers = match.modifiers;
+    } else if (match.kind == kMenuCommand) {
+        event.window_id = match.window_id;
+        event.command_name = match.command.c_str();
+        event.command_name_len = match.command.size();
+    } else {
+        event.tray_item_id = match.tray_item_id;
+    }
+    host->callback(host->callback_context, &event);
+}
+
+static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wparam) {
+    ShortcutMatch match;
+    if (!matchShortcutForWindow(host, window, wparam, &match)) return false;
+    emitShortcutMatch(host, match);
+    return true;
 }
 
 static bool emitShortcutForHwnd(Host *host, HWND hwnd, WPARAM wparam) {
     return emitShortcutForWindow(host, windowForHwnd(host, hwnd), wparam);
 }
 
-static bool emitShortcutForWindowId(Host *host, uint64_t window_id, WPARAM wparam) {
-    return emitShortcutForWindow(host, windowForId(host, window_id), wparam);
+/* Marks a WebView2 callback on the stack for its duration. */
+struct WebViewCallbackScope {
+    Host *host;
+    explicit WebViewCallbackScope(Host *host_in) : host(host_in) { host->webview_callback_depth += 1; }
+    ~WebViewCallbackScope() { host->webview_callback_depth -= 1; }
+    WebViewCallbackScope(const WebViewCallbackScope &) = delete;
+    WebViewCallbackScope &operator=(const WebViewCallbackScope &) = delete;
+};
+
+/* Called from WebView2 callbacks: queue the event and make sure a
+ * delivery is posted to the loop window. */
+static void queueWebViewEvent(Host *host, DeferredWebViewEvent event) {
+    host->webview_events.push_back(std::move(event));
+    if (host->webview_events_posted) return;
+    HWND target = loopWindow(host);
+    host->webview_events_posted = target && PostMessageW(target, kDeliverWebViewEventsMessage, 0, 0);
+}
+
+static void deliverWebViewEvent(Host *host, const DeferredWebViewEvent &event) {
+    switch (event.kind) {
+        case DeferredWebViewEvent::Kind::Bridge:
+            /* Delivered even if the view closed after sending it: the
+             * page sent the message while it was live, and a reply to a
+             * view that is gone is dropped where it is sent. */
+            if (!host->bridge_callback) return;
+            host->bridge_callback(
+                host->bridge_context,
+                event.window_id,
+                event.label.c_str(),
+                event.label.size(),
+                event.message.c_str(),
+                event.message.size(),
+                event.origin.c_str(),
+                event.origin.size());
+            return;
+        case DeferredWebViewEvent::Kind::Focus: {
+            /* Focus is state, not input: a view that is gone by now has
+             * nothing to report. */
+            if (!host->callback || host->webviews.find(event.view_key) == host->webviews.end()) return;
+            WindowsEvent focused = {};
+            focused.kind = kViewFocused;
+            focused.window_id = event.window_id;
+            focused.view_label = event.label.c_str();
+            focused.view_label_len = event.label.size();
+            host->callback(host->callback_context, &focused);
+            return;
+        }
+        case DeferredWebViewEvent::Kind::Shortcut:
+            emitShortcutMatch(host, event.shortcut);
+            return;
+        case DeferredWebViewEvent::Kind::OpenExternal:
+            /* The shell may show UI of its own (an app picker), which is
+             * why this waits for the loop rather than running inside
+             * NavigationStarting. */
+            ShellExecuteW(nullptr, L"open", event.url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return;
+    }
+}
+
+/* The loop window's kDeliverWebViewEventsMessage. A delivery that starts
+ * while another is running (the app is inside a modal loop it opened from
+ * an earlier event) leaves the queue to that outer delivery, so the app
+ * sees these events one at a time and in order. */
+static void deliverWebViewEvents(Host *host) {
+    host->webview_events_posted = false;
+    if (host->delivering_webview_events) return;
+    host->delivering_webview_events = true;
+    while (!host->webview_events.empty()) {
+        DeferredWebViewEvent event = std::move(host->webview_events.front());
+        host->webview_events.pop_front();
+        deliverWebViewEvent(host, event);
+    }
+    host->delivering_webview_events = false;
 }
 
 static std::string webViewKey(uint64_t window_id, const std::string &label) {
@@ -5703,6 +5847,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
             if (!token) return S_OK;
             std::lock_guard<std::recursive_mutex> guard(token->mutex);
             if (!token->alive) return S_OK;
+            WebViewCallbackScope scope(host);
             auto found = host->webviews.find(key);
             if (found == host->webviews.end() || found->second.hwnd != parent || found->second.window_drag_generation != generation || !IsWindow(parent)) return S_OK;
             if (FAILED(result) || !environment) {
@@ -5723,6 +5868,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
                         if (controller) controller->Close();
                         return S_OK;
                     }
+                    WebViewCallbackScope scope(host);
                     auto found = host->webviews.find(key);
                     if (found == host->webviews.end() || found->second.window_drag_generation != generation) {
                         if (controller) controller->Close();
@@ -5751,14 +5897,15 @@ static bool createChildWebView(Host *host, const std::string &key) {
                             if (!token) return S_OK;
                             std::lock_guard<std::recursive_mutex> guard(token->mutex);
                             if (!token->alive || !host->callback) return S_OK;
+                            WebViewCallbackScope scope(host);
                             auto focused = host->webviews.find(key);
                             if (focused == host->webviews.end()) return S_OK;
-                            WindowsEvent event = {};
-                            event.kind = kViewFocused;
+                            DeferredWebViewEvent event;
+                            event.kind = DeferredWebViewEvent::Kind::Focus;
                             event.window_id = focused->second.window_id;
-                            event.view_label = focused->second.label.c_str();
-                            event.view_label_len = focused->second.label.size();
-                            host->callback(host->callback_context, &event);
+                            event.view_key = key;
+                            event.label = focused->second.label;
+                            queueWebViewEvent(host, std::move(event));
                             return S_OK;
                         }).Get(), &focus_token);
                     if (found->second.webview) {
@@ -5789,6 +5936,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                         if (!token) return S_OK;
                                         std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                         if (!token->alive) return S_OK;
+                                        WebViewCallbackScope scope(host);
                                         auto current = host->webviews.find(key);
                                         if (current == host->webviews.end() || current->second.window_drag_generation != drag_generation) return S_OK;
                                         if (FAILED(result)) {
@@ -5816,8 +5964,9 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 [host, key, bridge_window_id, bridge_label, lifetime](ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventArgs *args) -> HRESULT {
                                     auto token = lifetime.lock();
                                     if (!token) return S_OK;
-                                    std::unique_lock<std::recursive_mutex> guard(token->mutex);
+                                    std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                     if (!token->alive || !args || !host->bridge_callback) return S_OK;
+                                    WebViewCallbackScope scope(host);
 
                                     LPWSTR message_bytes = nullptr;
                                     if (FAILED(args->TryGetWebMessageAsString(&message_bytes)) || !message_bytes) return S_OK;
@@ -5837,24 +5986,14 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                             : bridgeOriginForWebViewUrl(source_webview->second, source_url);
                                     }
 
-                                    // WebView callbacks and host teardown run on the
-                                    // loop thread. Copy the call inputs under the
-                                    // lifetime lock, then release it before entering
-                                    // the app: a command may join a worker whose
-                                    // final wake needs this same lock. Do not touch
-                                    // host or its WebViews after the app callback.
-                                    const BridgeCallback callback = host->bridge_callback;
-                                    void *context = host->bridge_context;
-                                    guard.unlock();
-                                    callback(
-                                        context,
-                                        bridge_window_id,
-                                        bridge_label.c_str(),
-                                        bridge_label.size(),
-                                        message.c_str(),
-                                        message.size(),
-                                        origin.c_str(),
-                                        origin.size());
+                                    DeferredWebViewEvent event;
+                                    event.kind = DeferredWebViewEvent::Kind::Bridge;
+                                    event.window_id = bridge_window_id;
+                                    event.view_key = key;
+                                    event.label = bridge_label;
+                                    event.message = std::move(message);
+                                    event.origin = std::move(origin);
+                                    queueWebViewEvent(host, std::move(event));
                                     return S_OK;
                                 }).Get(), &bridge_token);
                         }
@@ -5866,14 +6005,20 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 if (!token) return S_OK;
                                 std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive || !args) return S_OK;
+                                WebViewCallbackScope scope(host);
                                 COREWEBVIEW2_KEY_EVENT_KIND kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
                                 if (FAILED(args->get_KeyEventKind(&kind))) return S_OK;
                                 if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) return S_OK;
                                 UINT virtual_key = 0;
                                 if (FAILED(args->get_VirtualKey(&virtual_key))) return S_OK;
-                                if (emitShortcutForWindowId(host, accelerator_window_id, virtual_key)) {
-                                    args->put_Handled(TRUE);
-                                }
+                                /* Handled is decided now, from the key state
+                                 * of this keydown; the app hears it later. */
+                                DeferredWebViewEvent event;
+                                event.kind = DeferredWebViewEvent::Kind::Shortcut;
+                                if (!matchShortcutForWindow(host, windowForId(host, accelerator_window_id), virtual_key, &event.shortcut)) return S_OK;
+                                args->put_Handled(TRUE);
+                                event.window_id = accelerator_window_id;
+                                queueWebViewEvent(host, std::move(event));
                                 return S_OK;
                             }).Get(), &accelerator_token);
 
@@ -5885,6 +6030,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 if (!token) return S_OK;
                                 std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive || !args) return S_OK;
+                                WebViewCallbackScope scope(host);
                                 auto found = host->webviews.find(key);
                                 if (found == host->webviews.end()) return S_OK;
                                 ComPtr<ICoreWebView2WebResourceRequest> request;
@@ -5907,6 +6053,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 if (!token) return S_OK;
                                 std::lock_guard<std::recursive_mutex> guard(token->mutex);
                                 if (!token->alive) return S_OK;
+                                WebViewCallbackScope scope(host);
                                 LPWSTR uri_bytes = nullptr;
                                 if (!args || FAILED(args->get_Uri(&uri_bytes))) return S_OK;
                                 std::wstring uri_wide = uri_bytes ? std::wstring(uri_bytes) : std::wstring();
@@ -5916,7 +6063,10 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 if (found != host->webviews.end() && isInternalAssetUrl(found->second, uri)) return S_OK;
                                 if (uri.empty() || uri.rfind("about:", 0) == 0 || policyListMatches(host->allowed_origins, uri)) return S_OK;
                                 if (host->external_link_action == 1 && policyListMatches(host->allowed_external_urls, uri)) {
-                                    ShellExecuteW(nullptr, L"open", uri_wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                                    DeferredWebViewEvent event;
+                                    event.kind = DeferredWebViewEvent::Kind::OpenExternal;
+                                    event.url = uri_wide;
+                                    queueWebViewEvent(host, std::move(event));
                                 }
                                 args->put_Cancel(TRUE);
                                 return S_OK;
@@ -6142,6 +6292,9 @@ static LRESULT CALLBACK loopWindowProc(HWND hwnd, UINT message, WPARAM wparam, L
             return 0;
         case kAudioSpectrumMessage:
             if (host) audioHandleSpectrumMessage(host, wparam);
+            return 0;
+        case kDeliverWebViewEventsMessage:
+            if (host) deliverWebViewEvents(host);
             return 0;
         case WM_TIMER:
             if (host && handleAppTimerMessage(host, wparam)) return 0;
