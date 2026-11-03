@@ -169,6 +169,7 @@ pub const max_effect_pty_chunk_bytes = runtime_effects.max_effect_pty_chunk_byte
 pub const max_effect_pty_write_bytes = runtime_effects.max_effect_pty_write_bytes;
 pub const max_effect_pty_term_bytes = runtime_effects.max_effect_pty_term_bytes;
 pub const EffectHostResult = runtime_effects.EffectHostResult;
+pub const DesktopCapabilityCompletion = runtime_effects.DesktopCapabilityCompletion;
 pub const HostCallBinding = runtime_effects.HostCallBinding;
 pub const HostCallCompletion = runtime_effects.HostCallCompletion;
 pub const ServiceHost = @import("service_host.zig").ServiceHost;

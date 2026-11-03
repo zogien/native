@@ -47,6 +47,7 @@ const component_policy = @import("component_policy.zig");
 const hover_policy = @import("canvas_hover_policy.zig");
 const launch_timing = @import("launch_timing.zig");
 const runtime_effects = @import("effects.zig");
+const runtime_dialogs = @import("dialogs.zig");
 const terminal_session = @import("terminal_session.zig");
 const ui_app_provenance = @import("ui_app_provenance.zig");
 const markup_development = @import("markup_development_policy.zig");
@@ -1684,6 +1685,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .reveal_path_fn = effectsRevealPath,
                 .format_local_time_fn = effectsFormatLocalTime,
                 .execute_capability_fn = effectsExecuteCapability,
+                .start_capability_fn = effectsStartCapability,
+                .cancel_capability_fn = effectsCancelCapability,
                 .replay_window_result_fn = effectsRestoreWindowResult,
             });
             if (runtime.options.session_recorder) |recorder| {
@@ -7023,6 +7026,70 @@ const ContextMenuPin = struct {
 fn effectsRestoreWindowResult(context: *anyopaque, label: []const u8, closed: bool) void {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     runtime.restoreWindowCapabilityResult(label, closed);
+}
+
+/// What a directory picker needs to answer its capability request, kept in
+/// the dialog's completion tag until the picker finishes.
+const DirectoryPickerRequest = struct {
+    completion: runtime_effects.DesktopCapabilityCompletion,
+    /// The request's correlation prefix, echoed in the reply header.
+    prefix: [36]u8,
+    prefix_len: u8,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(DirectoryPickerRequest) <= runtime_dialogs.max_dialog_tag_bytes);
+}
+
+/// `native-sdk.dialog.openDirectory` opens a native folder picker without
+/// blocking the event loop; the reply follows when the picker finishes.
+/// Other capabilities, and the picker on a platform without asynchronous
+/// dialogs, keep the synchronous `effectsExecuteCapability` and its
+/// replies.
+fn effectsStartCapability(context: *anyopaque, name: []const u8, payload: []const u8, completion: runtime_effects.DesktopCapabilityCompletion) anyerror!?u64 {
+    if (!std.mem.eql(u8, name, "native-sdk.dialog.openDirectory")) return null;
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    if (!runtime.options.platform.services.supportsAsyncDialogs()) return null;
+    const desktop_files = @import("desktop_files.zig");
+    if (!authorization.hasPermission(runtime.authorization_policy, runtime.options.security.permissions, security.permission_dialog)) return error.PermissionDenied;
+    var reader = try desktop_files.request(payload);
+    const prefix_len = reader.at;
+    const title = try reader.field();
+    const path = try reader.field();
+    try reader.finish();
+    if (title.len > 255 or path.len > desktop_files.max_path_bytes or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidRequest;
+    var request: DirectoryPickerRequest = .{ .completion = completion, .prefix = undefined, .prefix_len = @intCast(prefix_len) };
+    @memcpy(request.prefix[0..prefix_len], payload[0..prefix_len]);
+    return try runtime.requestOpenDialog(.{ .title = title, .default_path = path, .allow_directories = true, .allow_multiple = false }, null, .{
+        .context = completion.context,
+        .tag = std.mem.asBytes(&request),
+        .on_result = directoryPickerFinished,
+    });
+}
+
+fn effectsCancelCapability(context: *anyopaque, handle: u64) void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    runtime.cancelDialog(handle);
+}
+
+fn directoryPickerFinished(context: *anyopaque, runtime: *Runtime, tag: []const u8, result: platform.DialogResult) anyerror!void {
+    _ = .{ context, runtime };
+    const desktop_files = @import("desktop_files.zig");
+    var request: DirectoryPickerRequest = undefined;
+    @memcpy(std.mem.asBytes(&request), tag[0..@sizeOf(DirectoryPickerRequest)]);
+    const prefix = request.prefix[0..request.prefix_len];
+    var output: [64 + 2 + platform.max_dialog_path_bytes]u8 = undefined;
+    if (result.outcome == .failed) {
+        request.completion.complete(true, output[0..try desktop_files.replyHeaderFor(&output, prefix, "DialogFailed")]);
+        return;
+    }
+    // A cancelled picker answers an empty selection, as it always has.
+    const selected = if (result.outcome == .selected and result.count > 0) result.paths else "";
+    const header = try desktop_files.replyHeaderFor(&output, prefix, "");
+    if (selected.len > 65535 or output.len - header < 2 or selected.len > output.len - header - 2) return error.OverBound;
+    std.mem.writeInt(u16, output[header..][0..2], @intCast(selected.len), .little);
+    @memcpy(output[header + 2 ..][0..selected.len], selected);
+    request.completion.complete(true, output[0 .. header + 2 + selected.len]);
 }
 
 fn effectsExecuteCapability(context: *anyopaque, name: []const u8, payload: []const u8, output: []u8) anyerror![]const u8 {

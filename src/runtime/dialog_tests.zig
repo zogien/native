@@ -287,3 +287,81 @@ test "a failing completion is recorded and the queue moves on" {
     try std.testing.expectEqual(errors_before + 1, harness.runtime.dispatch_error_total);
     try std.testing.expect(harness.null_platform.findPresentedDialog(second) != null);
 }
+
+fn allowDialogBridge(harness: *TestHarness()) void {
+    const permissions = struct {
+        const dialog = [_][]const u8{support.security.permission_dialog};
+        const commands = [_]support.bridge.CommandPolicy{
+            .{ .name = "native-sdk.dialog.openFile", .permissions = &dialog, .origins = &.{"zero://inline"} },
+            .{ .name = "native-sdk.dialog.saveFile", .permissions = &dialog, .origins = &.{"zero://inline"} },
+            .{ .name = "native-sdk.dialog.showMessage", .permissions = &dialog, .origins = &.{"zero://inline"} },
+        };
+    };
+    harness.runtime.options.security.permissions = &permissions.dialog;
+    harness.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &permissions.commands };
+}
+
+fn sendBridge(harness: *TestHarness(), bytes: []const u8) !void {
+    try harness.runtime.dispatchPlatformEvent(dialogApp(harness), .{ .bridge_message = .{ .bytes = bytes, .origin = "zero://inline", .window_id = 1 } });
+}
+
+test "built-in bridge dialogs answer when the dialog finishes" {
+    const harness = try started();
+    defer harness.destroy(std.testing.allocator);
+    allowDialogBridge(harness);
+
+    try sendBridge(harness, "{\"id\":\"pick\",\"command\":\"native-sdk.dialog.openFile\",\"payload\":{\"title\":\"Pick\",\"allowMultiple\":true}}");
+    try std.testing.expectEqualStrings("", harness.null_platform.lastBridgeResponse());
+    const shown = harness.null_platform.findPresentedDialog(1).?;
+    try std.testing.expectEqualStrings("Pick", shown.titleText());
+    try std.testing.expectEqual(@as(?platform.WindowId, 1), shown.parent_window_id);
+
+    try harness.null_platform.finishDialog(1, .selected, "/a.txt\n/b.txt", .primary);
+    try deliverWakes(harness);
+    const response = harness.null_platform.lastBridgeResponse();
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"id\":\"pick\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "[\"/a.txt\",\"/b.txt\"]") != null);
+}
+
+test "built-in bridge dialogs report dismissal, cancellation and failure" {
+    const harness = try started();
+    defer harness.destroy(std.testing.allocator);
+    allowDialogBridge(harness);
+
+    try sendBridge(harness, "{\"id\":\"ask\",\"command\":\"native-sdk.dialog.showMessage\",\"payload\":{\"message\":\"Delete?\",\"primaryButton\":\"Delete\",\"secondaryButton\":\"Keep\"}}");
+    try harness.null_platform.finishDialog(1, .cancelled, "", .primary);
+    try deliverWakes(harness);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"dismissed\"") != null);
+
+    try sendBridge(harness, "{\"id\":\"save\",\"command\":\"native-sdk.dialog.saveFile\",\"payload\":{\"defaultName\":\"a.txt\"}}");
+    try harness.null_platform.finishDialog(2, .cancelled, "", .primary);
+    try deliverWakes(harness);
+    const saved = harness.null_platform.lastBridgeResponse();
+    try std.testing.expect(std.mem.indexOf(u8, saved, "\"id\":\"save\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "null") != null);
+
+    harness.null_platform.fail_next_dialog_request = true;
+    try sendBridge(harness, "{\"id\":\"broken\",\"command\":\"native-sdk.dialog.openFile\",\"payload\":{}}");
+    try deliverWakes(harness);
+    const broken = harness.null_platform.lastBridgeResponse();
+    try std.testing.expect(std.mem.indexOf(u8, broken, "\"id\":\"broken\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, broken, "\"internal_error\"") != null);
+}
+
+test "built-in bridge dialogs on platforms without asynchronous dialogs answer at once" {
+    const harness = try startedBlocking();
+    defer harness.destroy(std.testing.allocator);
+    allowDialogBridge(harness);
+
+    try sendBridge(harness, "{\"id\":\"pick\",\"command\":\"native-sdk.dialog.openFile\",\"payload\":{\"title\":\"Pick\"}}");
+    const picked = harness.null_platform.lastBridgeResponse();
+    try std.testing.expect(std.mem.indexOf(u8, picked, "\"id\":\"pick\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, picked, "[\"/tmp/native-sdk-open.txt\"]") != null);
+
+    harness.null_platform.message_dialog_result = .secondary;
+    try sendBridge(harness, "{\"id\":\"ask\",\"command\":\"native-sdk.dialog.showMessage\",\"payload\":{\"message\":\"Delete?\",\"secondaryButton\":\"Keep\"}}");
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"secondary\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.open_dialog_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.message_dialog_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDialogCount());
+}

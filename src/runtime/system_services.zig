@@ -404,93 +404,75 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             return writeTrueJson(output);
         }
 
-        pub fn openFileDialogFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
-            var storage = json.StringStorage.init(output);
-            const title = jsonStringField(payload, "title", &storage) orelse "";
-            const default_path = jsonStringField(payload, "defaultPath", &storage) orelse "";
-            const allow_dirs = jsonBoolField(payload, "allowDirectories") orelse false;
-            const allow_multi = jsonBoolField(payload, "allowMultiple") orelse false;
-            var dialog_buffer: [platform.max_dialog_paths_bytes]u8 = undefined;
-            const result = try self.showOpenDialog(.{
-                .title = title,
-                .default_path = default_path,
-                .allow_directories = allow_dirs,
-                .allow_multiple = allow_multi,
-            }, &dialog_buffer);
+        /// Read a `native-sdk.dialog.*` bridge payload. Strings land in
+        /// `storage` and borrow it.
+        pub fn dialogOptionsFromJson(kind: platform.DialogKind, payload: []const u8, storage: *json.StringStorage) !platform.DialogOptions {
+            switch (kind) {
+                .open => return .{ .open = .{
+                    .title = jsonStringField(payload, "title", storage) orelse "",
+                    .default_path = jsonStringField(payload, "defaultPath", storage) orelse "",
+                    .allow_directories = jsonBoolField(payload, "allowDirectories") orelse false,
+                    .allow_multiple = jsonBoolField(payload, "allowMultiple") orelse false,
+                } },
+                .save => return .{ .save = .{
+                    .title = jsonStringField(payload, "title", storage) orelse "",
+                    .default_path = jsonStringField(payload, "defaultPath", storage) orelse "",
+                    .default_name = jsonStringField(payload, "defaultName", storage) orelse "",
+                } },
+                .message => {
+                    const title = jsonStringField(payload, "title", storage) orelse "";
+                    const message = jsonStringField(payload, "message", storage) orelse "";
+                    const informative = jsonStringField(payload, "informativeText", storage) orelse "";
+                    const primary = jsonStringField(payload, "primaryButton", storage) orelse "OK";
+                    const secondary = jsonStringField(payload, "secondaryButton", storage) orelse "";
+                    const tertiary = jsonStringField(payload, "tertiaryButton", storage) orelse "";
+                    const style_str = jsonStringField(payload, "style", storage) orelse "info";
+                    const style: platform.MessageDialogStyle = if (std.mem.eql(u8, style_str, "warning"))
+                        .warning
+                    else if (std.mem.eql(u8, style_str, "critical"))
+                        .critical
+                    else
+                        .info;
+                    return .{ .message = .{
+                        .style = style,
+                        .title = title,
+                        .message = message,
+                        .informative_text = informative,
+                        .primary_button = primary,
+                        .secondary_button = secondary,
+                        .tertiary_button = tertiary,
+                    } };
+                },
+            }
+        }
 
+        /// The bridge result for a finished dialog: open dialogs answer an
+        /// array of paths, save dialogs a path, message dialogs the
+        /// pressed button's name. A dialog closed without a choice answers
+        /// `null` (open, save) or `"dismissed"` (message).
+        pub fn writeDialogResultJson(kind: platform.DialogKind, result: platform.DialogResult, output: []u8) ![]const u8 {
             var writer = std.Io.Writer.fixed(output);
-            if (result.count == 0) {
-                try writer.writeAll("null");
-            } else {
-                try writer.writeByte('[');
-                var start: usize = 0;
-                var i: usize = 0;
-                for (result.paths, 0..) |ch, pos| {
-                    if (ch == '\n') {
-                        if (i > 0) try writer.writeByte(',');
-                        try json.writeString(&writer, result.paths[start..pos]);
-                        start = pos + 1;
-                        i += 1;
+            const chosen = result.outcome == .selected;
+            switch (kind) {
+                .open => {
+                    if (!chosen or result.count == 0) {
+                        try writer.writeAll("null");
+                        return writer.buffered();
                     }
-                }
-                if (start < result.paths.len) {
-                    if (i > 0) try writer.writeByte(',');
-                    try json.writeString(&writer, result.paths[start..]);
-                }
-                try writer.writeByte(']');
+                    try writer.writeByte('[');
+                    var paths = std.mem.splitScalar(u8, result.paths, '\n');
+                    var first = true;
+                    while (paths.next()) |path| {
+                        if (path.len == 0) continue;
+                        if (!first) try writer.writeByte(',');
+                        first = false;
+                        try json.writeString(&writer, path);
+                    }
+                    try writer.writeByte(']');
+                },
+                .save => if (chosen and result.paths.len > 0) try json.writeString(&writer, result.paths) else try writer.writeAll("null"),
+                .message => try json.writeString(&writer, if (chosen) @tagName(result.button) else "dismissed"),
             }
-            return writer.buffered();
-        }
-
-        pub fn saveFileDialogFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
-            var storage = json.StringStorage.init(output);
-            const title = jsonStringField(payload, "title", &storage) orelse "";
-            const default_path = jsonStringField(payload, "defaultPath", &storage) orelse "";
-            const default_name = jsonStringField(payload, "defaultName", &storage) orelse "";
-            var dialog_buffer: [platform.max_dialog_path_bytes]u8 = undefined;
-            const path = try self.showSaveDialog(.{
-                .title = title,
-                .default_path = default_path,
-                .default_name = default_name,
-            }, &dialog_buffer);
-
-            var writer = std.Io.Writer.fixed(output);
-            if (path) |p| {
-                try json.writeString(&writer, p);
-            } else {
-                try writer.writeAll("null");
-            }
-            return writer.buffered();
-        }
-
-        pub fn showMessageDialogFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
-            var storage = json.StringStorage.init(output);
-            const title = jsonStringField(payload, "title", &storage) orelse "";
-            const message = jsonStringField(payload, "message", &storage) orelse "";
-            const informative = jsonStringField(payload, "informativeText", &storage) orelse "";
-            const primary = jsonStringField(payload, "primaryButton", &storage) orelse "OK";
-            const secondary = jsonStringField(payload, "secondaryButton", &storage) orelse "";
-            const tertiary = jsonStringField(payload, "tertiaryButton", &storage) orelse "";
-            const style_str = jsonStringField(payload, "style", &storage) orelse "info";
-            const style: platform.MessageDialogStyle = if (std.mem.eql(u8, style_str, "warning"))
-                .warning
-            else if (std.mem.eql(u8, style_str, "critical"))
-                .critical
-            else
-                .info;
-
-            const result = try self.showMessageDialog(.{
-                .style = style,
-                .title = title,
-                .message = message,
-                .informative_text = informative,
-                .primary_button = primary,
-                .secondary_button = secondary,
-                .tertiary_button = tertiary,
-            });
-
-            var writer = std.Io.Writer.fixed(output);
-            try json.writeString(&writer, @tagName(result));
             return writer.buffered();
         }
     };

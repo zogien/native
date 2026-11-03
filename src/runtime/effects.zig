@@ -388,9 +388,31 @@ pub const SystemServiceBinding = struct {
     reveal_path_fn: *const fn (context: *anyopaque, path: []const u8) anyerror!void,
     format_local_time_fn: *const fn (context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8,
     execute_capability_fn: ?*const fn (context: *anyopaque, name: []const u8, payload: []const u8, output: []u8) anyerror![]const u8 = null,
+    /// Start a capability that finishes later (a native dialog) and return
+    /// a nonzero cancel handle; the reply arrives through `completion`.
+    /// Null means "not asynchronous": the call runs through
+    /// `execute_capability_fn` as before.
+    start_capability_fn: ?*const fn (context: *anyopaque, name: []const u8, payload: []const u8, completion: DesktopCapabilityCompletion) anyerror!?u64 = null,
+    /// The started capability behind `handle` was replaced or cancelled.
+    cancel_capability_fn: ?*const fn (context: *anyopaque, handle: u64) void = null,
     /// Restore only runtime window bookkeeping from a journaled successful
     /// capability, without invoking native window focus or close services.
     replay_window_result_fn: ?*const fn (context: *anyopaque, label: []const u8, closed: bool) void = null,
+};
+
+/// How an asynchronous desktop capability hands its reply back to the
+/// effects channel that started it. Type-erased so a host can keep it
+/// as plain data until the capability finishes; a reply for an occupancy
+/// that was replaced, cancelled or retired delivers nothing.
+pub const DesktopCapabilityCompletion = struct {
+    context: *anyopaque,
+    index: u32,
+    generation: u32,
+    complete_fn: *const fn (context: *anyopaque, index: u32, generation: u32, ok: bool, reply: []const u8) void,
+
+    pub fn complete(self: DesktopCapabilityCompletion, ok: bool, reply: []const u8) void {
+        self.complete_fn(self.context, self.index, self.generation, ok, reply);
+    }
 };
 
 /// Type-erased handle to the embedding host's named-command services,
@@ -4646,6 +4668,10 @@ pub fn Effects(comptime Msg: type) type {
             // Desktop calls can enter AppKit or remove runtime views. UiApp
             // executes them only after its current rebuild has settled.
             desktop_waiting: bool = false,
+            /// Nonzero while an asynchronous desktop capability (a native
+            /// dialog) is in flight: the handle `start_capability_fn`
+            /// returned, used to cancel it.
+            desktop_handle: u64 = 0,
             replay_window_reply_len: u8 = 0,
             replay_window_reply: [38]u8 = undefined,
             // ---- image-only fields (kind == .image) ----
@@ -9569,7 +9595,10 @@ pub fn Effects(comptime Msg: type) type {
                     }
                     // Tell the host first: a late answer for the old
                     // occupancy must find nothing.
-                    if (slot.kind == .host and state == .running and !slot.fake) self.notifyHostCancel(options.key);
+                    if (slot.kind == .host and state == .running and !slot.fake) {
+                        self.notifyHostCancel(options.key);
+                        self.notifyDesktopCancel(slot);
+                    }
                     if ((slot.kind == .store or slot.kind == .credentials) and state == .draining) joinWorker(slot);
                     self.releaseFetchSlot(slot);
                     slot.generation = 0;
@@ -9609,6 +9638,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.on_clipboard = null;
             slot.on_host = options.on_result;
             slot.desktop_waiting = false;
+            slot.desktop_handle = 0;
             slot.replay_window_reply_len = 0;
             slot.on_credentials = credentials_fn;
             slot.cancel_requested.store(false, .release);
@@ -9728,6 +9758,18 @@ pub fn Effects(comptime Msg: type) type {
             }
         }
 
+        /// `DesktopCapabilityCompletion.complete_fn`: the reply of an
+        /// asynchronous capability, delivered only to the occupancy that
+        /// started it.
+        fn completeDesktopCapability(context: *anyopaque, index: u32, generation: u32, ok: bool, reply: []const u8) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (index >= self.slots.len) return;
+            const slot = &self.slots[index];
+            if (slot.generation != generation or slot.desktop_handle == 0) return;
+            slot.desktop_handle = 0;
+            self.feedDesktopResult(index, generation, ok, reply);
+        }
+
         fn feedDesktopResult(self: *Self, index: usize, generation: u32, ok: bool, bytes: []const u8) void {
             const slot = &self.slots[index];
             if (slot.kind != .host or slot.generation != generation or slot.state.load(.acquire) != .running) return;
@@ -9748,6 +9790,18 @@ pub fn Effects(comptime Msg: type) type {
             @memcpy(name, slot.hostName());
             const payload = self.allocator.dupe(u8, slot.fetchPayload()) catch return self.feedDesktopResult(index, generation, false, "unsupported");
             defer self.allocator.free(payload);
+            if (binding.start_capability_fn) |start| {
+                const started = start(binding.context, name, payload, .{
+                    .context = self,
+                    .index = @intCast(index),
+                    .generation = generation,
+                    .complete_fn = completeDesktopCapability,
+                }) catch |err| return self.feedDesktopResult(index, generation, false, @errorName(err));
+                if (started) |handle| {
+                    slot.desktop_handle = handle;
+                    return;
+                }
+            }
             const output = self.allocator.alloc(u8, max_effect_host_result_bytes) catch return self.feedDesktopResult(index, generation, false, "unsupported");
             defer self.allocator.free(output);
             const result = execute(binding.context, name, payload, output) catch |err| {
@@ -10247,7 +10301,10 @@ pub fn Effects(comptime Msg: type) type {
                     slot.cancel_requested.store(true, .release);
                     continue;
                 }
-                if (slot.kind == .host and state == .running and !slot.fake) self.notifyHostCancel(key);
+                if (slot.kind == .host and state == .running and !slot.fake) {
+                    self.notifyHostCancel(key);
+                    self.notifyDesktopCancel(slot);
+                }
                 if ((slot.kind == .store or slot.kind == .credentials) and state == .draining) joinWorker(slot);
                 self.releaseFetchSlot(slot);
                 // A queued result entry (fed, undrained) dies by
@@ -10262,6 +10319,18 @@ pub fn Effects(comptime Msg: type) type {
             const binding = self.host_calls orelse return;
             const cancel_fn = binding.cancel_fn orelse return;
             cancel_fn(binding.context, key);
+        }
+
+        /// An asynchronous desktop capability lost its occupancy (replaced
+        /// or cancelled): close it. Its late completion then fails the
+        /// generation check and delivers nothing.
+        fn notifyDesktopCancel(self: *Self, slot: *Slot) void {
+            const handle = slot.desktop_handle;
+            if (handle == 0) return;
+            slot.desktop_handle = 0;
+            const binding = self.system_services orelse return;
+            const cancel_fn = binding.cancel_capability_fn orelse return;
+            cancel_fn(binding.context, handle);
         }
 
         fn rejectHost(self: *Self, key: u64, host_fn: ?HostMsgFn) void {

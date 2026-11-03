@@ -887,9 +887,6 @@ pub const Runtime = struct {
     const revealPathFromJson = SystemServiceMethods.revealPathFromJson;
     const addRecentDocumentFromJson = SystemServiceMethods.addRecentDocumentFromJson;
     const clearRecentDocumentsFromJson = SystemServiceMethods.clearRecentDocumentsFromJson;
-    const openFileDialogFromJson = SystemServiceMethods.openFileDialogFromJson;
-    const saveFileDialogFromJson = SystemServiceMethods.saveFileDialogFromJson;
-    const showMessageDialogFromJson = SystemServiceMethods.showMessageDialogFromJson;
 
     /// Start (or replace) a platform timer. The platform delivers `.timer`
     /// events carrying `id` until `cancelTimer` (or after the first fire when
