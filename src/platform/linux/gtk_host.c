@@ -6675,15 +6675,19 @@ static char *native_sdk_bytes_to_string(const char *bytes, size_t len) {
     return bytes && len > 0 ? native_sdk_strndup(bytes, len) : NULL;
 }
 
-static GtkFileDialog *native_sdk_new_open_dialog(const native_sdk_gtk_open_dialog_opts_t *opts) {
+/* The dialog builders hand back plain GObjects, keeping the GTK 4.10
+ * dialog types out of file-scope signatures: against an older GTK this
+ * file then fails only with the GTK-age diagnostics the GLib 2.72 receipt
+ * allows (.github/scripts/glib272_error_allowlist.py). */
+static GObject *native_sdk_new_open_dialog(const native_sdk_gtk_open_dialog_opts_t *opts) {
     GtkFileDialog *dialog = gtk_file_dialog_new();
     char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
     if (title) gtk_file_dialog_set_title(dialog, title);
     free(title);
-    return dialog;
+    return G_OBJECT(dialog);
 }
 
-static GtkFileDialog *native_sdk_new_save_dialog(const native_sdk_gtk_save_dialog_opts_t *opts) {
+static GObject *native_sdk_new_save_dialog(const native_sdk_gtk_save_dialog_opts_t *opts) {
     GtkFileDialog *dialog = gtk_file_dialog_new();
     char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
     char *default_name = native_sdk_bytes_to_string(opts->default_name, opts->default_name_len);
@@ -6691,10 +6695,10 @@ static GtkFileDialog *native_sdk_new_save_dialog(const native_sdk_gtk_save_dialo
     if (default_name) gtk_file_dialog_set_initial_name(dialog, default_name);
     free(title);
     free(default_name);
-    return dialog;
+    return G_OBJECT(dialog);
 }
 
-static GtkAlertDialog *native_sdk_new_alert_dialog(const native_sdk_gtk_message_dialog_opts_t *opts) {
+static GObject *native_sdk_new_alert_dialog(const native_sdk_gtk_message_dialog_opts_t *opts) {
     /* The constructor requires a non-NULL printf-style format string. */
     GtkAlertDialog *dialog = gtk_alert_dialog_new("");
     char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
@@ -6715,7 +6719,7 @@ static GtkAlertDialog *native_sdk_new_alert_dialog(const native_sdk_gtk_message_
     free(primary);
     free(secondary);
     free(tertiary);
-    return dialog;
+    return G_OBJECT(dialog);
 }
 
 static void native_sdk_open_dialog_done(GObject *source, GAsyncResult *result, gpointer data) {
@@ -6744,7 +6748,7 @@ static void native_sdk_save_dialog_done(GObject *source, GAsyncResult *result, g
 
 native_sdk_gtk_open_dialog_result_t native_sdk_gtk_show_open_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_open_dialog_opts_t *opts, char *buffer, size_t buffer_len) {
     native_sdk_gtk_open_dialog_result_t result = {0};
-    GtkFileDialog *dialog = native_sdk_new_open_dialog(opts);
+    GtkFileDialog *dialog = GTK_FILE_DIALOG(native_sdk_new_open_dialog(opts));
     GtkWindow *parent = native_sdk_parent_window(host);
     native_sdk_file_dialog_state_t state = { .loop = g_main_loop_new(NULL, FALSE) };
     if (!state.loop) {
@@ -6789,7 +6793,7 @@ native_sdk_gtk_open_dialog_result_t native_sdk_gtk_show_open_dialog(native_sdk_g
 }
 
 size_t native_sdk_gtk_show_save_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_save_dialog_opts_t *opts, char *buffer, size_t buffer_len) {
-    GtkFileDialog *dialog = native_sdk_new_save_dialog(opts);
+    GtkFileDialog *dialog = GTK_FILE_DIALOG(native_sdk_new_save_dialog(opts));
     GtkWindow *parent = native_sdk_parent_window(host);
     native_sdk_file_dialog_state_t state = { .loop = g_main_loop_new(NULL, FALSE) };
     if (!state.loop) {
@@ -6835,7 +6839,7 @@ static void native_sdk_alert_done(GObject *source, GAsyncResult *result, gpointe
 }
 
 int native_sdk_gtk_show_message_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_message_dialog_opts_t *opts) {
-    GtkAlertDialog *dialog = native_sdk_new_alert_dialog(opts);
+    GtkAlertDialog *dialog = GTK_ALERT_DIALOG(native_sdk_new_alert_dialog(opts));
     native_sdk_alert_state_t state = { .loop = g_main_loop_new(NULL, FALSE), .response = 0 };
     if (state.loop) {
         gtk_alert_dialog_choose(dialog, native_sdk_parent_window(host), NULL, native_sdk_alert_done, &state);
@@ -6881,11 +6885,13 @@ static native_sdk_gtk_dialog_t *native_sdk_dialog_find(native_sdk_gtk_host_t *ho
 /* A dialog the app or a window close cancelled reports cancelled, like
  * one the user dismissed; anything else that went wrong is a failure. */
 static int native_sdk_dialog_error_outcome(const GError *error) {
+    if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) return NATIVE_SDK_GTK_DIALOG_CANCELLED;
+#if GTK_CHECK_VERSION(4, 10, 0)
     if (g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_DISMISSED) ||
-        g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_CANCELLED) ||
-        g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+        g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_CANCELLED)) {
         return NATIVE_SDK_GTK_DIALOG_CANCELLED;
     }
+#endif
     return NATIVE_SDK_GTK_DIALOG_FAILED;
 }
 
@@ -6920,9 +6926,12 @@ static void native_sdk_dialog_add_file(native_sdk_gtk_dialog_t *entry, GFile *fi
 static void native_sdk_dialog_files_done(GObject *source, GAsyncResult *result, gpointer data) {
     native_sdk_gtk_dialog_t *entry = data;
     GError *error = NULL;
-    GListModel *files = entry->folders
-        ? gtk_file_dialog_select_multiple_folders_finish(GTK_FILE_DIALOG(source), result, &error)
-        : gtk_file_dialog_open_multiple_finish(GTK_FILE_DIALOG(source), result, &error);
+    GListModel *files = NULL;
+    if (entry->folders) {
+        files = gtk_file_dialog_select_multiple_folders_finish(GTK_FILE_DIALOG(source), result, &error);
+    } else {
+        files = gtk_file_dialog_open_multiple_finish(GTK_FILE_DIALOG(source), result, &error);
+    }
     if (files) {
         guint count = g_list_model_get_n_items(files);
         for (guint i = 0; i < count; i++) {
@@ -6939,7 +6948,11 @@ static void native_sdk_dialog_files_done(GObject *source, GAsyncResult *result, 
 static void native_sdk_dialog_file_done(GObject *source, GAsyncResult *result, gpointer data) {
     native_sdk_gtk_dialog_t *entry = data;
     GError *error = NULL;
-    GFile *file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(source), result, &error);
+    /* Assigned rather than initialized, like `files` above: against an
+     * older GTK that keeps the diagnostic to the receipt's
+     * assignment-from-int shape (see the dialog builders). */
+    GFile *file = NULL;
+    file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(source), result, &error);
     if (file) {
         native_sdk_dialog_add_file(entry, file);
         g_object_unref(file);
@@ -7007,7 +7020,7 @@ int native_sdk_gtk_request_dialog(native_sdk_gtk_host_t *host, const native_sdk_
     host->dialogs = entry;
     switch (request->kind) {
         case NATIVE_SDK_GTK_DIALOG_OPEN: {
-            GtkFileDialog *dialog = native_sdk_new_open_dialog(request->open_opts);
+            GtkFileDialog *dialog = GTK_FILE_DIALOG(native_sdk_new_open_dialog(request->open_opts));
             entry->dialog = G_OBJECT(dialog);
             entry->folders = request->open_opts->allow_directories != 0;
             if (entry->folders) {
@@ -7018,13 +7031,13 @@ int native_sdk_gtk_request_dialog(native_sdk_gtk_host_t *host, const native_sdk_
             break;
         }
         case NATIVE_SDK_GTK_DIALOG_SAVE: {
-            GtkFileDialog *dialog = native_sdk_new_save_dialog(request->save_opts);
+            GtkFileDialog *dialog = GTK_FILE_DIALOG(native_sdk_new_save_dialog(request->save_opts));
             entry->dialog = G_OBJECT(dialog);
             gtk_file_dialog_save(dialog, parent, entry->cancellable, native_sdk_dialog_file_done, entry);
             break;
         }
         default: {
-            GtkAlertDialog *dialog = native_sdk_new_alert_dialog(request->message_opts);
+            GtkAlertDialog *dialog = GTK_ALERT_DIALOG(native_sdk_new_alert_dialog(request->message_opts));
             entry->dialog = G_OBJECT(dialog);
             gtk_alert_dialog_choose(dialog, parent, entry->cancellable, native_sdk_dialog_alert_done, entry);
             break;
