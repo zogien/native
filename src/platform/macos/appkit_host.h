@@ -844,6 +844,50 @@ int native_sdk_appkit_show_context_menu(native_sdk_appkit_host_t *host, uint64_t
 native_sdk_appkit_open_dialog_result_t native_sdk_appkit_show_open_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_open_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 size_t native_sdk_appkit_show_save_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_save_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 int native_sdk_appkit_show_message_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_message_dialog_opts_t *opts);
+
+/* Asynchronous dialogs. A request returns at once: with a visible parent
+ * window the dialog is a sheet on it, otherwise a modeless panel (or, for
+ * a message without any window, a modal alert started on the next loop
+ * turn). When a dialog finishes the host keeps its result and posts a
+ * wake; poll drains finished dialogs one at a time. Cancelling closes a
+ * presented dialog, which then finishes as cancelled. */
+enum {
+    NATIVE_SDK_APPKIT_DIALOG_OPEN = 0,
+    NATIVE_SDK_APPKIT_DIALOG_SAVE = 1,
+    NATIVE_SDK_APPKIT_DIALOG_MESSAGE = 2,
+};
+
+enum {
+    NATIVE_SDK_APPKIT_DIALOG_SELECTED = 0,
+    NATIVE_SDK_APPKIT_DIALOG_CANCELLED = 1,
+    NATIVE_SDK_APPKIT_DIALOG_FAILED = 2,
+};
+
+typedef struct {
+    uint64_t id;
+    /* 0 presents without a parent. */
+    uint64_t parent_window_id;
+    int kind;
+    const native_sdk_appkit_open_dialog_opts_t *open_opts;
+    const native_sdk_appkit_save_dialog_opts_t *save_opts;
+    const native_sdk_appkit_message_dialog_opts_t *message_opts;
+} native_sdk_appkit_dialog_request_t;
+
+typedef struct {
+    uint64_t id;
+    int outcome;
+    /* Message dialogs: 0 primary, 1 secondary, 2 tertiary. */
+    int button;
+    size_t count;
+    size_t bytes_written;
+} native_sdk_appkit_dialog_result_t;
+
+/* 1 when the dialog was accepted for presentation, 0 otherwise. */
+int native_sdk_appkit_request_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_dialog_request_t *request);
+void native_sdk_appkit_cancel_dialog(native_sdk_appkit_host_t *host, uint64_t id);
+/* 1 when a finished dialog was written to result (its newline-separated
+ * paths into buffer), 0 when none is waiting. */
+int native_sdk_appkit_poll_dialog_result(native_sdk_appkit_host_t *host, char *buffer, size_t buffer_len, native_sdk_appkit_dialog_result_t *result);
 void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len);
 void native_sdk_appkit_update_tray_shell(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, int visible, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len);
 void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t status_item_id, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);

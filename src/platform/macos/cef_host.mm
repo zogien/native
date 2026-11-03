@@ -3712,6 +3712,27 @@ int native_sdk_appkit_show_message_dialog(native_sdk_appkit_host_t *host, const 
     }
 }
 
+/* Asynchronous dialogs are not offered here: root.zig leaves them unbound
+ * for the Chromium engine, so the runtime shows the blocking ones above. */
+int native_sdk_appkit_request_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_dialog_request_t *request) {
+    (void)host;
+    (void)request;
+    return 0;
+}
+
+void native_sdk_appkit_cancel_dialog(native_sdk_appkit_host_t *host, uint64_t id) {
+    (void)host;
+    (void)id;
+}
+
+int native_sdk_appkit_poll_dialog_result(native_sdk_appkit_host_t *host, char *buffer, size_t buffer_len, native_sdk_appkit_dialog_result_t *result) {
+    (void)host;
+    (void)buffer;
+    (void)buffer_len;
+    (void)result;
+    return 0;
+}
+
 static NSImage *NativeSdkCefTrayImageWithOpacity(NSImage *source, double opacity) {
     if (!source) return nil;
     const CGFloat fraction = MAX(0.0, MIN(1.0, opacity));
