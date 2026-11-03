@@ -396,6 +396,26 @@ typedef struct native_sdk_gtk_notification_action {
 
 static const char native_sdk_notification_action_name[] = "native-sdk-notification-action";
 
+/* One asynchronous dialog (native_sdk_gtk_request_dialog), from request
+ * until poll takes its result. GTK holds it as the finish callback's
+ * data; once native_sdk_gtk_destroy detaches it (host NULL) the callback
+ * only frees it. */
+typedef struct native_sdk_gtk_dialog {
+    struct native_sdk_gtk_dialog *next;
+    native_sdk_gtk_host_t *host;
+    uint64_t id;
+    uint64_t parent_window_id;
+    int kind;
+    int folders;
+    GObject *dialog;
+    GCancellable *cancellable;
+    int finished;
+    uint64_t finish_serial;
+    int outcome;
+    int button;
+    GPtrArray *paths;
+} native_sdk_gtk_dialog_t;
+
 struct native_sdk_gtk_host {
     GtkApplication *app;
     /* Display providers are global and the display retains them until
@@ -476,6 +496,14 @@ struct native_sdk_gtk_host {
     GHashTable *notification_actions;
     GHashTable *notification_action_tokens_by_id;
     native_sdk_gtk_audio_t audio;
+    /* Asynchronous dialogs not yet polled, newest first; finished ones
+     * are handed back in finish order. */
+    native_sdk_gtk_dialog_t *dialogs;
+    uint64_t dialog_finish_serial;
+    /* The queued wake that hands finished dialogs to the runtime, tracked
+     * like stop_idle_source: finishes coalesce into it, and destroy
+     * removes it so it never fires into a freed host. */
+    guint dialog_wake_source;
 };
 
 static void native_sdk_emit(native_sdk_gtk_host_t *host, native_sdk_gtk_event_t event);
@@ -483,6 +511,8 @@ static void native_sdk_context_menu_free(native_sdk_gtk_context_menu_t *menu);
 static gboolean native_sdk_nudge_chrome_requery(gpointer data);
 static gboolean native_sdk_on_file_drop(GtkDropTarget *target, const GValue *value, double x, double y, gpointer data);
 static GtkWindow *native_sdk_parent_window(native_sdk_gtk_host_t *host);
+static void native_sdk_cancel_dialogs_for_window(native_sdk_gtk_host_t *host, uint64_t window_id);
+static void native_sdk_detach_dialogs(native_sdk_gtk_host_t *host);
 static const char *native_sdk_shortcut_key_for_keyval(guint keyval, char *buffer, size_t buffer_len, int *uses_implicit_shift);
 static void native_sdk_audio_release(native_sdk_gtk_host_t *host, int cancel_download);
 
@@ -2781,6 +2811,7 @@ static gboolean on_close_request(GtkWindow *window, gpointer data) {
     (void)window;
     native_sdk_gtk_window_t *win = data;
     native_sdk_gtk_host_t *host = win->host;
+    native_sdk_cancel_dialogs_for_window(host, win->id);
     int closed_index = -1;
     for (int i = 0; i < host->window_count; i++) {
         if (&host->windows[i] == win) {
@@ -3479,6 +3510,8 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
     /* Retire the audio pipeline (and cancel its cache download) before
      * anything else goes away; everything runs on this thread. */
     native_sdk_audio_release(host, 1);
+    native_sdk_detach_dialogs(host);
+    if (host->dialog_wake_source) g_source_remove(host->dialog_wake_source);
     if (host->frame_timer) g_source_remove(host->frame_timer);
     /* A stop turn still queued at teardown (the loop quit before the
      * idle ran) must not fire into freed memory. */
@@ -6642,6 +6675,49 @@ static char *native_sdk_bytes_to_string(const char *bytes, size_t len) {
     return bytes && len > 0 ? native_sdk_strndup(bytes, len) : NULL;
 }
 
+static GtkFileDialog *native_sdk_new_open_dialog(const native_sdk_gtk_open_dialog_opts_t *opts) {
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
+    if (title) gtk_file_dialog_set_title(dialog, title);
+    free(title);
+    return dialog;
+}
+
+static GtkFileDialog *native_sdk_new_save_dialog(const native_sdk_gtk_save_dialog_opts_t *opts) {
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
+    char *default_name = native_sdk_bytes_to_string(opts->default_name, opts->default_name_len);
+    if (title) gtk_file_dialog_set_title(dialog, title);
+    if (default_name) gtk_file_dialog_set_initial_name(dialog, default_name);
+    free(title);
+    free(default_name);
+    return dialog;
+}
+
+static GtkAlertDialog *native_sdk_new_alert_dialog(const native_sdk_gtk_message_dialog_opts_t *opts) {
+    /* The constructor requires a non-NULL printf-style format string. */
+    GtkAlertDialog *dialog = gtk_alert_dialog_new("");
+    char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
+    char *message = native_sdk_bytes_to_string(opts->message, opts->message_len);
+    char *informative = native_sdk_bytes_to_string(opts->informative_text, opts->informative_text_len);
+    char *primary = native_sdk_bytes_to_string(opts->primary_button, opts->primary_button_len);
+    char *secondary = native_sdk_bytes_to_string(opts->secondary_button, opts->secondary_button_len);
+    char *tertiary = native_sdk_bytes_to_string(opts->tertiary_button, opts->tertiary_button_len);
+    gtk_alert_dialog_set_message(dialog, title ? title : (message ? message : ""));
+    if (informative || (title && message)) gtk_alert_dialog_set_detail(dialog, informative ? informative : message);
+    const char *buttons[4] = { primary ? primary : "OK", NULL, NULL, NULL };
+    if (secondary) buttons[1] = secondary;
+    if (tertiary) buttons[2] = tertiary;
+    gtk_alert_dialog_set_buttons(dialog, buttons);
+    free(title);
+    free(message);
+    free(informative);
+    free(primary);
+    free(secondary);
+    free(tertiary);
+    return dialog;
+}
+
 static void native_sdk_open_dialog_done(GObject *source, GAsyncResult *result, gpointer data) {
     native_sdk_file_dialog_state_t *state = data;
     GError *error = NULL;
@@ -6668,13 +6744,10 @@ static void native_sdk_save_dialog_done(GObject *source, GAsyncResult *result, g
 
 native_sdk_gtk_open_dialog_result_t native_sdk_gtk_show_open_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_open_dialog_opts_t *opts, char *buffer, size_t buffer_len) {
     native_sdk_gtk_open_dialog_result_t result = {0};
-    GtkFileDialog *dialog = gtk_file_dialog_new();
-    char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
-    if (title) gtk_file_dialog_set_title(dialog, title);
+    GtkFileDialog *dialog = native_sdk_new_open_dialog(opts);
     GtkWindow *parent = native_sdk_parent_window(host);
     native_sdk_file_dialog_state_t state = { .loop = g_main_loop_new(NULL, FALSE) };
     if (!state.loop) {
-        if (title) free(title);
         g_object_unref(dialog);
         return result;
     }
@@ -6711,22 +6784,15 @@ native_sdk_gtk_open_dialog_result_t native_sdk_gtk_show_open_dialog(native_sdk_g
         result.bytes_written = overflow ? native_sdk_overflow_size(buffer_len) : offset;
         g_object_unref(state.files);
     }
-    if (title) free(title);
     g_object_unref(dialog);
     return result;
 }
 
 size_t native_sdk_gtk_show_save_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_save_dialog_opts_t *opts, char *buffer, size_t buffer_len) {
-    GtkFileDialog *dialog = gtk_file_dialog_new();
-    char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
-    char *default_name = native_sdk_bytes_to_string(opts->default_name, opts->default_name_len);
-    if (title) gtk_file_dialog_set_title(dialog, title);
-    if (default_name) gtk_file_dialog_set_initial_name(dialog, default_name);
+    GtkFileDialog *dialog = native_sdk_new_save_dialog(opts);
     GtkWindow *parent = native_sdk_parent_window(host);
     native_sdk_file_dialog_state_t state = { .loop = g_main_loop_new(NULL, FALSE) };
     if (!state.loop) {
-        if (title) free(title);
-        if (default_name) free(default_name);
         g_object_unref(dialog);
         return 0;
     }
@@ -6748,8 +6814,6 @@ size_t native_sdk_gtk_show_save_dialog(native_sdk_gtk_host_t *host, const native
         }
         g_object_unref(state.file);
     }
-    if (title) free(title);
-    if (default_name) free(default_name);
     g_object_unref(dialog);
     return written;
 }
@@ -6771,34 +6835,240 @@ static void native_sdk_alert_done(GObject *source, GAsyncResult *result, gpointe
 }
 
 int native_sdk_gtk_show_message_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_message_dialog_opts_t *opts) {
-    /* The constructor requires a non-NULL printf-style format string. */
-    GtkAlertDialog *dialog = gtk_alert_dialog_new("");
-    char *title = native_sdk_bytes_to_string(opts->title, opts->title_len);
-    char *message = native_sdk_bytes_to_string(opts->message, opts->message_len);
-    char *informative = native_sdk_bytes_to_string(opts->informative_text, opts->informative_text_len);
-    char *primary = native_sdk_bytes_to_string(opts->primary_button, opts->primary_button_len);
-    char *secondary = native_sdk_bytes_to_string(opts->secondary_button, opts->secondary_button_len);
-    char *tertiary = native_sdk_bytes_to_string(opts->tertiary_button, opts->tertiary_button_len);
-    gtk_alert_dialog_set_message(dialog, title ? title : (message ? message : ""));
-    if (informative || (title && message)) gtk_alert_dialog_set_detail(dialog, informative ? informative : message);
-    const char *buttons[4] = { primary ? primary : "OK", NULL, NULL, NULL };
-    if (secondary) buttons[1] = secondary;
-    if (tertiary) buttons[2] = tertiary;
-    gtk_alert_dialog_set_buttons(dialog, buttons);
+    GtkAlertDialog *dialog = native_sdk_new_alert_dialog(opts);
     native_sdk_alert_state_t state = { .loop = g_main_loop_new(NULL, FALSE), .response = 0 };
     if (state.loop) {
         gtk_alert_dialog_choose(dialog, native_sdk_parent_window(host), NULL, native_sdk_alert_done, &state);
         g_main_loop_run(state.loop);
         g_main_loop_unref(state.loop);
     }
-    if (title) free(title);
-    if (message) free(message);
-    if (informative) free(informative);
-    if (primary) free(primary);
-    if (secondary) free(secondary);
-    if (tertiary) free(tertiary);
     g_object_unref(dialog);
     if (state.response <= 0) return 0;
     if (state.response == 1) return 1;
     return 2;
+}
+
+/* GTK's dialogs are asynchronous already; the blocking calls above only
+ * wrap them in a nested loop. The asynchronous ones drop that loop: the
+ * finish callback records the result and schedules a wake, and the
+ * runtime collects it with poll. The callback never emits, because GTask
+ * may run it inside the dispatch that cancelled the dialog. */
+
+static void native_sdk_dialog_free(native_sdk_gtk_dialog_t *entry) {
+    if (entry->dialog) g_object_unref(entry->dialog);
+    if (entry->cancellable) g_object_unref(entry->cancellable);
+    if (entry->paths) g_ptr_array_unref(entry->paths);
+    free(entry);
+}
+
+static void native_sdk_dialog_unlink(native_sdk_gtk_host_t *host, native_sdk_gtk_dialog_t *entry) {
+    for (native_sdk_gtk_dialog_t **link = &host->dialogs; *link; link = &(*link)->next) {
+        if (*link == entry) {
+            *link = entry->next;
+            entry->next = NULL;
+            return;
+        }
+    }
+}
+
+static native_sdk_gtk_dialog_t *native_sdk_dialog_find(native_sdk_gtk_host_t *host, uint64_t id) {
+    for (native_sdk_gtk_dialog_t *entry = host->dialogs; entry; entry = entry->next) {
+        if (entry->id == id) return entry;
+    }
+    return NULL;
+}
+
+/* A dialog the app or a window close cancelled reports cancelled, like
+ * one the user dismissed; anything else that went wrong is a failure. */
+static int native_sdk_dialog_error_outcome(const GError *error) {
+    if (g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_DISMISSED) ||
+        g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_CANCELLED) ||
+        g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+        return NATIVE_SDK_GTK_DIALOG_CANCELLED;
+    }
+    return NATIVE_SDK_GTK_DIALOG_FAILED;
+}
+
+static gboolean native_sdk_dialog_wake_idle(gpointer data) {
+    native_sdk_gtk_host_t *host = data;
+    host->dialog_wake_source = 0;
+    if (!host->did_shutdown) native_sdk_emit(host, (native_sdk_gtk_event_t){ .kind = NATIVE_SDK_GTK_EVENT_WAKE });
+    return G_SOURCE_REMOVE;
+}
+
+static void native_sdk_dialog_finish(native_sdk_gtk_dialog_t *entry, GError *error) {
+    if (error) {
+        entry->outcome = native_sdk_dialog_error_outcome(error);
+        g_error_free(error);
+    }
+    native_sdk_gtk_host_t *host = entry->host;
+    if (!host) {
+        /* The host went first (native_sdk_gtk_destroy detached this). */
+        native_sdk_dialog_free(entry);
+        return;
+    }
+    entry->finished = 1;
+    entry->finish_serial = ++host->dialog_finish_serial;
+    if (!host->dialog_wake_source) host->dialog_wake_source = g_idle_add(native_sdk_dialog_wake_idle, host);
+}
+
+static void native_sdk_dialog_add_file(native_sdk_gtk_dialog_t *entry, GFile *file) {
+    char *path = file ? g_file_get_path(file) : NULL;
+    if (path) g_ptr_array_add(entry->paths, path);
+}
+
+static void native_sdk_dialog_files_done(GObject *source, GAsyncResult *result, gpointer data) {
+    native_sdk_gtk_dialog_t *entry = data;
+    GError *error = NULL;
+    GListModel *files = entry->folders
+        ? gtk_file_dialog_select_multiple_folders_finish(GTK_FILE_DIALOG(source), result, &error)
+        : gtk_file_dialog_open_multiple_finish(GTK_FILE_DIALOG(source), result, &error);
+    if (files) {
+        guint count = g_list_model_get_n_items(files);
+        for (guint i = 0; i < count; i++) {
+            GFile *file = G_FILE(g_list_model_get_item(files, i));
+            native_sdk_dialog_add_file(entry, file);
+            g_object_unref(file);
+        }
+        g_object_unref(files);
+    }
+    if (!error) entry->outcome = entry->paths->len > 0 ? NATIVE_SDK_GTK_DIALOG_SELECTED : NATIVE_SDK_GTK_DIALOG_CANCELLED;
+    native_sdk_dialog_finish(entry, error);
+}
+
+static void native_sdk_dialog_file_done(GObject *source, GAsyncResult *result, gpointer data) {
+    native_sdk_gtk_dialog_t *entry = data;
+    GError *error = NULL;
+    GFile *file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(source), result, &error);
+    if (file) {
+        native_sdk_dialog_add_file(entry, file);
+        g_object_unref(file);
+    }
+    if (!error) entry->outcome = entry->paths->len > 0 ? NATIVE_SDK_GTK_DIALOG_SELECTED : NATIVE_SDK_GTK_DIALOG_CANCELLED;
+    native_sdk_dialog_finish(entry, error);
+}
+
+static void native_sdk_dialog_alert_done(GObject *source, GAsyncResult *result, gpointer data) {
+    native_sdk_gtk_dialog_t *entry = data;
+    GError *error = NULL;
+    const int response = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, &error);
+    if (!error) {
+        entry->outcome = NATIVE_SDK_GTK_DIALOG_SELECTED;
+        entry->button = response > 2 ? 2 : (response < 0 ? 0 : response);
+    }
+    native_sdk_dialog_finish(entry, error);
+}
+
+/* A closing window takes its dialogs down with it. */
+static void native_sdk_cancel_dialogs_for_window(native_sdk_gtk_host_t *host, uint64_t window_id) {
+    for (native_sdk_gtk_dialog_t *entry = host->dialogs; entry; entry = entry->next) {
+        if (!entry->finished && entry->parent_window_id == window_id) g_cancellable_cancel(entry->cancellable);
+    }
+}
+
+/* Host teardown: finished results are dropped, and open dialogs are
+ * cancelled and left to free themselves when GTK reports them. */
+static void native_sdk_detach_dialogs(native_sdk_gtk_host_t *host) {
+    while (host->dialogs) {
+        native_sdk_gtk_dialog_t *entry = host->dialogs;
+        host->dialogs = entry->next;
+        entry->next = NULL;
+        if (entry->finished) {
+            native_sdk_dialog_free(entry);
+            continue;
+        }
+        entry->host = NULL;
+        /* Last touch: the callback may run, and free entry, right here. */
+        g_cancellable_cancel(entry->cancellable);
+    }
+}
+
+int native_sdk_gtk_request_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_dialog_request_t *request) {
+    if (!host || !request || request->id == 0 || host->did_shutdown) return 0;
+    if (native_sdk_dialog_find(host, request->id)) return 0;
+    if ((request->kind == NATIVE_SDK_GTK_DIALOG_OPEN && !request->open_opts) ||
+        (request->kind == NATIVE_SDK_GTK_DIALOG_SAVE && !request->save_opts) ||
+        (request->kind == NATIVE_SDK_GTK_DIALOG_MESSAGE && !request->message_opts) ||
+        request->kind < NATIVE_SDK_GTK_DIALOG_OPEN || request->kind > NATIVE_SDK_GTK_DIALOG_MESSAGE) {
+        return 0;
+    }
+    native_sdk_gtk_dialog_t *entry = calloc(1, sizeof(*entry));
+    if (!entry) return 0;
+    entry->host = host;
+    entry->id = request->id;
+    entry->kind = request->kind;
+    entry->outcome = NATIVE_SDK_GTK_DIALOG_CANCELLED;
+    entry->cancellable = g_cancellable_new();
+    entry->paths = g_ptr_array_new_with_free_func(g_free);
+    native_sdk_gtk_window_t *win = request->parent_window_id != 0 ? native_sdk_find_window(host, request->parent_window_id) : NULL;
+    GtkWindow *parent = win ? win->gtk_window : NULL;
+    if (parent) entry->parent_window_id = request->parent_window_id;
+    entry->next = host->dialogs;
+    host->dialogs = entry;
+    switch (request->kind) {
+        case NATIVE_SDK_GTK_DIALOG_OPEN: {
+            GtkFileDialog *dialog = native_sdk_new_open_dialog(request->open_opts);
+            entry->dialog = G_OBJECT(dialog);
+            entry->folders = request->open_opts->allow_directories != 0;
+            if (entry->folders) {
+                gtk_file_dialog_select_multiple_folders(dialog, parent, entry->cancellable, native_sdk_dialog_files_done, entry);
+            } else {
+                gtk_file_dialog_open_multiple(dialog, parent, entry->cancellable, native_sdk_dialog_files_done, entry);
+            }
+            break;
+        }
+        case NATIVE_SDK_GTK_DIALOG_SAVE: {
+            GtkFileDialog *dialog = native_sdk_new_save_dialog(request->save_opts);
+            entry->dialog = G_OBJECT(dialog);
+            gtk_file_dialog_save(dialog, parent, entry->cancellable, native_sdk_dialog_file_done, entry);
+            break;
+        }
+        default: {
+            GtkAlertDialog *dialog = native_sdk_new_alert_dialog(request->message_opts);
+            entry->dialog = G_OBJECT(dialog);
+            gtk_alert_dialog_choose(dialog, parent, entry->cancellable, native_sdk_dialog_alert_done, entry);
+            break;
+        }
+    }
+    return 1;
+}
+
+void native_sdk_gtk_cancel_dialog(native_sdk_gtk_host_t *host, uint64_t id) {
+    if (!host) return;
+    native_sdk_gtk_dialog_t *entry = native_sdk_dialog_find(host, id);
+    if (entry && !entry->finished) g_cancellable_cancel(entry->cancellable);
+}
+
+int native_sdk_gtk_poll_dialog_result(native_sdk_gtk_host_t *host, char *buffer, size_t buffer_len, native_sdk_gtk_dialog_result_t *result) {
+    if (!host || !result) return 0;
+    native_sdk_gtk_dialog_t *oldest = NULL;
+    for (native_sdk_gtk_dialog_t *entry = host->dialogs; entry; entry = entry->next) {
+        if (entry->finished && (!oldest || entry->finish_serial < oldest->finish_serial)) oldest = entry;
+    }
+    if (!oldest) return 0;
+    native_sdk_dialog_unlink(host, oldest);
+    *result = (native_sdk_gtk_dialog_result_t){ .id = oldest->id, .outcome = oldest->outcome, .button = oldest->button };
+    size_t offset = 0;
+    size_t count = 0;
+    for (guint i = 0; i < oldest->paths->len; i++) {
+        const char *path = g_ptr_array_index(oldest->paths, i);
+        const size_t len = strlen(path);
+        const size_t needed = len + (count > 0 ? 1 : 0);
+        if (!buffer || needed > buffer_len - offset) {
+            /* More paths than the runtime holds: a failure, not a
+             * silently shortened selection. */
+            result->outcome = NATIVE_SDK_GTK_DIALOG_FAILED;
+            offset = 0;
+            count = 0;
+            break;
+        }
+        if (count > 0) buffer[offset++] = '\n';
+        memcpy(buffer + offset, path, len);
+        offset += len;
+        count++;
+    }
+    result->count = count;
+    result->bytes_written = offset;
+    native_sdk_dialog_free(oldest);
+    return 1;
 }

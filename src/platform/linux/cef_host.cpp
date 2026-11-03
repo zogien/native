@@ -610,4 +610,26 @@ int native_sdk_gtk_show_message_dialog(Host *host, const void *opts) {
     return 0;
 }
 
+/* Asynchronous dialogs are not offered here: root.zig leaves them unbound
+ * for the Chromium engine, so the runtime falls back to the blocking
+ * calls above. */
+int native_sdk_gtk_request_dialog(Host *host, const void *request) {
+    (void)host;
+    (void)request;
+    return 0;
+}
+
+void native_sdk_gtk_cancel_dialog(Host *host, uint64_t id) {
+    (void)host;
+    (void)id;
+}
+
+int native_sdk_gtk_poll_dialog_result(Host *host, char *buffer, size_t buffer_len, void *result) {
+    (void)host;
+    (void)buffer;
+    (void)buffer_len;
+    (void)result;
+    return 0;
+}
+
 }

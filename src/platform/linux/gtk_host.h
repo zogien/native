@@ -156,6 +156,38 @@ typedef struct {
     size_t tertiary_button_len;
 } native_sdk_gtk_message_dialog_opts_t;
 
+enum {
+    NATIVE_SDK_GTK_DIALOG_OPEN = 0,
+    NATIVE_SDK_GTK_DIALOG_SAVE = 1,
+    NATIVE_SDK_GTK_DIALOG_MESSAGE = 2,
+};
+
+enum {
+    NATIVE_SDK_GTK_DIALOG_SELECTED = 0,
+    NATIVE_SDK_GTK_DIALOG_CANCELLED = 1,
+    NATIVE_SDK_GTK_DIALOG_FAILED = 2,
+};
+
+/* An asynchronous dialog request (native_sdk_gtk_request_dialog): kind
+ * picks which of the option pointers is set. */
+typedef struct {
+    uint64_t id;
+    uint64_t parent_window_id;
+    int kind;
+    const native_sdk_gtk_open_dialog_opts_t *open_opts;
+    const native_sdk_gtk_save_dialog_opts_t *save_opts;
+    const native_sdk_gtk_message_dialog_opts_t *message_opts;
+} native_sdk_gtk_dialog_request_t;
+
+/* A finished asynchronous dialog; paths are newline-joined. */
+typedef struct {
+    uint64_t id;
+    int outcome;
+    int button;
+    size_t count;
+    size_t bytes_written;
+} native_sdk_gtk_dialog_result_t;
+
 /* resizable/titlebar_style/min_width/min_height mirror the AppKit host's
  * window options: titlebar_style 0 = standard decorations, 1 =
  * hidden_inset, 2 = hidden_inset_tall (the hidden styles create the
@@ -287,6 +319,11 @@ int native_sdk_gtk_clipboard_write_data(native_sdk_gtk_host_t *host, const char 
 native_sdk_gtk_open_dialog_result_t native_sdk_gtk_show_open_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_open_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 size_t native_sdk_gtk_show_save_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_save_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 int native_sdk_gtk_show_message_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_message_dialog_opts_t *opts);
+/* Show a dialog without a nested loop: it returns at once, and the
+ * result waits for poll after a wake. Returns 0 when nothing was shown. */
+int native_sdk_gtk_request_dialog(native_sdk_gtk_host_t *host, const native_sdk_gtk_dialog_request_t *request);
+void native_sdk_gtk_cancel_dialog(native_sdk_gtk_host_t *host, uint64_t id);
+int native_sdk_gtk_poll_dialog_result(native_sdk_gtk_host_t *host, char *buffer, size_t buffer_len, native_sdk_gtk_dialog_result_t *result);
 
 #ifdef __cplusplus
 }
