@@ -1454,6 +1454,56 @@ pub const MessageDialogOptions = struct {
     tertiary_button: []const u8 = "",
 };
 
+/// Identifies one asynchronous dialog (`PlatformServices.requestDialog`).
+/// The runtime allocates ids; zero is never used.
+pub const DialogRequestId = u64;
+
+pub const DialogKind = enum(u8) {
+    open,
+    save,
+    message,
+};
+
+pub const DialogOptions = union(DialogKind) {
+    open: OpenDialogOptions,
+    save: SaveDialogOptions,
+    message: MessageDialogOptions,
+};
+
+/// One dialog the runtime asks the platform to present without blocking.
+/// Strings borrow runtime storage only for the duration of the call; a
+/// platform that presents later copies what it keeps.
+pub const DialogRequest = struct {
+    id: DialogRequestId,
+    /// The window the dialog belongs to (a macOS sheet, a Windows owner, a
+    /// GTK transient parent). Null presents it without a parent.
+    parent_window_id: ?WindowId = null,
+    options: DialogOptions,
+};
+
+pub const DialogOutcome = enum(u8) {
+    /// Open and save: the user chose `paths`. Message: the user pressed
+    /// `button`.
+    selected,
+    /// Closed without a choice: the user cancelled or dismissed it, or it
+    /// was closed for them (its window closed, the request was cancelled,
+    /// the session is ending).
+    cancelled,
+    /// The platform could not present the dialog.
+    failed,
+};
+
+pub const DialogResult = struct {
+    id: DialogRequestId,
+    outcome: DialogOutcome,
+    /// Open: `count` newline-separated paths. Save: one path. Empty
+    /// otherwise.
+    paths: []const u8 = "",
+    count: usize = 0,
+    /// Message dialogs reporting `.selected`.
+    button: MessageDialogResult = .primary,
+};
+
 pub const NotificationOptions = struct {
     /// Stable host identity. Reissuing a non-empty id replaces the
     /// notification with that id and its action binding.
@@ -2820,6 +2870,18 @@ pub const PlatformServices = struct {
     show_open_dialog_fn: ?*const fn (context: ?*anyopaque, options: OpenDialogOptions, buffer: []u8) anyerror!OpenDialogResult = null,
     show_save_dialog_fn: ?*const fn (context: ?*anyopaque, options: SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 = null,
     show_message_dialog_fn: ?*const fn (context: ?*anyopaque, options: MessageDialogOptions) anyerror!MessageDialogResult = null,
+    /// Asynchronous dialogs. `request_dialog_fn` returns promptly and
+    /// never runs a nested event loop on the caller's stack: the platform
+    /// presents the dialog on its own schedule, and when it finishes it
+    /// keeps the result and posts a wake (`wake_fn`). The runtime drains
+    /// finished dialogs with `poll_dialog_result_fn`, whose result paths
+    /// borrow `buffer`. `cancel_dialog_fn` closes a presented dialog,
+    /// which then finishes as `.cancelled`; unknown ids are a no-op.
+    /// Platforms without these keep the synchronous `show_*_dialog_fn`
+    /// family, which the runtime falls back to.
+    request_dialog_fn: ?*const fn (context: ?*anyopaque, request: DialogRequest) anyerror!void = null,
+    cancel_dialog_fn: ?*const fn (context: ?*anyopaque, id: DialogRequestId) void = null,
+    poll_dialog_result_fn: ?*const fn (context: ?*anyopaque, buffer: []u8) ?DialogResult = null,
     show_notification_fn: ?*const fn (context: ?*anyopaque, options: NotificationOptions) anyerror!void = null,
     set_credential_fn: ?*const fn (context: ?*anyopaque, credential: Credential) anyerror!void = null,
     get_credential_fn: ?*const fn (context: ?*anyopaque, key: CredentialKey, buffer: []u8) anyerror![]const u8 = null,
@@ -3375,6 +3437,25 @@ pub const PlatformServices = struct {
     pub fn showMessageDialog(self: PlatformServices, options: MessageDialogOptions) anyerror!MessageDialogResult {
         const msg_fn = self.show_message_dialog_fn orelse return error.UnsupportedService;
         return msg_fn(self.context, options);
+    }
+
+    pub fn supportsAsyncDialogs(self: PlatformServices) bool {
+        return self.request_dialog_fn != null and self.poll_dialog_result_fn != null;
+    }
+
+    pub fn requestDialog(self: PlatformServices, request: DialogRequest) anyerror!void {
+        const request_fn = self.request_dialog_fn orelse return error.UnsupportedService;
+        return request_fn(self.context, request);
+    }
+
+    pub fn cancelDialog(self: PlatformServices, id: DialogRequestId) void {
+        const cancel_fn = self.cancel_dialog_fn orelse return;
+        cancel_fn(self.context, id);
+    }
+
+    pub fn pollDialogResult(self: PlatformServices, buffer: []u8) ?DialogResult {
+        const poll_fn = self.poll_dialog_result_fn orelse return null;
+        return poll_fn(self.context, buffer);
     }
 
     pub fn showNotification(self: PlatformServices, options: NotificationOptions) anyerror!void {

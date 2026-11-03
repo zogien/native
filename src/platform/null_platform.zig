@@ -117,8 +117,36 @@ const SaveDialogOptions = types.SaveDialogOptions;
 const MessageDialogStyle = types.MessageDialogStyle;
 const MessageDialogResult = types.MessageDialogResult;
 const MessageDialogOptions = types.MessageDialogOptions;
+const DialogRequestId = types.DialogRequestId;
+const DialogKind = types.DialogKind;
+const DialogRequest = types.DialogRequest;
+const DialogOutcome = types.DialogOutcome;
+const DialogResult = types.DialogResult;
 const NotificationOptions = types.NotificationOptions;
 const CredentialKey = types.CredentialKey;
+
+const max_null_dialogs = 16;
+
+/// One asynchronous dialog the null platform was asked to present.
+pub const NullDialog = struct {
+    state: enum { free, presented, finished } = .free,
+    id: DialogRequestId = 0,
+    kind: DialogKind = .open,
+    parent_window_id: ?WindowId = null,
+    /// Request order, so `pollDialogResult` reports finishes in order.
+    finished_order: u64 = 0,
+    outcome: DialogOutcome = .cancelled,
+    button: MessageDialogResult = .primary,
+    count: usize = 0,
+    paths: [512]u8 = undefined,
+    paths_len: usize = 0,
+    title: [128]u8 = undefined,
+    title_len: usize = 0,
+
+    pub fn titleText(self: *const NullDialog) []const u8 {
+        return self.title[0..self.title_len];
+    }
+};
 const Credential = types.Credential;
 const LocalTimeStyle = types.LocalTimeStyle;
 const StatusItemId = types.StatusItemId;
@@ -527,6 +555,17 @@ pub const NullPlatform = struct {
     save_dialog_count: usize = 0,
     message_dialog_count: usize = 0,
     message_dialog_result: MessageDialogResult = .primary,
+    /// Asynchronous dialogs, once a test opts in (`useAsyncDialogs`):
+    /// requests the runtime made, in order, and the results tests finished
+    /// them with. Nothing finishes on its own; a test calls `finishDialog`
+    /// (or the runtime cancels), which posts a wake like a real host.
+    dialogs: [max_null_dialogs]NullDialog = [_]NullDialog{.{}} ** max_null_dialogs,
+    dialog_request_count: usize = 0,
+    dialog_cancel_count: usize = 0,
+    dialog_finish_sequence: u64 = 0,
+    /// The next `requestDialog` fails, modelling a host that cannot
+    /// present.
+    fail_next_dialog_request: bool = false,
     notification_title: [max_notification_title_bytes]u8 = undefined,
     notification_title_len: usize = 0,
     notification_subtitle: [max_notification_subtitle_bytes]u8 = undefined,
@@ -1648,6 +1687,103 @@ pub const NullPlatform = struct {
         _ = options;
         self.message_dialog_count += 1;
         return self.message_dialog_result;
+    }
+
+    /// Route `services` (this platform's, as the runtime holds them) through
+    /// the asynchronous dialog services. Opt-in: by default the null
+    /// platform answers the blocking dialog calls at once, which app tests
+    /// rely on, and its asynchronous dialogs never finish on their own.
+    pub fn useAsyncDialogs(self: *NullPlatform, services: *PlatformServices) void {
+        std.debug.assert(services.context == @as(?*anyopaque, @ptrCast(self)));
+        services.request_dialog_fn = requestDialog;
+        services.cancel_dialog_fn = cancelDialog;
+        services.poll_dialog_result_fn = pollDialogResult;
+    }
+
+    fn requestDialog(context: ?*anyopaque, request: DialogRequest) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.fail_next_dialog_request) {
+            self.fail_next_dialog_request = false;
+            return error.DialogUnavailable;
+        }
+        const slot = for (&self.dialogs) |*dialog| {
+            if (dialog.state == .free) break dialog;
+        } else return error.DialogUnavailable;
+        const title = switch (request.options) {
+            .open => |open| open.title,
+            .save => |save| save.title,
+            .message => |message| if (message.title.len > 0) message.title else message.message,
+        };
+        slot.* = .{ .state = .presented, .id = request.id, .kind = request.options, .parent_window_id = request.parent_window_id };
+        slot.title_len = @min(title.len, slot.title.len);
+        @memcpy(slot.title[0..slot.title_len], title[0..slot.title_len]);
+        self.dialog_request_count += 1;
+    }
+
+    fn cancelDialog(context: ?*anyopaque, id: DialogRequestId) void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const dialog = self.presentedDialog(id) orelse return;
+        self.dialog_cancel_count += 1;
+        self.markDialogFinished(dialog, .cancelled);
+    }
+
+    fn pollDialogResult(context: ?*anyopaque, buffer: []u8) ?DialogResult {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        var next: ?*NullDialog = null;
+        for (&self.dialogs) |*dialog| {
+            if (dialog.state != .finished) continue;
+            if (next == null or dialog.finished_order < next.?.finished_order) next = dialog;
+        }
+        const dialog = next orelse return null;
+        const len = @min(dialog.paths_len, buffer.len);
+        @memcpy(buffer[0..len], dialog.paths[0..len]);
+        const result: DialogResult = .{ .id = dialog.id, .outcome = dialog.outcome, .paths = buffer[0..len], .count = dialog.count, .button = dialog.button };
+        dialog.* = .{};
+        return result;
+    }
+
+    fn presentedDialog(self: *NullPlatform, id: DialogRequestId) ?*NullDialog {
+        for (&self.dialogs) |*dialog| {
+            if (dialog.state == .presented and dialog.id == id) return dialog;
+        }
+        return null;
+    }
+
+    fn markDialogFinished(self: *NullPlatform, dialog: *NullDialog, outcome: DialogOutcome) void {
+        dialog.state = .finished;
+        dialog.outcome = outcome;
+        dialog.finished_order = self.dialog_finish_sequence;
+        self.dialog_finish_sequence += 1;
+        _ = self.wake_count.fetchAdd(1, .release);
+    }
+
+    /// Test helper: how many dialogs are showing right now.
+    pub fn presentedDialogCount(self: *const NullPlatform) usize {
+        var count: usize = 0;
+        for (self.dialogs) |dialog| {
+            if (dialog.state == .presented) count += 1;
+        }
+        return count;
+    }
+
+    /// Test helper: the presented dialog with `id`, for inspecting its
+    /// kind, parent and title.
+    pub fn findPresentedDialog(self: *NullPlatform, id: DialogRequestId) ?*const NullDialog {
+        return self.presentedDialog(id);
+    }
+
+    /// Test helper: the user picked `paths` (newline-separated) in an
+    /// open or save dialog, or pressed `button` in a message dialog. Posts
+    /// the wake a real host would; `error.DialogNotPresented` names a
+    /// dialog that is not showing.
+    pub fn finishDialog(self: *NullPlatform, id: DialogRequestId, outcome: DialogOutcome, paths: []const u8, button: MessageDialogResult) error{ DialogNotPresented, NoSpaceLeft }!void {
+        const dialog = self.presentedDialog(id) orelse return error.DialogNotPresented;
+        if (paths.len > dialog.paths.len) return error.NoSpaceLeft;
+        @memcpy(dialog.paths[0..paths.len], paths);
+        dialog.paths_len = paths.len;
+        dialog.count = if (paths.len == 0) 0 else std.mem.count(u8, paths, "\n") + 1;
+        dialog.button = button;
+        self.markDialogFinished(dialog, outcome);
     }
 
     fn showNotification(context: ?*anyopaque, options: NotificationOptions) anyerror!void {

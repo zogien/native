@@ -30,6 +30,7 @@ const runtime_session_state = @import("session_state.zig");
 const session_journal = @import("session_journal.zig");
 const runtime_state = @import("state.zig");
 const runtime_system_services = @import("system_services.zig");
+const runtime_dialogs = @import("dialogs.zig");
 const runtime_builtin_bridge = @import("builtin_bridge.zig");
 const runtime_view = @import("view.zig");
 const runtime_window_views = @import("window_views.zig");
@@ -110,6 +111,10 @@ const FocusTraversalDirection = runtime_state.FocusTraversalDirection;
 const copySourceInto = runtime_state.copySourceInto;
 const sourceWebViewUrl = runtime_state.sourceWebViewUrl;
 const AsyncBridgeResponseSlot = runtime_async_bridge.AsyncBridgeResponseSlot(Runtime);
+pub const DialogCompletion = runtime_dialogs.Completion(Runtime);
+pub const DialogRequestOptions = runtime_dialogs.DialogRequestOptions;
+pub const max_dialog_requests = runtime_dialogs.max_dialog_requests;
+pub const max_dialog_tag_bytes = runtime_dialogs.max_dialog_tag_bytes;
 const platformCursorFromCanvas = widget_bridge.platformCursorFromCanvas;
 const widgetRoleName = widget_bridge.widgetRoleName;
 const platformWidgetAccessibilityRole = widget_bridge.platformWidgetAccessibilityRole;
@@ -351,6 +356,8 @@ pub const Runtime = struct {
     /// copy bound, so `initAt` assigns it explicitly.
     frame_profile: runtime_frame_profile.FrameProfile = .{},
     async_bridge_responses: [max_async_bridge_responses]AsyncBridgeResponseSlot = [_]AsyncBridgeResponseSlot{.{}} ** max_async_bridge_responses,
+    /// Asynchronous dialogs in flight (see `dialogs.zig`).
+    dialog_broker: runtime_dialogs.Broker(Runtime) = .{},
     automation_windows: [automation.snapshot.max_windows]automation.snapshot.Window = undefined,
     /// Snapshot-side storage for the frame profile's per-stage stats
     /// (the snapshot Input only references runtime-owned memory).
@@ -562,6 +569,9 @@ pub const Runtime = struct {
             item.title = "";
             item.item_count = 0;
         }
+        // The dialog broker's result buffer exceeds the copy bound too;
+        // reset its bookkeeping and leave the buffer alone.
+        self.dialog_broker.reset();
         self.started_timestamp_ns = timestampToU64(nowNanoseconds());
         self.text_measure_provider = if (options.platform.services.measure_text_fn) |measure_fn|
             .{
@@ -600,6 +610,7 @@ pub const Runtime = struct {
     /// host) call it to return the storage.
     pub fn deinit(self: *Runtime) void {
         self.disarmMediaSurfaceWakes();
+        self.releaseDialogs();
         for (self.views[0..self.view_count]) |*view| {
             if (view.widget_text_bytes_heap_owned) self.owned_allocator.free(view.widget_text_bytes);
             if (view.canvas_widget_text_history_bytes_heap_owned) self.owned_allocator.free(view.canvas_widget_text_history_bytes);
@@ -832,6 +843,19 @@ pub const Runtime = struct {
     pub const showOpenDialog = SystemServiceMethods.showOpenDialog;
     pub const showSaveDialog = SystemServiceMethods.showSaveDialog;
     pub const showMessageDialog = SystemServiceMethods.showMessageDialog;
+
+    const DialogMethods = runtime_dialogs.RuntimeDialogs(Runtime);
+    pub const requestDialog = DialogMethods.requestDialog;
+    pub const requestOpenDialog = DialogMethods.requestOpenDialog;
+    pub const requestSaveDialog = DialogMethods.requestSaveDialog;
+    pub const requestMessageDialog = DialogMethods.requestMessageDialog;
+    pub const cancelDialog = DialogMethods.cancelDialog;
+    pub const adoptDialogResults = DialogMethods.adoptDialogResults;
+    pub const cancelDialogsForWindow = DialogMethods.cancelDialogsForWindow;
+    pub const abandonDialogs = DialogMethods.abandonDialogs;
+    pub const pendingDialogCount = DialogMethods.pendingDialogCount;
+    const releaseDialogs = DialogMethods.releaseDialogs;
+
     pub const showNotification = SystemServiceMethods.showNotification;
     pub const setCredential = SystemServiceMethods.setCredential;
     pub const getCredential = SystemServiceMethods.getCredential;

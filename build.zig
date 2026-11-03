@@ -2679,6 +2679,9 @@ pub fn build(b: *std.Build) void {
     // on a Windows runner makes that a Windows-native receipt. The same
     // tests also run inside `zig build test` via the canvas-frame shard.
     addTestStep(b, "test-canvas-fonts", "Run the runtime font-registry tests (includes the registered-CJK Chinese receipt)", filteredTestArtifact(b, desktop_mod, "canvas-fonts-tests", &.{"runtime.canvas_font_tests.test"}));
+    // The same tests also run inside `zig build test` via the
+    // platform-bridge group.
+    addTestStep(b, "test-dialogs", "Run the asynchronous dialog runtime tests (queueing, cancellation, fallback)", filteredTestArtifact(b, desktop_mod, "dialog-tests", &.{"runtime.dialog_tests.test"}));
     // The console-attachment regression is Windows-only, so the general
     // Linux `zig build test` lane can only compile and skip it. Expose the
     // exact test as a focused step for the real-Windows CI runner; this

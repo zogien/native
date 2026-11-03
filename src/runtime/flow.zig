@@ -382,6 +382,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     const state = event_value.window_frame_changed;
                     if (host_flow.gate(policy, 1, @intFromBool(was_open), @intFromBool(state.open)) != 0) {
                         const label = if (WindowViewMethods().findWindowIndexById(self, state.id)) |index| self.windows[index].info.label else state.label;
+                        self.cancelDialogsForWindow(state.id);
                         try dispatchEvent(self, app, .{ .window_closed = .{ .window_id = state.id, .label = label } });
                     }
                 },
@@ -449,6 +450,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     emitFileDropEvent(self, drop) catch |err| log(self, "drop.files.emit_failed", @errorName(err), &.{trace.uint("window_id", drop.window_id)});
                 },
                 .lifecycle_stop => {
+                    self.abandonDialogs();
                     try dispatchEvent(self, app, .{ .lifecycle = .stop });
                 },
                 .extensions_stop => {
@@ -529,6 +531,10 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     try dispatchEvent(self, app, .{ .video = event_value.video });
                 },
                 .event_wake => {
+                    // Finished dialogs ride the same nudge the effects
+                    // channel uses; their completions run before the app
+                    // drains its own work.
+                    self.adoptDialogResults();
                     try dispatchEvent(self, app, .effects_wake);
                 },
                 .capability_gpu_surface_frame => {

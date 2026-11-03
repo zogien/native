@@ -369,6 +369,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         // comes from runtime storage, which outlives the
                         // event's transient slices.
                         const label = if (WindowViewMethods().findWindowIndexById(self, state.id)) |index| self.windows[index].info.label else state.label;
+                        self.cancelDialogsForWindow(state.id);
                         try dispatchEvent(self, app, .{ .window_closed = .{ .window_id = state.id, .label = label } });
                     }
                 },
@@ -505,6 +506,10 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     try dispatchEvent(self, app, .{ .video = video_event });
                 },
                 .wake => {
+                    // Finished dialogs ride the same nudge the effects
+                    // channel uses; their completions run before the app
+                    // drains its own work.
+                    self.adoptDialogResults();
                     try dispatchEvent(self, app, .effects_wake);
                 },
                 .files_dropped => |drop| {
@@ -523,6 +528,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.invalidateFor(.command, null);
                 },
                 .app_shutdown => {
+                    self.abandonDialogs();
                     try dispatchEvent(self, app, .{ .lifecycle = .stop });
                     if (self.options.extensions) |registry| try registry.stopAll(extensionContext(self));
                     // A release the app staged but did not restart into

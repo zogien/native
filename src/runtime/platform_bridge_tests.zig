@@ -6,4 +6,5 @@ test {
     _ = @import("webview_view_bridge_tests.zig");
     _ = @import("web_layer_gate_tests.zig");
     _ = @import("bridge_permission_tests.zig");
+    _ = @import("dialog_tests.zig");
 }
