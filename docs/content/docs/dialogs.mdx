@@ -2,7 +2,115 @@
 title: "Dialogs"
 ---
 
-The Native SDK provides native file and message dialogs accessible from Zig via `Runtime.showOpenDialog(...)`, `Runtime.showSaveDialog(...)`, and `Runtime.showMessageDialog(...)`, or from JavaScript via the [builtin bridge](/docs/bridge/builtin-commands).
+The Native SDK provides native file and message dialogs. From Zig, `Runtime.requestOpenDialog(...)`, `Runtime.requestSaveDialog(...)` and `Runtime.requestMessageDialog(...)` show one without blocking and report the answer to a callback. From JavaScript, the [builtin bridge](/docs/bridge/builtin-commands) commands resolve their promise when the dialog closes. While a dialog is open, timers, wakes, bridge messages and the rest of the app keep running.
+
+`Runtime.showOpenDialog(...)`, `Runtime.showSaveDialog(...)` and `Runtime.showMessageDialog(...)` remain for existing code. They block the event dispatch that calls them until the dialog closes: every event the app would receive meanwhile waits, and a dialog left open long enough fills the host's event queue and stops the app. Use the request calls in new code.
+
+## Asynchronous dialogs
+
+```zig
+fn openProject(self: *App, runtime: *native_sdk.Runtime) !void {
+    _ = try runtime.requestOpenDialog(.{ .title = "Open project", .allow_directories = true }, null, .{
+        .context = self,
+        .on_result = projectChosen,
+    });
+}
+
+fn projectChosen(context: *anyopaque, runtime: *native_sdk.Runtime, tag: []const u8, result: native_sdk.DialogResult) anyerror!void {
+    _ = runtime;
+    _ = tag;
+    const self: *App = @ptrCast(@alignCast(context));
+    if (result.outcome != .selected) return;
+    var paths = std.mem.splitScalar(u8, result.paths, '\n');
+    while (paths.next()) |path| try self.addFolder(path);
+}
+```
+
+The request returns a `DialogRequestId` at once. `on_result` runs exactly once, from a later event dispatch, never inside the call that requested or cancelled the dialog; if the app stops first, it does not run. The completion's `tag` (at most 80 bytes) is copied and handed back unchanged. `tag` and `result.paths` are valid only during the call.
+
+<table>
+  <thead>
+    <tr>
+      <th>Dialog</th>
+      <th>Result when <code>outcome</code> is <code>.selected</code></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Open</td>
+      <td><code>count</code> paths in <code>paths</code>, one per line</td>
+    </tr>
+    <tr>
+      <td>Save</td>
+      <td>The chosen path in <code>paths</code></td>
+    </tr>
+    <tr>
+      <td>Message</td>
+      <td>The pressed <code>button</code></td>
+    </tr>
+  </tbody>
+</table>
+
+`.cancelled` means the dialog closed without an answer: the user cancelled or dismissed it (a message dialog closed with Escape included), the app cancelled it, or its window closed. `.failed` means the platform could not show it.
+
+- **Parent window.** The second argument names the owning window. `null` picks the focused window, then the first visible one, and shows the dialog without a parent when no window is visible. To show a dialog without any parent, call `runtime.requestDialog(.{ .options = .{ .open = options }, .detached = true }, completion)`.
+- **One at a time per window.** A window shows one dialog at a time, and so do dialogs without a parent; later requests wait and open in order. At most 8 requests can be pending at once (`error.DialogQueueFull`).
+- **Cancelling.** `runtime.cancelDialog(id)` closes a dialog early, or drops it before it shows; it reports `.cancelled`. Closing a window cancels its dialogs.
+
+How each platform presents them:
+
+<table>
+  <thead>
+    <tr>
+      <th>Platform</th>
+      <th>Presentation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>macOS</td>
+      <td>A sheet on the parent window. A hidden or minimized parent gets a free-standing panel instead. A message dialog without any window is app-modal, but runs outside every event dispatch, so events still reach the app.</td>
+    </tr>
+    <tr>
+      <td>Windows</td>
+      <td>Modal to its parent window, which is disabled while it shows, on a thread of its own; the rest of the app keeps running.</td>
+    </tr>
+    <tr>
+      <td>Linux</td>
+      <td>GTK&apos;s dialogs, through the desktop portal where one runs, without a nested main loop.</td>
+    </tr>
+  </tbody>
+</table>
+
+Apps built with the Chromium web engine show the blocking dialogs instead. The request calls still answer through `on_result` from a later dispatch; the bridge commands answer from the blocking dialog, as they always have.
+
+### From an app bridge command
+
+An asynchronous bridge handler can ask for a dialog and answer the page from the completion. Here the app kept its `*native_sdk.Runtime` from the start event:
+
+```zig
+fn pickFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+    const self: *App = @ptrCast(@alignCast(context));
+    _ = self.runtime.requestOpenDialog(.{ .title = "Open" }, invocation.source.window_id, .{
+        .context = self,
+        .tag = invocation.request.id,
+        .on_result = filePicked,
+    }) catch |err| return responder.fail(invocation.request.id, .internal_error, @errorName(err));
+    self.responder = responder;
+}
+
+fn filePicked(context: *anyopaque, runtime: *native_sdk.Runtime, tag: []const u8, result: native_sdk.DialogResult) anyerror!void {
+    _ = runtime;
+    const self: *App = @ptrCast(@alignCast(context));
+    const responder = self.responder orelse return;
+    self.responder = null;
+    if (result.outcome != .selected) return responder.success(tag, "null");
+    var buffer: [4096]u8 = undefined;
+    try responder.success(tag, native_sdk.bridge.writeJsonStringValue(&buffer, result.paths));
+}
+```
+
+The tag carries the bridge request id to the completion, which answers it with the responder the handler kept.
 
 ## Open file dialog
 
@@ -147,7 +255,7 @@ const filters = [_]native_sdk.FileFilter{
 
 ## From JavaScript
 
-Dialogs require the [builtin bridge](/docs/bridge/builtin-commands) to be enabled with an explicit policy that grants the `dialog` permission. JSON field names use camelCase:
+Dialogs require the [builtin bridge](/docs/bridge/builtin-commands) to be enabled with an explicit policy that grants the `dialog` permission. JSON field names use camelCase. Each promise resolves when its dialog closes. The dialog belongs to the window whose WebView sent the command, and the page keeps running meanwhile:
 
 ```javascript
 const files = await window.zero.invoke("native-sdk.dialog.openFile", {
@@ -171,3 +279,5 @@ const result = await window.zero.invoke("native-sdk.dialog.showMessage", {
   secondaryButton: "Cancel",
 });
 ```
+
+`openFile` resolves to an array of paths and `saveFile` to a path, or `null` when cancelled. `showMessage` resolves to `"primary"`, `"secondary"` or `"tertiary"`, or to `"dismissed"` when the dialog closed without a button. A dialog the platform could not show rejects with `internal_error`.

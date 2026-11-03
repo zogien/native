@@ -356,6 +356,23 @@ const AppKitMessageDialogOpts = extern struct {
     tertiary_button_len: usize,
 };
 
+const AppKitDialogRequest = extern struct {
+    id: u64,
+    parent_window_id: u64,
+    kind: c_int,
+    open_opts: ?*const AppKitOpenDialogOpts,
+    save_opts: ?*const AppKitSaveDialogOpts,
+    message_opts: ?*const AppKitMessageDialogOpts,
+};
+
+const AppKitDialogResult = extern struct {
+    id: u64,
+    outcome: c_int,
+    button: c_int,
+    count: usize,
+    bytes_written: usize,
+};
+
 const AppKitWidgetAccessibilityNode = extern struct {
     id: u64,
     parent_id: u64,
@@ -462,6 +479,9 @@ const AppKitTrayChartRow = extern struct {
 extern fn native_sdk_appkit_show_open_dialog(host: *AppKitHost, opts: *const AppKitOpenDialogOpts, buffer: [*]u8, buffer_len: usize) AppKitOpenDialogResult;
 extern fn native_sdk_appkit_show_save_dialog(host: *AppKitHost, opts: *const AppKitSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_show_message_dialog(host: *AppKitHost, opts: *const AppKitMessageDialogOpts) c_int;
+extern fn native_sdk_appkit_request_dialog(host: *AppKitHost, request: *const AppKitDialogRequest) c_int;
+extern fn native_sdk_appkit_cancel_dialog(host: *AppKitHost, id: u64) void;
+extern fn native_sdk_appkit_poll_dialog_result(host: *AppKitHost, buffer: [*]u8, buffer_len: usize, result: *AppKitDialogResult) c_int;
 extern fn native_sdk_appkit_create_tray(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, font_size: f64, font_weight: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
 extern fn native_sdk_appkit_update_tray_shell(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
 extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, status_item_id: u32, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
@@ -804,6 +824,9 @@ pub const MacPlatform = struct {
                 .show_open_dialog_fn = showOpenDialog,
                 .show_save_dialog_fn = showSaveDialog,
                 .show_message_dialog_fn = showMessageDialog,
+                .request_dialog_fn = if (self.web_engine == .system) requestDialog else null,
+                .cancel_dialog_fn = if (self.web_engine == .system) cancelDialog else null,
+                .poll_dialog_result_fn = if (self.web_engine == .system) pollDialogResult else null,
                 .show_notification_fn = showNotification,
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
@@ -2694,11 +2717,9 @@ fn viewKindInt(kind: platform_mod.ViewKind) c_int {
     };
 }
 
-fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions, buffer: []u8) anyerror!platform_mod.OpenDialogResult {
-    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    var ext_buf: [1024]u8 = undefined;
-    const ext_str = flattenFilters(options.filters, &ext_buf);
-    const opts = AppKitOpenDialogOpts{
+fn appKitOpenDialogOpts(options: platform_mod.OpenDialogOptions, ext_buf: []u8) AppKitOpenDialogOpts {
+    const ext_str = flattenFilters(options.filters, ext_buf);
+    return .{
         .title = options.title.ptr,
         .title_len = options.title.len,
         .default_path = options.default_path.ptr,
@@ -2708,19 +2729,11 @@ fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions,
         .allow_directories = if (options.allow_directories) 1 else 0,
         .allow_multiple = if (options.allow_multiple) 1 else 0,
     };
-    const result = native_sdk_appkit_show_open_dialog(self.host, &opts, buffer.ptr, buffer.len);
-    if (result.bytes_written > buffer.len) return error.NoSpaceLeft;
-    return .{
-        .count = result.count,
-        .paths = buffer[0..result.bytes_written],
-    };
 }
 
-fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 {
-    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    var ext_buf: [1024]u8 = undefined;
-    const ext_str = flattenFilters(options.filters, &ext_buf);
-    const opts = AppKitSaveDialogOpts{
+fn appKitSaveDialogOpts(options: platform_mod.SaveDialogOptions, ext_buf: []u8) AppKitSaveDialogOpts {
+    const ext_str = flattenFilters(options.filters, ext_buf);
+    return .{
         .title = options.title.ptr,
         .title_len = options.title.len,
         .default_path = options.default_path.ptr,
@@ -2730,15 +2743,10 @@ fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions,
         .extensions = ext_str.ptr,
         .extensions_len = ext_str.len,
     };
-    const written = native_sdk_appkit_show_save_dialog(self.host, &opts, buffer.ptr, buffer.len);
-    if (written > buffer.len) return error.NoSpaceLeft;
-    if (written == 0) return null;
-    return buffer[0..written];
 }
 
-fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOptions) anyerror!platform_mod.MessageDialogResult {
-    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    const opts = AppKitMessageDialogOpts{
+fn appKitMessageDialogOpts(options: platform_mod.MessageDialogOptions) AppKitMessageDialogOpts {
+    return .{
         .style = @intFromEnum(options.style),
         .title = options.title.ptr,
         .title_len = options.title.len,
@@ -2753,8 +2761,94 @@ fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOp
         .tertiary_button = options.tertiary_button.ptr,
         .tertiary_button_len = options.tertiary_button.len,
     };
+}
+
+fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions, buffer: []u8) anyerror!platform_mod.OpenDialogResult {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    var ext_buf: [1024]u8 = undefined;
+    const opts = appKitOpenDialogOpts(options, &ext_buf);
+    const result = native_sdk_appkit_show_open_dialog(self.host, &opts, buffer.ptr, buffer.len);
+    if (result.bytes_written > buffer.len) return error.NoSpaceLeft;
+    return .{
+        .count = result.count,
+        .paths = buffer[0..result.bytes_written],
+    };
+}
+
+fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    var ext_buf: [1024]u8 = undefined;
+    const opts = appKitSaveDialogOpts(options, &ext_buf);
+    const written = native_sdk_appkit_show_save_dialog(self.host, &opts, buffer.ptr, buffer.len);
+    if (written > buffer.len) return error.NoSpaceLeft;
+    if (written == 0) return null;
+    return buffer[0..written];
+}
+
+fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOptions) anyerror!platform_mod.MessageDialogResult {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    const opts = appKitMessageDialogOpts(options);
     const result = native_sdk_appkit_show_message_dialog(self.host, &opts);
     return @enumFromInt(result);
+}
+
+// The host copies every option before returning, so they may live on this
+// stack; the result comes back through pollDialogResult on a later wake.
+fn requestDialog(context: ?*anyopaque, request: platform_mod.DialogRequest) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    var ext_buf: [1024]u8 = undefined;
+    var open_opts: AppKitOpenDialogOpts = undefined;
+    var save_opts: AppKitSaveDialogOpts = undefined;
+    var message_opts: AppKitMessageDialogOpts = undefined;
+    var native_request = AppKitDialogRequest{
+        .id = request.id,
+        .parent_window_id = request.parent_window_id orelse 0,
+        .kind = @intFromEnum(std.meta.activeTag(request.options)),
+        .open_opts = null,
+        .save_opts = null,
+        .message_opts = null,
+    };
+    switch (request.options) {
+        .open => |options| {
+            open_opts = appKitOpenDialogOpts(options, &ext_buf);
+            native_request.open_opts = &open_opts;
+        },
+        .save => |options| {
+            save_opts = appKitSaveDialogOpts(options, &ext_buf);
+            native_request.save_opts = &save_opts;
+        },
+        .message => |options| {
+            message_opts = appKitMessageDialogOpts(options);
+            native_request.message_opts = &message_opts;
+        },
+    }
+    if (native_sdk_appkit_request_dialog(self.host, &native_request) == 0) return error.DialogUnavailable;
+}
+
+fn cancelDialog(context: ?*anyopaque, id: platform_mod.DialogRequestId) void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_appkit_cancel_dialog(self.host, id);
+}
+
+fn pollDialogResult(context: ?*anyopaque, buffer: []u8) ?platform_mod.DialogResult {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    var result: AppKitDialogResult = undefined;
+    if (native_sdk_appkit_poll_dialog_result(self.host, buffer.ptr, buffer.len, &result) == 0) return null;
+    return .{
+        .id = result.id,
+        .outcome = switch (result.outcome) {
+            0 => .selected,
+            1 => .cancelled,
+            else => .failed,
+        },
+        .paths = buffer[0..@min(result.bytes_written, buffer.len)],
+        .count = result.count,
+        .button = switch (result.button) {
+            1 => .secondary,
+            2 => .tertiary,
+            else => .primary,
+        },
+    };
 }
 
 const max_tray_items: usize = 32;

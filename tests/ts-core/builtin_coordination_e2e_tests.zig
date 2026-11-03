@@ -158,8 +158,10 @@ test "compiled builtin coordination preserves exact long names without transport
     try exact(@as([]const u8, "View API is not permitted"), p.deniedMessage());
     try exact(@as([]const u8, "Unknown view command"), p.unknownMessage());
 }
-fn invoke(h: anytype, family: policy.Family, request: sdk.bridge.Request, output: []u8, result: []u8) []const u8 {
+/// Null when the command answers later (dialogs reply when they finish).
+fn invoke(h: anytype, family: policy.Family, request: sdk.bridge.Request, output: []u8, result: []u8) ?[]const u8 {
     const app = sdk.App{ .context = h, .name = "builtin-coordination", .source = sdk.platform.WebViewSource.html("") };
+    const message = sdk.platform.BridgeMessage{ .bytes = "", .origin = "zero://inline", .window_id = 1 };
     return switch (family) {
         .none => unreachable,
         .command => methods.dispatchCommandBridgeCommand(&h.runtime, app, request, 1, "main", result, output),
@@ -167,7 +169,7 @@ fn invoke(h: anytype, family: policy.Family, request: sdk.bridge.Request, output
         .view => methods.dispatchViewBridgeCommand(&h.runtime, request, 1, result, output),
         .webview => methods.dispatchWebViewBridgeCommand(&h.runtime, request, 1, result, output),
         .platform => methods.dispatchPlatformBridgeCommand(&h.runtime, request, result, output),
-        .dialog => methods.dispatchDialogBridgeCommand(&h.runtime, request, result, output),
+        .dialog => methods.dispatchDialogBridgeCommand(&h.runtime, request, message, result, output),
         .os => methods.dispatchOsBridgeCommand(&h.runtime, request, "zero://inline", result, output),
         .clipboard => methods.dispatchClipboardBridgeCommand(&h.runtime, request, result, output),
         .credentials => methods.dispatchCredentialBridgeCommand(&h.runtime, request, result, output),
@@ -303,11 +305,12 @@ test "compiled builtin coordination preserves successful window view and webview
         var lr: [4096]u8 = @splat(0x5a);
         var rr = lr;
         const request = sdk.bridge.Request{ .id = "success", .command = case.command, .payload = case.payload };
-        const response = invoke(a, case.family, request, &left, &lr);
+        // These families always answer at once.
+        const response = invoke(a, case.family, request, &left, &lr).?;
         if (std.mem.indexOf(u8, response, "\"ok\":true") == null)
             std.debug.print("{s}: {s}\n", .{ case.command, response });
         try std.testing.expect(std.mem.indexOf(u8, response, "\"ok\":true") != null);
-        try exact(response, invoke(b, case.family, request, &right, &rr));
+        try exact(response, invoke(b, case.family, request, &right, &rr).?);
         try exact(left, right);
         try exact(lr, rr);
         try exact(a.runtime.automationSnapshot("builtin-coordination"), b.runtime.automationSnapshot("builtin-coordination"));

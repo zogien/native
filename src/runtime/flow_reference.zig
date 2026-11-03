@@ -369,6 +369,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         // comes from runtime storage, which outlives the
                         // event's transient slices.
                         const label = if (WindowViewMethods().findWindowIndexById(self, state.id)) |index| self.windows[index].info.label else state.label;
+                        self.cancelDialogsForWindow(state.id);
                         try dispatchEvent(self, app, .{ .window_closed = .{ .window_id = state.id, .label = label } });
                     }
                 },
@@ -505,6 +506,10 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     try dispatchEvent(self, app, .{ .video = video_event });
                 },
                 .wake => {
+                    // Finished dialogs ride the same nudge the effects
+                    // channel uses; their completions run before the app
+                    // drains its own work.
+                    self.adoptDialogResults();
                     try dispatchEvent(self, app, .effects_wake);
                 },
                 .files_dropped => |drop| {
@@ -523,6 +528,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.invalidateFor(.command, null);
                 },
                 .app_shutdown => {
+                    self.abandonDialogs();
                     try dispatchEvent(self, app, .{ .lifecycle = .stop });
                     if (self.options.extensions) |registry| try registry.stopAll(extensionContext(self));
                     // A release the app staged but did not restart into
@@ -1214,19 +1220,20 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 self.invalidateFor(.command, null);
                 return true;
             }
-            const response = switch (plan.family()) {
+            const response: ?[]const u8 = switch (plan.family()) {
                 .none => unreachable,
                 .command => dispatchCommandBridgeCommand(self, app, request, message.window_id, message.webview_label, &result_buffer, &response_buffer),
                 .window => dispatchWindowBridgeCommand(self, request, &result_buffer, &response_buffer),
                 .view => dispatchViewBridgeCommand(self, request, message.window_id, &result_buffer, &response_buffer),
                 .webview => dispatchWebViewBridgeCommand(self, request, message.window_id, &result_buffer, &response_buffer),
                 .platform => dispatchPlatformBridgeCommand(self, request, &result_buffer, &response_buffer),
-                .dialog => dispatchDialogBridgeCommand(self, request, &result_buffer, &response_buffer),
+                .dialog => dispatchDialogBridgeCommand(self, request, message, &result_buffer, &response_buffer),
                 .os => dispatchOsBridgeCommand(self, request, message.origin, &result_buffer, &response_buffer),
                 .clipboard => dispatchClipboardBridgeCommand(self, request, &result_buffer, &response_buffer),
                 .credentials => dispatchCredentialBridgeCommand(self, request, &result_buffer, &response_buffer),
             };
-            try completeBridgeResponse(self, message.window_id, message.webview_label, response);
+            // Dialogs answer later, when they finish.
+            if (response) |bytes| try completeBridgeResponse(self, message.window_id, message.webview_label, bytes);
             self.invalidateFor(.command, null);
             return true;
         }
@@ -1279,7 +1286,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 self.invalidateFor(.command, null);
                 return true;
             }
-            const result = if (is_command)
+            const result: ?[]const u8 = if (is_command)
                 dispatchCommandBridgeCommand(self, app, request, message.window_id, message.webview_label, &result_buffer, &response_buffer)
             else if (is_window)
                 dispatchWindowBridgeCommand(self, request, &result_buffer, &response_buffer)
@@ -1290,7 +1297,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             else if (is_platform)
                 dispatchPlatformBridgeCommand(self, request, &result_buffer, &response_buffer)
             else if (is_dialog)
-                dispatchDialogBridgeCommand(self, request, &result_buffer, &response_buffer)
+                dispatchDialogBridgeCommand(self, request, message, &result_buffer, &response_buffer)
             else if (is_clipboard)
                 dispatchClipboardBridgeCommand(self, request, &result_buffer, &response_buffer)
             else if (is_credentials)
@@ -1298,7 +1305,8 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             else
                 dispatchOsBridgeCommand(self, request, message.origin, &result_buffer, &response_buffer);
 
-            try completeBridgeResponse(self, message.window_id, message.webview_label, result);
+            // Dialogs answer later, when they finish.
+            if (result) |bytes| try completeBridgeResponse(self, message.window_id, message.webview_label, bytes);
             self.invalidateFor(.command, null);
             return true;
         }

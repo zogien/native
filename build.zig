@@ -665,6 +665,21 @@ pub fn build(b: *std.Build) void {
         session_run.expectExitCode(0);
         b.step("test-windows-session-end", "Verify the Windows host's session end across processes").dependOn(&session_run.step);
         test_step.dependOn(&session_run.step);
+
+        // Asynchronous dialogs on their own threads against the same
+        // production host (see src/platform/windows/dialog_test.cpp).
+        const dialog_mod = b.createModule(.{ .target = loop_target, .optimize = optimize, .link_libc = true });
+        app_build.addWebView2HostIncludes(b, dialog_mod, b.path("third_party/webview2/include"), loop_target);
+        dialog_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/dialog_test.cpp"), .flags = &.{"-std=c++17"} });
+        dialog_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
+        app_build.linkWindowsHostLibraries(dialog_mod, loop_target);
+        const dialog_test = b.addExecutable(.{ .name = "windows-dialog-test", .root_module = dialog_mod });
+        dialog_test.win32_manifest = b.path("assets/native-sdk.manifest");
+        const dialog_run = b.addRunArtifact(dialog_test);
+        dialog_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
+        dialog_run.expectExitCode(0);
+        b.step("test-windows-dialogs", "Verify the Windows host's asynchronous dialogs on their own threads").dependOn(&dialog_run.step);
+        test_step.dependOn(&dialog_run.step);
     }
     const window_drag_tests = b.addSystemCommand(&.{ "node", "--test" });
     window_drag_tests.addFileArg(b.path("scripts/webview-window-drag.test.mjs"));
@@ -2679,6 +2694,9 @@ pub fn build(b: *std.Build) void {
     // on a Windows runner makes that a Windows-native receipt. The same
     // tests also run inside `zig build test` via the canvas-frame shard.
     addTestStep(b, "test-canvas-fonts", "Run the runtime font-registry tests (includes the registered-CJK Chinese receipt)", filteredTestArtifact(b, desktop_mod, "canvas-fonts-tests", &.{"runtime.canvas_font_tests.test"}));
+    // The same tests also run inside `zig build test` via the
+    // platform-bridge group.
+    addTestStep(b, "test-dialogs", "Run the asynchronous dialog runtime tests (queueing, cancellation, fallback, bridge and folder-picker routing)", filteredTestArtifact(b, desktop_mod, "dialog-tests", &.{ "runtime.dialog_tests.test", "folder picker" }));
     // The console-attachment regression is Windows-only, so the general
     // Linux `zig build test` lane can only compile and skip it. Expose the
     // exact test as a focused step for the real-Windows CI runner; this

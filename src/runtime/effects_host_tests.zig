@@ -11,6 +11,7 @@ const std = @import("std");
 const geometry = @import("geometry");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
+const security = @import("../security/root.zig");
 const core = @import("core.zig");
 const ui_app_mod = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
@@ -75,6 +76,7 @@ const HostMsg = union(enum) {
     send,
     start_timer,
     hold_file,
+    pick_folder,
     host_result: effects_mod.EffectHostResult,
     file_result: effects_mod.EffectFileResult,
     tick: effects_mod.EffectTimer,
@@ -87,7 +89,7 @@ const ask_key: u64 = 77;
 const other_key: u64 = 78;
 const timer_key: u64 = 9;
 
-// Set by tests before dispatching `.ask`/`.replace`.
+// Set by tests before dispatching `.ask`/`.replace`/`.pick_folder`.
 var test_payload: []const u8 = "";
 
 fn failLaunchAtLoginStatus(_: ?*anyopaque) anyerror!platform.LaunchAtLoginStatus {
@@ -100,6 +102,12 @@ fn failSetLaunchAtLogin(_: ?*anyopaque, _: bool) anyerror!platform.LaunchAtLogin
 
 fn hostUpdate(model: *HostModel, msg: HostMsg, fx: *HostEffects) void {
     switch (msg) {
+        .pick_folder => fx.hostRequest(.{
+            .key = ask_key,
+            .name = "native-sdk.dialog.openDirectory",
+            .payload = test_payload,
+            .on_result = HostEffects.hostMsg(.host_result),
+        }),
         .ask => fx.hostRequest(.{
             .key = ask_key,
             .name = "svc.echo",
@@ -345,6 +353,66 @@ test "native system commands use runtime validation and platform services" {
     });
     try h.wake();
     try std.testing.expectEqualStrings("2024-01-01 21:04:05", h.app_state.model.bytesPrefix());
+}
+
+test "folder picker requests open an asynchronous dialog and answer on its wake" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const dialog_permission = [_][]const u8{security.permission_dialog};
+    h.harness.runtime.options.security.permissions = &dialog_permission;
+    h.harness.null_platform.useAsyncDialogs(&h.harness.runtime.options.platform.services);
+
+    // Version-1 request: context byte 5, title "Pick", no starting path.
+    test_payload = &[_]u8{ 1, 5, 4, 0, 'P', 'i', 'c', 'k', 0, 0 };
+    try h.app_state.dispatch(&h.harness.runtime, 1, .pick_folder);
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.presentedDialogCount());
+    try std.testing.expectEqualStrings("Pick", h.harness.null_platform.findPresentedDialog(1).?.titleText());
+    try std.testing.expectEqual(@as(u32, 0), h.app_state.model.result_count);
+
+    try h.harness.null_platform.finishDialog(1, .selected, "/picked", .primary);
+    while (h.harness.null_platform.takeWake()) |_| try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    try std.testing.expectEqualStrings("\x01\x05\x00\x00\x07\x00/picked", h.app_state.model.bytesPrefix());
+}
+
+test "re-issuing a folder picker key closes the open picker and opens the new one" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const dialog_permission = [_][]const u8{security.permission_dialog};
+    h.harness.runtime.options.security.permissions = &dialog_permission;
+    h.harness.null_platform.useAsyncDialogs(&h.harness.runtime.options.platform.services);
+
+    test_payload = &[_]u8{ 1, 1, 0, 0, 0, 0 };
+    try h.app_state.dispatch(&h.harness.runtime, 1, .pick_folder);
+    try std.testing.expect(h.harness.null_platform.findPresentedDialog(1) != null);
+    test_payload = &[_]u8{ 1, 2, 0, 0, 0, 0 };
+    try h.app_state.dispatch(&h.harness.runtime, 1, .pick_folder);
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.dialog_cancel_count);
+    while (h.harness.null_platform.takeWake()) |_| try h.wake();
+    // The replaced picker's cancellation reaches no one; its successor shows.
+    try std.testing.expectEqual(@as(u32, 0), h.app_state.model.result_count);
+    try std.testing.expect(h.harness.null_platform.findPresentedDialog(2) != null);
+
+    try h.harness.null_platform.finishDialog(2, .cancelled, "", .primary);
+    while (h.harness.null_platform.takeWake()) |_| try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    // A cancelled picker answers an empty selection.
+    try std.testing.expectEqualStrings("\x01\x02\x00\x00\x00\x00", h.app_state.model.bytesPrefix());
+}
+
+test "folder picker requests on a platform without asynchronous dialogs answer at once" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const dialog_permission = [_][]const u8{security.permission_dialog};
+    h.harness.runtime.options.security.permissions = &dialog_permission;
+
+    test_payload = &[_]u8{ 1, 3, 4, 0, 'P', 'i', 'c', 'k', 0, 0 };
+    try h.app_state.dispatch(&h.harness.runtime, 1, .pick_folder);
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.open_dialog_count);
+    try std.testing.expectEqual(@as(usize, 0), h.harness.runtime.pendingDialogCount());
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    try std.testing.expectEqualStrings("\x01\x03\x00\x00\x18\x00/tmp/native-sdk-open.txt", h.app_state.model.bytesPrefix());
 }
 
 test "re-issuing a live host key replaces the pending request and drops the undelivered result" {

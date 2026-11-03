@@ -197,6 +197,9 @@ extern fn native_sdk_windows_reveal_path(host: *WindowsHost, path: [*]const u8, 
 extern fn native_sdk_windows_show_open_dialog(host: *WindowsHost, opts: *const WindowsOpenDialogOpts, buffer: [*]u8, buffer_len: usize) WindowsOpenDialogResult;
 extern fn native_sdk_windows_show_save_dialog(host: *WindowsHost, opts: *const WindowsSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_windows_show_message_dialog(host: *WindowsHost, opts: *const WindowsMessageDialogOpts) c_int;
+extern fn native_sdk_windows_request_dialog(host: *WindowsHost, request: *const WindowsDialogRequest) c_int;
+extern fn native_sdk_windows_cancel_dialog(host: *WindowsHost, id: u64) void;
+extern fn native_sdk_windows_poll_dialog_result(host: *WindowsHost, buffer: [*]u8, buffer_len: usize, result: *WindowsDialogResult) c_int;
 extern fn native_sdk_windows_show_notification(host: *WindowsHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, action_command: [*]const u8, action_command_len: usize) c_int;
 extern fn native_sdk_windows_create_tray(host: *WindowsHost, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) c_int;
 extern fn native_sdk_windows_update_tray_menu(host: *WindowsHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) c_int;
@@ -275,6 +278,23 @@ const WindowsMessageDialogOpts = extern struct {
     secondary_button_len: usize,
     tertiary_button: [*]const u8,
     tertiary_button_len: usize,
+};
+
+const WindowsDialogRequest = extern struct {
+    id: u64,
+    parent_window_id: u64,
+    kind: c_int,
+    open_opts: ?*const WindowsOpenDialogOpts,
+    save_opts: ?*const WindowsSaveDialogOpts,
+    message_opts: ?*const WindowsMessageDialogOpts,
+};
+
+const WindowsDialogResult = extern struct {
+    id: u64,
+    outcome: c_int,
+    button: c_int,
+    count: usize,
+    bytes_written: usize,
 };
 
 /// The startup-window twin of the runtime's create-time `.hide` gate:
@@ -477,6 +497,9 @@ pub const WindowsPlatform = struct {
                 .show_open_dialog_fn = showOpenDialog,
                 .show_save_dialog_fn = showSaveDialog,
                 .show_message_dialog_fn = showMessageDialog,
+                .request_dialog_fn = if (self.web_engine == .system) requestDialog else null,
+                .cancel_dialog_fn = if (self.web_engine == .system) cancelDialog else null,
+                .poll_dialog_result_fn = if (self.web_engine == .system) pollDialogResult else null,
                 .show_notification_fn = showNotification,
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
@@ -1483,12 +1506,9 @@ fn closeWebView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: [
     if (native_sdk_windows_close_webview(self.host, window_id, label.ptr, label.len) == 0) return error.WebViewNotFound;
 }
 
-fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions, buffer: []u8) anyerror!platform_mod.OpenDialogResult {
-    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    if (self.web_engine != .system) return error.UnsupportedService;
-    var ext_buf: [1024]u8 = undefined;
-    const ext_str = flattenFilters(options.filters, &ext_buf);
-    const opts = WindowsOpenDialogOpts{
+fn windowsOpenDialogOpts(options: platform_mod.OpenDialogOptions, ext_buf: []u8) WindowsOpenDialogOpts {
+    const ext_str = flattenFilters(options.filters, ext_buf);
+    return .{
         .title = options.title.ptr,
         .title_len = options.title.len,
         .default_path = options.default_path.ptr,
@@ -1498,17 +1518,11 @@ fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions,
         .allow_directories = if (options.allow_directories) 1 else 0,
         .allow_multiple = if (options.allow_multiple) 1 else 0,
     };
-    const result = native_sdk_windows_show_open_dialog(self.host, &opts, buffer.ptr, buffer.len);
-    if (result.bytes_written > buffer.len) return error.NoSpaceLeft;
-    return .{ .count = result.count, .paths = buffer[0..result.bytes_written] };
 }
 
-fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 {
-    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    if (self.web_engine != .system) return error.UnsupportedService;
-    var ext_buf: [1024]u8 = undefined;
-    const ext_str = flattenFilters(options.filters, &ext_buf);
-    const opts = WindowsSaveDialogOpts{
+fn windowsSaveDialogOpts(options: platform_mod.SaveDialogOptions, ext_buf: []u8) WindowsSaveDialogOpts {
+    const ext_str = flattenFilters(options.filters, ext_buf);
+    return .{
         .title = options.title.ptr,
         .title_len = options.title.len,
         .default_path = options.default_path.ptr,
@@ -1518,16 +1532,10 @@ fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions,
         .extensions = ext_str.ptr,
         .extensions_len = ext_str.len,
     };
-    const written = native_sdk_windows_show_save_dialog(self.host, &opts, buffer.ptr, buffer.len);
-    if (written > buffer.len) return error.NoSpaceLeft;
-    if (written == 0) return null;
-    return buffer[0..written];
 }
 
-fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOptions) anyerror!platform_mod.MessageDialogResult {
-    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
-    if (self.web_engine != .system) return error.UnsupportedService;
-    const opts = WindowsMessageDialogOpts{
+fn windowsMessageDialogOpts(options: platform_mod.MessageDialogOptions) WindowsMessageDialogOpts {
+    return .{
         .style = @intFromEnum(options.style),
         .title = options.title.ptr,
         .title_len = options.title.len,
@@ -1542,11 +1550,97 @@ fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOp
         .tertiary_button = options.tertiary_button.ptr,
         .tertiary_button_len = options.tertiary_button.len,
     };
+}
+
+fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions, buffer: []u8) anyerror!platform_mod.OpenDialogResult {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    var ext_buf: [1024]u8 = undefined;
+    const opts = windowsOpenDialogOpts(options, &ext_buf);
+    const result = native_sdk_windows_show_open_dialog(self.host, &opts, buffer.ptr, buffer.len);
+    if (result.bytes_written > buffer.len) return error.NoSpaceLeft;
+    return .{ .count = result.count, .paths = buffer[0..result.bytes_written] };
+}
+
+fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    var ext_buf: [1024]u8 = undefined;
+    const opts = windowsSaveDialogOpts(options, &ext_buf);
+    const written = native_sdk_windows_show_save_dialog(self.host, &opts, buffer.ptr, buffer.len);
+    if (written > buffer.len) return error.NoSpaceLeft;
+    if (written == 0) return null;
+    return buffer[0..written];
+}
+
+fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOptions) anyerror!platform_mod.MessageDialogResult {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    const opts = windowsMessageDialogOpts(options);
     // Negative: a session end left the dialog unanswered (the host
     // cancelled it to unwind this dispatch); no button stands in for it.
     const pressed = native_sdk_windows_show_message_dialog(self.host, &opts);
     if (pressed < 0) return error.SessionEnding;
     return @enumFromInt(pressed);
+}
+
+// The host copies every option before returning, so they may live on this
+// stack; the result comes back through pollDialogResult on a later wake.
+fn requestDialog(context: ?*anyopaque, request: platform_mod.DialogRequest) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    var ext_buf: [1024]u8 = undefined;
+    var open_opts: WindowsOpenDialogOpts = undefined;
+    var save_opts: WindowsSaveDialogOpts = undefined;
+    var message_opts: WindowsMessageDialogOpts = undefined;
+    var native_request = WindowsDialogRequest{
+        .id = request.id,
+        .parent_window_id = request.parent_window_id orelse 0,
+        .kind = @intFromEnum(std.meta.activeTag(request.options)),
+        .open_opts = null,
+        .save_opts = null,
+        .message_opts = null,
+    };
+    switch (request.options) {
+        .open => |options| {
+            open_opts = windowsOpenDialogOpts(options, &ext_buf);
+            native_request.open_opts = &open_opts;
+        },
+        .save => |options| {
+            save_opts = windowsSaveDialogOpts(options, &ext_buf);
+            native_request.save_opts = &save_opts;
+        },
+        .message => |options| {
+            message_opts = windowsMessageDialogOpts(options);
+            native_request.message_opts = &message_opts;
+        },
+    }
+    if (native_sdk_windows_request_dialog(self.host, &native_request) == 0) return error.DialogUnavailable;
+}
+
+fn cancelDialog(context: ?*anyopaque, id: platform_mod.DialogRequestId) void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_windows_cancel_dialog(self.host, id);
+}
+
+fn pollDialogResult(context: ?*anyopaque, buffer: []u8) ?platform_mod.DialogResult {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    var result: WindowsDialogResult = undefined;
+    if (native_sdk_windows_poll_dialog_result(self.host, buffer.ptr, buffer.len, &result) == 0) return null;
+    return .{
+        .id = result.id,
+        .outcome = switch (result.outcome) {
+            0 => .selected,
+            1 => .cancelled,
+            else => .failed,
+        },
+        .paths = buffer[0..@min(result.bytes_written, buffer.len)],
+        .count = result.count,
+        .button = switch (result.button) {
+            1 => .secondary,
+            2 => .tertiary,
+            else => .primary,
+        },
+    };
 }
 
 fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOptions) anyerror!void {

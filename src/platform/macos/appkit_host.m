@@ -817,6 +817,26 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NSString *openCommand;
 @end
 
+/* One asynchronous dialog (native_sdk_appkit_request_dialog): what is
+ * showing, where, and once it finishes, the result poll hands back. */
+@interface NativeSdkDialog : NSObject
+@property(nonatomic, assign) uint64_t dialogId;
+@property(nonatomic, assign) uint64_t parentWindowId;
+@property(nonatomic, strong) NSSavePanel *panel;
+@property(nonatomic, strong) NSAlert *alert;
+/* The sheet's window, when the dialog is attached to one. */
+@property(nonatomic, weak) NSWindow *sheetParent;
+/* A parentless alert runs modally from the next loop turn. */
+@property(nonatomic, assign) BOOL modalRunning;
+@property(nonatomic, assign) BOOL cancelRequested;
+@property(nonatomic, assign) int outcome;
+@property(nonatomic, assign) int button;
+@property(nonatomic, strong) NSArray<NSString *> *paths;
+@end
+
+@implementation NativeSdkDialog
+@end
+
 @interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, NSMenuDelegate, NSUserNotificationCenterDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
@@ -881,6 +901,10 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
  * block starts still gets its own turn. */
 @property(atomic, assign) BOOL crossThreadFramePending;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSTimer *> *appTimers;
+/* Asynchronous dialogs by id while presented, and finished ones in the
+ * order they finished, awaiting poll. */
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkDialog *> *dialogs;
+@property(nonatomic, strong) NSMutableArray<NativeSdkDialog *> *finishedDialogs;
 /* Notification userInfo persists with the delivered notification, so it
  * carries only a per-process token. Commands remain in this live host;
  * stale notifications from an earlier execution cannot dispatch into a
@@ -1242,6 +1266,25 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)emitShortcutWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers event:(NSEvent *)event;
 @end
 
+static void NativeSdkCancelDialogsForWindow(NativeSdkAppKitHost *host, uint64_t windowId);
+static void NativeSdkCancelAllDialogs(NativeSdkAppKitHost *host);
+
+/* [NSApp stop:] and stopModal take effect only after the loop handles its
+ * next event; post an empty one so a stop requested from a timer or block
+ * ends the loop now. */
+static void NativeSdkPostEmptyEvent(void) {
+    NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                        location:NSZeroPoint
+                                   modifierFlags:0
+                                       timestamp:0
+                                    windowNumber:0
+                                         context:nil
+                                         subtype:0
+                                           data1:0
+                                           data2:0];
+    [NSApp postEvent:event atStart:NO];
+}
+
 // Recursively re-emit the gpu-surface resize event for every metal
 // surface under `view` (the tall-titlebar chrome re-query path).
 static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
@@ -1423,6 +1466,9 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 
 - (void)windowWillClose:(NSNotification *)notification {
     (void)notification;
+    // End this window's sheets while it can still take them down; a
+    // sheet on a closed window never calls its completion handler.
+    NativeSdkCancelDialogsForWindow(self.host, self.windowId);
     if (self.observesContentLayout) {
         NSWindow *window = self.host.windows[@(self.windowId)];
         [window removeObserver:self forKeyPath:@"contentLayoutRect"];
@@ -8182,6 +8228,8 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.nativeViewExplicitTextKeys = [[NSMutableSet alloc] init];
     self.bridgeEnabledChildWebViewKeys = [[NSMutableSet alloc] init];
     self.appTimers = [[NSMutableDictionary alloc] init];
+    self.dialogs = [[NSMutableDictionary alloc] init];
+    self.finishedDialogs = [[NSMutableArray alloc] init];
     self.notificationActionCommands = [[NSMutableDictionary alloc] init];
     self.notificationActionTokensByIdentifier = [[NSMutableDictionary alloc] init];
     self.statusItems = [[NSMutableDictionary alloc] init];
@@ -8497,6 +8545,9 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 - (void)closeWindowWithId:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)];
     if (!window) return;
+    // performClose: refuses a window with a sheet attached, so end this
+    // window's dialogs first (Electron's NativeWindowMac::Close does too).
+    NativeSdkCancelDialogsForWindow(self, windowId);
     // A runtime-initiated close is the app DECIDING to close: it must
     // not bounce off the window's own .hide close policy, so it skips
     // performClose: (which runs windowShouldClose:) and closes
@@ -10766,17 +10817,9 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
     }
     [self stopAppearanceObservers];
     [self stopApplicationActivationObservers];
+    NativeSdkCancelAllDialogs(self);
     [NSApp stop:nil];
-    NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
-                                        location:NSZeroPoint
-                                   modifierFlags:0
-                                       timestamp:0
-                                    windowNumber:0
-                                         context:nil
-                                         subtype:0
-                                           data1:0
-                                           data2:0];
-    [NSApp postEvent:event atStart:NO];
+    NativeSdkPostEmptyEvent();
 }
 
 /* Drain the quit verb a pre-run dispatch parked (see
@@ -14358,23 +14401,71 @@ static void NativeSdkConfigurePanelExtensions(NSSavePanel *panel, NSArray<NSStri
     }
 }
 
+static NSString *NativeSdkDialogString(const char *bytes, size_t len) {
+    if (!bytes || len == 0) return nil;
+    return [[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding];
+}
+
+static NSOpenPanel *NativeSdkMakeOpenPanel(const native_sdk_appkit_open_dialog_opts_t *opts) {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    NSString *title = NativeSdkDialogString(opts->title, opts->title_len);
+    if (title) panel.title = title;
+    NSString *path = NativeSdkDialogString(opts->default_path, opts->default_path_len);
+    if (path) panel.directoryURL = [NSURL fileURLWithPath:path];
+    panel.canChooseFiles = opts->allow_directories == 0;
+    panel.canChooseDirectories = opts->allow_directories != 0;
+    panel.allowsMultipleSelection = opts->allow_multiple != 0;
+    NativeSdkConfigurePanelExtensions(panel, NativeSdkParseExtensions(opts->extensions, opts->extensions_len));
+    return panel;
+}
+
+static NSSavePanel *NativeSdkMakeSavePanel(const native_sdk_appkit_save_dialog_opts_t *opts) {
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    NSString *title = NativeSdkDialogString(opts->title, opts->title_len);
+    if (title) panel.title = title;
+    NSString *path = NativeSdkDialogString(opts->default_path, opts->default_path_len);
+    if (path) panel.directoryURL = [NSURL fileURLWithPath:path];
+    NSString *name = NativeSdkDialogString(opts->default_name, opts->default_name_len);
+    if (name) panel.nameFieldStringValue = name;
+    NativeSdkConfigurePanelExtensions(panel, NativeSdkParseExtensions(opts->extensions, opts->extensions_len));
+    return panel;
+}
+
+static NSAlert *NativeSdkMakeAlert(const native_sdk_appkit_message_dialog_opts_t *opts) {
+    NSAlert *alert = [[NSAlert alloc] init];
+    switch (opts->style) {
+        case 1: alert.alertStyle = NSAlertStyleWarning; break;
+        case 2: alert.alertStyle = NSAlertStyleCritical; break;
+        default: alert.alertStyle = NSAlertStyleInformational; break;
+    }
+    NSString *title = NativeSdkDialogString(opts->title, opts->title_len);
+    NSString *message = NativeSdkDialogString(opts->message, opts->message_len);
+    NSString *informative = NativeSdkDialogString(opts->informative_text, opts->informative_text_len);
+    if (message.length > 0) {
+        alert.messageText = message;
+    } else if (title.length > 0) {
+        alert.messageText = title;
+    }
+    if (informative.length > 0) {
+        alert.informativeText = informative;
+    }
+    if (opts->message && opts->message_len > 0) {
+        alert.window.title = title.length > 0 ? title : @"";
+    }
+    NSString *primary = NativeSdkDialogString(opts->primary_button, opts->primary_button_len);
+    [alert addButtonWithTitle:primary ?: @"OK"];
+    NSString *secondary = NativeSdkDialogString(opts->secondary_button, opts->secondary_button_len);
+    if (secondary) [alert addButtonWithTitle:secondary];
+    NSString *tertiary = NativeSdkDialogString(opts->tertiary_button, opts->tertiary_button_len);
+    if (tertiary) [alert addButtonWithTitle:tertiary];
+    return alert;
+}
+
 native_sdk_appkit_open_dialog_result_t native_sdk_appkit_show_open_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_open_dialog_opts_t *opts, char *buffer, size_t buffer_len) {
     (void)host;
     native_sdk_appkit_open_dialog_result_t result = { .count = 0, .bytes_written = 0 };
     @autoreleasepool {
-        NSOpenPanel *panel = [NSOpenPanel openPanel];
-        if (opts->title && opts->title_len > 0) {
-            panel.title = [[NSString alloc] initWithBytes:opts->title length:opts->title_len encoding:NSUTF8StringEncoding];
-        }
-        if (opts->default_path && opts->default_path_len > 0) {
-            NSString *path = [[NSString alloc] initWithBytes:opts->default_path length:opts->default_path_len encoding:NSUTF8StringEncoding];
-            panel.directoryURL = [NSURL fileURLWithPath:path];
-        }
-        panel.canChooseFiles = opts->allow_directories == 0;
-        panel.canChooseDirectories = opts->allow_directories != 0;
-        panel.allowsMultipleSelection = opts->allow_multiple != 0;
-        NativeSdkConfigurePanelExtensions(panel, NativeSdkParseExtensions(opts->extensions, opts->extensions_len));
-
+        NSOpenPanel *panel = NativeSdkMakeOpenPanel(opts);
         if ([panel runModal] != NSModalResponseOK) return result;
 
         size_t offset = 0;
@@ -14401,19 +14492,7 @@ native_sdk_appkit_open_dialog_result_t native_sdk_appkit_show_open_dialog(native
 size_t native_sdk_appkit_show_save_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_save_dialog_opts_t *opts, char *buffer, size_t buffer_len) {
     (void)host;
     @autoreleasepool {
-        NSSavePanel *panel = [NSSavePanel savePanel];
-        if (opts->title && opts->title_len > 0) {
-            panel.title = [[NSString alloc] initWithBytes:opts->title length:opts->title_len encoding:NSUTF8StringEncoding];
-        }
-        if (opts->default_path && opts->default_path_len > 0) {
-            NSString *path = [[NSString alloc] initWithBytes:opts->default_path length:opts->default_path_len encoding:NSUTF8StringEncoding];
-            panel.directoryURL = [NSURL fileURLWithPath:path];
-        }
-        if (opts->default_name && opts->default_name_len > 0) {
-            panel.nameFieldStringValue = [[NSString alloc] initWithBytes:opts->default_name length:opts->default_name_len encoding:NSUTF8StringEncoding];
-        }
-        NativeSdkConfigurePanelExtensions(panel, NativeSdkParseExtensions(opts->extensions, opts->extensions_len));
-
+        NSSavePanel *panel = NativeSdkMakeSavePanel(opts);
         if ([panel runModal] != NSModalResponseOK) return 0;
 
         NSString *path = panel.URL.path;
@@ -14429,43 +14508,198 @@ size_t native_sdk_appkit_show_save_dialog(native_sdk_appkit_host_t *host, const 
 int native_sdk_appkit_show_message_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_message_dialog_opts_t *opts) {
     (void)host;
     @autoreleasepool {
-        NSAlert *alert = [[NSAlert alloc] init];
-        switch (opts->style) {
-            case 1: alert.alertStyle = NSAlertStyleWarning; break;
-            case 2: alert.alertStyle = NSAlertStyleCritical; break;
-            default: alert.alertStyle = NSAlertStyleInformational; break;
-        }
-        NSString *title = opts->title && opts->title_len > 0 ? [[NSString alloc] initWithBytes:opts->title length:opts->title_len encoding:NSUTF8StringEncoding] : nil;
-        NSString *message = opts->message && opts->message_len > 0 ? [[NSString alloc] initWithBytes:opts->message length:opts->message_len encoding:NSUTF8StringEncoding] : nil;
-        NSString *informative = opts->informative_text && opts->informative_text_len > 0 ? [[NSString alloc] initWithBytes:opts->informative_text length:opts->informative_text_len encoding:NSUTF8StringEncoding] : nil;
-        if (message.length > 0) {
-            alert.messageText = message;
-        } else if (title.length > 0) {
-            alert.messageText = title;
-        }
-        if (informative.length > 0) {
-            alert.informativeText = informative;
-        }
-        if (opts->message && opts->message_len > 0) {
-            alert.window.title = title.length > 0 ? title : @"";
-        }
-        if (opts->primary_button && opts->primary_button_len > 0) {
-            [alert addButtonWithTitle:[[NSString alloc] initWithBytes:opts->primary_button length:opts->primary_button_len encoding:NSUTF8StringEncoding]];
-        } else {
-            [alert addButtonWithTitle:@"OK"];
-        }
-        if (opts->secondary_button && opts->secondary_button_len > 0) {
-            [alert addButtonWithTitle:[[NSString alloc] initWithBytes:opts->secondary_button length:opts->secondary_button_len encoding:NSUTF8StringEncoding]];
-        }
-        if (opts->tertiary_button && opts->tertiary_button_len > 0) {
-            [alert addButtonWithTitle:[[NSString alloc] initWithBytes:opts->tertiary_button length:opts->tertiary_button_len encoding:NSUTF8StringEncoding]];
-        }
-
+        NSAlert *alert = NativeSdkMakeAlert(opts);
         NSModalResponse response = [alert runModal];
         if (response == NSAlertFirstButtonReturn) return 0;
         if (response == NSAlertSecondButtonReturn) return 1;
         return 2;
     }
+}
+
+/* Record a dialog's result and wake the loop; the runtime collects it with
+ * poll. Never runs app code: AppKit calls completion handlers inside its
+ * own transaction (electron#26884), so the result waits for the wake. */
+static void NativeSdkFinishDialog(NativeSdkAppKitHost *host, NativeSdkDialog *dialog, NSModalResponse response) {
+    if (!host) return;
+    NSNumber *key = @(dialog.dialogId);
+    if (host.dialogs[key] != dialog) return;
+    [host.dialogs removeObjectForKey:key];
+    dialog.outcome = NATIVE_SDK_APPKIT_DIALOG_CANCELLED;
+    if (dialog.alert) {
+        if (response >= NSAlertFirstButtonReturn && response <= NSAlertThirdButtonReturn) {
+            dialog.outcome = NATIVE_SDK_APPKIT_DIALOG_SELECTED;
+            dialog.button = (int)(response - NSAlertFirstButtonReturn);
+        }
+    } else if (response == NSModalResponseOK) {
+        NSMutableArray<NSString *> *paths = [NSMutableArray array];
+        if ([dialog.panel isKindOfClass:[NSOpenPanel class]]) {
+            for (NSURL *url in ((NSOpenPanel *)dialog.panel).URLs) {
+                if (url.path) [paths addObject:url.path];
+            }
+        } else if (dialog.panel.URL.path) {
+            [paths addObject:dialog.panel.URL.path];
+        }
+        dialog.paths = paths;
+        if (paths.count > 0) dialog.outcome = NATIVE_SDK_APPKIT_DIALOG_SELECTED;
+    }
+    dialog.panel = nil;
+    dialog.alert = nil;
+    if (host.didShutdown) return;
+    [host.finishedDialogs addObject:dialog];
+    [host wakeFromAnyThread];
+}
+
+static void NativeSdkPresentDialog(NativeSdkAppKitHost *host, NativeSdkDialog *dialog, NSWindow *parent) {
+    __weak NativeSdkAppKitHost *weakHost = host;
+    if (dialog.panel) {
+        void (^done)(NSModalResponse) = ^(NSModalResponse response) {
+            NativeSdkFinishDialog(weakHost, dialog, response);
+        };
+        if (parent) {
+            dialog.sheetParent = parent;
+            [dialog.panel beginSheetModalForWindow:parent completionHandler:done];
+        } else {
+            [dialog.panel beginWithCompletionHandler:done];
+        }
+        return;
+    }
+    if (parent) {
+        dialog.sheetParent = parent;
+        [dialog.alert beginSheetModalForWindow:parent completionHandler:^(NSModalResponse response) {
+            NativeSdkFinishDialog(weakHost, dialog, response);
+        }];
+        return;
+    }
+    // NSAlert has no modeless form. With no window to attach a sheet to,
+    // run it modally from a fresh loop turn, outside any runtime
+    // dispatch, so events keep reaching the app meanwhile (Electron runs
+    // a parentless message box modally too). A run loop block, not
+    // dispatch_async: a modal loop inside a main-queue block keeps the
+    // serial main queue from draining, and wakes and quits ride it.
+    CFRunLoopRef mainLoop = CFRunLoopGetMain();
+    CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
+        NativeSdkAppKitHost *strongHost = weakHost;
+        if (!strongHost || dialog.cancelRequested || strongHost.dialogs[@(dialog.dialogId)] != dialog) {
+            NativeSdkFinishDialog(strongHost, dialog, NSModalResponseCancel);
+            return;
+        }
+        dialog.modalRunning = YES;
+        const NSModalResponse response = [dialog.alert runModal];
+        dialog.modalRunning = NO;
+        NativeSdkFinishDialog(strongHost, dialog, response);
+        // A stop during the alert ended only the modal loop; [NSApp stop:]
+        // inside a modal session never reaches the main one.
+        if (strongHost.didShutdown) {
+            [NSApp stop:nil];
+            NativeSdkPostEmptyEvent();
+        }
+    });
+    CFRunLoopWakeUp(mainLoop);
+}
+
+static void NativeSdkCancelDialog(NativeSdkDialog *dialog) {
+    NSWindow *sheet = dialog.panel ?: dialog.alert.window;
+    if (dialog.sheetParent && sheet) {
+        // Ending the sheet on its window detaches it at once, so a close
+        // right after is not refused for a sheet still attached.
+        [dialog.sheetParent endSheet:sheet returnCode:NSModalResponseCancel];
+        return;
+    }
+    if (dialog.panel) {
+        [dialog.panel cancel:nil];
+        return;
+    }
+    if (!dialog.alert) return;
+    if (dialog.modalRunning) {
+        [NSApp stopModalWithCode:NSModalResponseCancel];
+        NativeSdkPostEmptyEvent();
+    } else {
+        // Not started yet: the deferred presentation finishes it instead.
+        dialog.cancelRequested = YES;
+    }
+}
+
+static void NativeSdkCancelDialogsForWindow(NativeSdkAppKitHost *host, uint64_t windowId) {
+    for (NativeSdkDialog *dialog in [host.dialogs.allValues copy]) {
+        if (dialog.parentWindowId == windowId) NativeSdkCancelDialog(dialog);
+    }
+}
+
+static void NativeSdkCancelAllDialogs(NativeSdkAppKitHost *host) {
+    for (NativeSdkDialog *dialog in [host.dialogs.allValues copy]) NativeSdkCancelDialog(dialog);
+    [host.finishedDialogs removeAllObjects];
+}
+
+int native_sdk_appkit_request_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_dialog_request_t *request) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object || !request || object.didShutdown || request->id == 0) return 0;
+    @autoreleasepool {
+        NativeSdkDialog *dialog = [[NativeSdkDialog alloc] init];
+        dialog.dialogId = request->id;
+        dialog.parentWindowId = request->parent_window_id;
+        switch (request->kind) {
+            case NATIVE_SDK_APPKIT_DIALOG_OPEN:
+                if (!request->open_opts) return 0;
+                dialog.panel = NativeSdkMakeOpenPanel(request->open_opts);
+                break;
+            case NATIVE_SDK_APPKIT_DIALOG_SAVE:
+                if (!request->save_opts) return 0;
+                dialog.panel = NativeSdkMakeSavePanel(request->save_opts);
+                break;
+            case NATIVE_SDK_APPKIT_DIALOG_MESSAGE:
+                if (!request->message_opts) return 0;
+                dialog.alert = NativeSdkMakeAlert(request->message_opts);
+                break;
+            default:
+                return 0;
+        }
+        // A parent that cannot host a sheet right now (hidden, minimized,
+        // already showing one) gets a modeless panel instead, as Electron
+        // does for invisible parents (electron#22671).
+        NSWindow *parent = request->parent_window_id != 0 ? object.windows[@(request->parent_window_id)] : nil;
+        if (parent && (!parent.isVisible || parent.isMiniaturized || parent.attachedSheet)) parent = nil;
+        if (!parent) dialog.parentWindowId = 0;
+        object.dialogs[@(dialog.dialogId)] = dialog;
+        NativeSdkPresentDialog(object, dialog, parent);
+        return 1;
+    }
+}
+
+void native_sdk_appkit_cancel_dialog(native_sdk_appkit_host_t *host, uint64_t id) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object) return;
+    NativeSdkDialog *dialog = object.dialogs[@(id)];
+    if (dialog) NativeSdkCancelDialog(dialog);
+}
+
+int native_sdk_appkit_poll_dialog_result(native_sdk_appkit_host_t *host, char *buffer, size_t buffer_len, native_sdk_appkit_dialog_result_t *result) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object || !result || object.finishedDialogs.count == 0) return 0;
+    NativeSdkDialog *dialog = object.finishedDialogs.firstObject;
+    [object.finishedDialogs removeObjectAtIndex:0];
+    *result = (native_sdk_appkit_dialog_result_t){ .id = dialog.dialogId, .outcome = dialog.outcome, .button = dialog.button };
+    size_t offset = 0;
+    size_t count = 0;
+    for (NSString *path in dialog.paths) {
+        NSData *data = [path dataUsingEncoding:NSUTF8StringEncoding];
+        if (!data) continue;
+        const size_t needed = data.length + (count > 0 ? 1 : 0);
+        if (!buffer || needed > buffer_len - offset) {
+            // More paths than the runtime can hold: report failure rather
+            // than a silently shortened selection.
+            result->outcome = NATIVE_SDK_APPKIT_DIALOG_FAILED;
+            offset = 0;
+            count = 0;
+            break;
+        }
+        if (count > 0) buffer[offset++] = '\n';
+        memcpy(buffer + offset, data.bytes, data.length);
+        offset += data.length;
+        count++;
+    }
+    result->count = count;
+    result->bytes_written = offset;
+    return 1;
 }
 
 static NSImage *NativeSdkTrayImageWithOpacity(NSImage *source, double opacity) {

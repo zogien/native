@@ -52,6 +52,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
     const App = runtime_api.App(Runtime);
     const SystemServiceMethods = runtime_system_services.RuntimeSystemServices(Runtime);
     const WindowViewMethods = runtime_window_views.RuntimeWindowViews(Runtime);
+    const AsyncBridgeResponseSlot = @import("async_bridge.zig").AsyncBridgeResponseSlot(Runtime);
 
     return struct {
         const Self = @This();
@@ -125,15 +126,106 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             return bridge.writeSuccessResponse(response_buffer, request.id, result);
         }
 
-        fn dispatchCompiledDialogBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+        fn dispatchCompiledDialogBridgeCommand(self: *Runtime, request: bridge.Request, message: platform.BridgeMessage, result_buffer: []u8, response_buffer: []u8) ?[]const u8 {
             const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .dialog, request.command);
-            const result = switch (plan.verb()) {
-                .dialog_openFile => SystemServiceMethods.openFileDialogFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
-                .dialog_saveFile => SystemServiceMethods.saveFileDialogFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
-                .dialog_showMessage => SystemServiceMethods.showMessageDialogFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+            const kind: platform.DialogKind = switch (plan.verb()) {
+                .dialog_openFile => .open,
+                .dialog_saveFile => .save,
+                .dialog_showMessage => .message,
                 else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
             };
-            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+            return Self.startDialogBridgeCommand(self, kind, request, message, result_buffer, response_buffer);
+        }
+
+        /// Queue the dialog and answer the bridge request when it
+        /// finishes. Null means the response is deferred; a returned
+        /// response is an immediate refusal, or, on a platform without
+        /// asynchronous dialogs, the blocking dialog's answer.
+        fn startDialogBridgeCommand(self: *Runtime, kind: platform.DialogKind, request: bridge.Request, message: platform.BridgeMessage, result_buffer: []u8, response_buffer: []u8) ?[]const u8 {
+            var storage = json.StringStorage.init(result_buffer);
+            const options = SystemServiceMethods.dialogOptionsFromJson(kind, request.payload, &storage) catch |err| return Self.writeDialogBridgeError(self, request.id, err, response_buffer);
+            if (!self.options.platform.services.supportsAsyncDialogs()) return Self.answerDialogBridgeCommand(self, kind, request.id, options, result_buffer, response_buffer);
+            const slot =Self.reserveDialogBridgeResponse(self, message) catch |err| return Self.writeDialogBridgeError(self, request.id, err, response_buffer);
+            var tag: [1 + bridge.max_id_bytes]u8 = undefined;
+            tag[0] = @intFromEnum(kind);
+            @memcpy(tag[1..][0..request.id.len], request.id);
+            _ = self.requestDialog(.{
+                .options = options,
+                .parent_window_id = Self.openWindowId(self, message.window_id),
+            }, .{
+                .context = slot,
+                .tag = tag[0 .. 1 + request.id.len],
+                .on_result = Self.finishDialogBridgeCommand,
+            }) catch |err| {
+                slot.release();
+                return Self.writeDialogBridgeError(self, request.id, err, response_buffer);
+            };
+            return null;
+        }
+
+        fn finishDialogBridgeCommand(context: *anyopaque, runtime: *Runtime, tag: []const u8, result: platform.DialogResult) anyerror!void {
+            _ = runtime;
+            const slot: *AsyncBridgeResponseSlot = @ptrCast(@alignCast(context));
+            const kind: platform.DialogKind = @enumFromInt(tag[0]);
+            const id = tag[1..];
+            var result_buffer: [bridge.max_result_bytes]u8 = undefined;
+            var response_buffer: [bridge.max_response_bytes]u8 = undefined;
+            const response = if (result.outcome == .failed)
+                bridge.writeErrorResponse(&response_buffer, id, .internal_error, "Dialog could not be shown")
+            else if (SystemServiceMethods.writeDialogResultJson(kind, result, &result_buffer)) |value|
+                bridge.writeSuccessResponse(&response_buffer, id, value)
+            else |err|
+                bridge.writeErrorResponse(&response_buffer, id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err));
+            try slot.respond(response);
+        }
+
+        /// Platforms without asynchronous dialogs (Chromium builds, the
+        /// null platform) answer from the blocking call, at once, as they
+        /// always have. `options` borrows `result_buffer`, which is free
+        /// again once the dialog has returned.
+        fn answerDialogBridgeCommand(self: *Runtime, kind: platform.DialogKind, id: []const u8, options: platform.DialogOptions, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            var paths: [platform.max_dialog_paths_bytes]u8 = undefined;
+            const result: platform.DialogResult = switch (options) {
+                .open => |open| opened: {
+                    const opened = self.showOpenDialog(open, &paths) catch |err| return Self.writeDialogBridgeError(self, id, err, response_buffer);
+                    break :opened .{ .id = 0, .outcome = if (opened.count == 0) .cancelled else .selected, .paths = opened.paths, .count = opened.count };
+                },
+                .save => |save| saved: {
+                    const saved = self.showSaveDialog(save, paths[0..platform.max_dialog_path_bytes]) catch |err| return Self.writeDialogBridgeError(self, id, err, response_buffer);
+                    const path = saved orelse break :saved .{ .id = 0, .outcome = .cancelled };
+                    break :saved .{ .id = 0, .outcome = .selected, .paths = path, .count = 1 };
+                },
+                .message => |dialog| .{
+                    .id = 0,
+                    .outcome = .selected,
+                    .button = self.showMessageDialog(dialog) catch |err| return Self.writeDialogBridgeError(self, id, err, response_buffer),
+                },
+            };
+            const value = SystemServiceMethods.writeDialogResultJson(kind, result, result_buffer) catch |err| return Self.writeDialogBridgeError(self, id, err, response_buffer);
+            return bridge.writeSuccessResponse(response_buffer, id, value);
+        }
+
+        fn writeDialogBridgeError(self: *Runtime, id: []const u8, err: anyerror, output: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.writeCompiledBuiltinError(self, id, err, output);
+            return bridge.writeErrorResponse(output, id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err));
+        }
+
+        fn reserveDialogBridgeResponse(self: *Runtime, message: platform.BridgeMessage) !*AsyncBridgeResponseSlot {
+            for (&self.async_bridge_responses) |*slot| {
+                if (slot.in_use) continue;
+                try slot.init(self, .{ .origin = message.origin, .window_id = message.window_id, .webview_label = message.webview_label });
+                return slot;
+            }
+            return error.AsyncBridgeResponseLimitReached;
+        }
+
+        /// The requesting window when the runtime knows it as open;
+        /// otherwise null lets the broker pick a parent.
+        fn openWindowId(self: *Runtime, window_id: platform.WindowId) ?platform.WindowId {
+            for (self.windows[0..self.window_count]) |window| {
+                if (window.info.id == window_id and window.info.open) return window_id;
+            }
+            return null;
         }
 
         fn dispatchCompiledOsBridgeCommand(self: *Runtime, request: bridge.Request, origin: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {
@@ -306,17 +398,20 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             return bridge.writeSuccessResponse(response_buffer, request.id, result);
         }
 
-        pub fn dispatchDialogBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
-            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledDialogBridgeCommand(self, request, result_buffer, response_buffer);
-            const result = if (std.mem.eql(u8, request.command, "native-sdk.dialog.openFile"))
-                SystemServiceMethods.openFileDialogFromJson(self, request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+        /// Dialog commands answer asynchronously: null means the response
+        /// will follow when the dialog finishes (see
+        /// `startDialogBridgeCommand`).
+        pub fn dispatchDialogBridgeCommand(self: *Runtime, request: bridge.Request, message: platform.BridgeMessage, result_buffer: []u8, response_buffer: []u8) ?[]const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledDialogBridgeCommand(self, request, message, result_buffer, response_buffer);
+            const kind: platform.DialogKind = if (std.mem.eql(u8, request.command, "native-sdk.dialog.openFile"))
+                .open
             else if (std.mem.eql(u8, request.command, "native-sdk.dialog.saveFile"))
-                SystemServiceMethods.saveFileDialogFromJson(self, request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+                .save
             else if (std.mem.eql(u8, request.command, "native-sdk.dialog.showMessage"))
-                SystemServiceMethods.showMessageDialogFromJson(self, request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+                .message
             else
                 return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown dialog command");
-            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+            return Self.startDialogBridgeCommand(self, kind, request, message, result_buffer, response_buffer);
         }
 
         pub fn dispatchOsBridgeCommand(self: *Runtime, request: bridge.Request, origin: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {

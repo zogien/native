@@ -234,9 +234,29 @@ const GtkMessageDialogOpts = extern struct {
     tertiary_button_len: usize,
 };
 
+const GtkDialogRequest = extern struct {
+    id: u64,
+    parent_window_id: u64,
+    kind: c_int,
+    open_opts: ?*const GtkOpenDialogOpts,
+    save_opts: ?*const GtkSaveDialogOpts,
+    message_opts: ?*const GtkMessageDialogOpts,
+};
+
+const GtkDialogResult = extern struct {
+    id: u64,
+    outcome: c_int,
+    button: c_int,
+    count: usize,
+    bytes_written: usize,
+};
+
 extern fn native_sdk_gtk_show_open_dialog(host: *GtkHost, opts: *const GtkOpenDialogOpts, buffer: [*]u8, buffer_len: usize) GtkOpenDialogResult;
 extern fn native_sdk_gtk_show_save_dialog(host: *GtkHost, opts: *const GtkSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_gtk_show_message_dialog(host: *GtkHost, opts: *const GtkMessageDialogOpts) c_int;
+extern fn native_sdk_gtk_request_dialog(host: *GtkHost, request: *const GtkDialogRequest) c_int;
+extern fn native_sdk_gtk_cancel_dialog(host: *GtkHost, id: u64) void;
+extern fn native_sdk_gtk_poll_dialog_result(host: *GtkHost, buffer: [*]u8, buffer_len: usize, result: *GtkDialogResult) c_int;
 
 /// The startup-window twin of the runtime's create-time `.hide` gate:
 /// GTK reports `window_hide_on_close` false (no status item exists to
@@ -390,6 +410,9 @@ pub const LinuxPlatform = struct {
                 .show_open_dialog_fn = showOpenDialog,
                 .show_save_dialog_fn = showSaveDialog,
                 .show_message_dialog_fn = showMessageDialog,
+                .request_dialog_fn = if (self.web_engine == .system) requestDialog else null,
+                .cancel_dialog_fn = if (self.web_engine == .system) cancelDialog else null,
+                .poll_dialog_result_fn = if (self.web_engine == .system) pollDialogResult else null,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
                 .show_notification_fn = showNotification,
@@ -1271,11 +1294,9 @@ fn closeWebView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: [
     if (native_sdk_gtk_close_webview(self.host, window_id, label.ptr, label.len) == 0) return error.WebViewNotFound;
 }
 
-fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions, buffer: []u8) anyerror!platform_mod.OpenDialogResult {
-    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
-    var ext_buf: [1024]u8 = undefined;
-    const ext_str = flattenFilters(options.filters, &ext_buf);
-    const opts = GtkOpenDialogOpts{
+fn gtkOpenDialogOpts(options: platform_mod.OpenDialogOptions, ext_buf: []u8) GtkOpenDialogOpts {
+    const ext_str = flattenFilters(options.filters, ext_buf);
+    return .{
         .title = options.title.ptr,
         .title_len = options.title.len,
         .default_path = options.default_path.ptr,
@@ -1285,16 +1306,11 @@ fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions,
         .allow_directories = if (options.allow_directories) 1 else 0,
         .allow_multiple = if (options.allow_multiple) 1 else 0,
     };
-    const result = native_sdk_gtk_show_open_dialog(self.host, &opts, buffer.ptr, buffer.len);
-    if (result.bytes_written > buffer.len) return error.NoSpaceLeft;
-    return .{ .count = result.count, .paths = buffer[0..result.bytes_written] };
 }
 
-fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 {
-    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
-    var ext_buf: [1024]u8 = undefined;
-    const ext_str = flattenFilters(options.filters, &ext_buf);
-    const opts = GtkSaveDialogOpts{
+fn gtkSaveDialogOpts(options: platform_mod.SaveDialogOptions, ext_buf: []u8) GtkSaveDialogOpts {
+    const ext_str = flattenFilters(options.filters, ext_buf);
+    return .{
         .title = options.title.ptr,
         .title_len = options.title.len,
         .default_path = options.default_path.ptr,
@@ -1304,15 +1320,10 @@ fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions,
         .extensions = ext_str.ptr,
         .extensions_len = ext_str.len,
     };
-    const written = native_sdk_gtk_show_save_dialog(self.host, &opts, buffer.ptr, buffer.len);
-    if (written > buffer.len) return error.NoSpaceLeft;
-    if (written == 0) return null;
-    return buffer[0..written];
 }
 
-fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOptions) anyerror!platform_mod.MessageDialogResult {
-    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
-    const opts = GtkMessageDialogOpts{
+fn gtkMessageDialogOpts(options: platform_mod.MessageDialogOptions) GtkMessageDialogOpts {
+    return .{
         .style = @intFromEnum(options.style),
         .title = options.title.ptr,
         .title_len = options.title.len,
@@ -1327,7 +1338,90 @@ fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOp
         .tertiary_button = options.tertiary_button.ptr,
         .tertiary_button_len = options.tertiary_button.len,
     };
+}
+
+fn showOpenDialog(context: ?*anyopaque, options: platform_mod.OpenDialogOptions, buffer: []u8) anyerror!platform_mod.OpenDialogResult {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    var ext_buf: [1024]u8 = undefined;
+    const opts = gtkOpenDialogOpts(options, &ext_buf);
+    const result = native_sdk_gtk_show_open_dialog(self.host, &opts, buffer.ptr, buffer.len);
+    if (result.bytes_written > buffer.len) return error.NoSpaceLeft;
+    return .{ .count = result.count, .paths = buffer[0..result.bytes_written] };
+}
+
+fn showSaveDialog(context: ?*anyopaque, options: platform_mod.SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    var ext_buf: [1024]u8 = undefined;
+    const opts = gtkSaveDialogOpts(options, &ext_buf);
+    const written = native_sdk_gtk_show_save_dialog(self.host, &opts, buffer.ptr, buffer.len);
+    if (written > buffer.len) return error.NoSpaceLeft;
+    if (written == 0) return null;
+    return buffer[0..written];
+}
+
+fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOptions) anyerror!platform_mod.MessageDialogResult {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    const opts = gtkMessageDialogOpts(options);
     return @enumFromInt(native_sdk_gtk_show_message_dialog(self.host, &opts));
+}
+
+// The host copies every option before returning, so they may live on this
+// stack; the result comes back through pollDialogResult on a later wake.
+fn requestDialog(context: ?*anyopaque, request: platform_mod.DialogRequest) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    var ext_buf: [1024]u8 = undefined;
+    var open_opts: GtkOpenDialogOpts = undefined;
+    var save_opts: GtkSaveDialogOpts = undefined;
+    var message_opts: GtkMessageDialogOpts = undefined;
+    var native_request = GtkDialogRequest{
+        .id = request.id,
+        .parent_window_id = request.parent_window_id orelse 0,
+        .kind = @intFromEnum(std.meta.activeTag(request.options)),
+        .open_opts = null,
+        .save_opts = null,
+        .message_opts = null,
+    };
+    switch (request.options) {
+        .open => |options| {
+            open_opts = gtkOpenDialogOpts(options, &ext_buf);
+            native_request.open_opts = &open_opts;
+        },
+        .save => |options| {
+            save_opts = gtkSaveDialogOpts(options, &ext_buf);
+            native_request.save_opts = &save_opts;
+        },
+        .message => |options| {
+            message_opts = gtkMessageDialogOpts(options);
+            native_request.message_opts = &message_opts;
+        },
+    }
+    if (native_sdk_gtk_request_dialog(self.host, &native_request) == 0) return error.DialogUnavailable;
+}
+
+fn cancelDialog(context: ?*anyopaque, id: platform_mod.DialogRequestId) void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_gtk_cancel_dialog(self.host, id);
+}
+
+fn pollDialogResult(context: ?*anyopaque, buffer: []u8) ?platform_mod.DialogResult {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    var result: GtkDialogResult = undefined;
+    if (native_sdk_gtk_poll_dialog_result(self.host, buffer.ptr, buffer.len, &result) == 0) return null;
+    return .{
+        .id = result.id,
+        .outcome = switch (result.outcome) {
+            0 => .selected,
+            1 => .cancelled,
+            else => .failed,
+        },
+        .paths = buffer[0..@min(result.bytes_written, buffer.len)],
+        .count = result.count,
+        .button = switch (result.button) {
+            1 => .secondary,
+            2 => .tertiary,
+            else => .primary,
+        },
+    };
 }
 
 fn openExternalUrl(context: ?*anyopaque, url: []const u8) anyerror!void {
