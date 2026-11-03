@@ -375,6 +375,27 @@ struct WindowsMessageDialogOpts {
     size_t tertiary_button_len;
 };
 
+/* An asynchronous dialog request: kind is kDialogOpen, kDialogSave or
+ * kDialogMessage, with the matching options set. */
+struct WindowsDialogRequest {
+    uint64_t id;
+    uint64_t parent_window_id;
+    int kind;
+    const WindowsOpenDialogOpts *open_opts;
+    const WindowsSaveDialogOpts *save_opts;
+    const WindowsMessageDialogOpts *message_opts;
+};
+
+/* A finished asynchronous dialog: outcome is kDialogSelected,
+ * kDialogCancelled or kDialogFailed; paths are newline-joined. */
+struct WindowsDialogResult {
+    uint64_t id;
+    int outcome;
+    int button;
+    size_t count;
+    size_t bytes_written;
+};
+
 using EventCallback = void (*)(void *, const WindowsEvent *);
 using BridgeCallback = void (*)(void *, uint64_t, const char *, size_t, const char *, size_t, const char *, size_t);
 
@@ -620,6 +641,57 @@ struct TrayItem {
  * the loop thread reads it. */
 struct HostLifetime {
     bool alive = true;
+};
+
+constexpr int kDialogOpen = 0;
+constexpr int kDialogSave = 1;
+constexpr int kDialogMessage = 2;
+constexpr int kDialogSelected = 0;
+constexpr int kDialogCancelled = 1;
+constexpr int kDialogFailed = 2;
+
+/* One dialog: its options, copied so they outlive the call that passed
+ * them, and for an asynchronous one (native_sdk_windows_request_dialog)
+ * the state its thread shares with the loop and the result it hands
+ * back. */
+struct DialogRequest {
+    uint64_t id = 0;
+    uint64_t parent_window_id = 0;
+    int kind = kDialogOpen;
+    HWND owner = nullptr;
+    std::string title;
+    std::string default_path;
+    std::string default_name;
+    std::string extensions;
+    bool allow_directories = false;
+    bool allow_multiple = false;
+    int style = 0;
+    std::string message;
+    std::string informative_text;
+    std::string primary_button;
+    std::string secondary_button;
+    std::string tertiary_button;
+    /* Under DialogQueue::mutex: the dialog's thread while it runs (zero
+     * before and after), and whether the app asked to close it. */
+    DWORD thread_id = 0;
+    bool cancel_requested = false;
+    /* Written by the dialog's thread before it queues the request. */
+    int outcome = kDialogCancelled;
+    int button = 0;
+    std::vector<std::string> paths;
+};
+
+/* Where dialog threads report. Each asynchronous dialog runs modally on
+ * a thread of its own, owned by its app window, as Chromium's shell
+ * dialogs do: Windows disables the owner while it shows, and the loop
+ * thread keeps pumping timers, wakes and WebView2. The threads hold this
+ * and their request, never the Host, which may be destroyed first. */
+struct DialogQueue {
+    std::mutex mutex;
+    /* Finished requests, oldest first, until poll takes them. */
+    std::deque<std::shared_ptr<DialogRequest>> finished;
+    /* The wake target, cleared when the host retires its loop window. */
+    HWND loop_window = nullptr;
 };
 
 /* App timers (runtime `startTimer`) on the Win32 message loop: each slot
@@ -884,9 +956,15 @@ struct Host {
     /* WebView2 callbacks currently on the stack; app callbacks run only
      * at zero (see DeferredWebViewEvent). */
     int webview_callback_depth = 0;
+    /* Asynchronous dialogs not yet polled, by id (loop thread only), and
+     * the queue their threads report to. */
+    std::map<uint64_t, std::shared_ptr<DialogRequest>> dialogs;
+    std::shared_ptr<DialogQueue> dialog_queue = std::make_shared<DialogQueue>();
 };
 
 static std::string webViewKey(uint64_t window_id, const std::string &label);
+static void cancelDialogsForWindow(Host *host, uint64_t window_id);
+static void cancelAllDialogs(Host *host);
 static void gpuSurfaceRefreshFrameWakeTimer(Host *host);
 static void gpuSurfaceDestroyFrameWakeTimer(Host *host);
 
@@ -6889,6 +6967,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
+                        cancelDialogsForWindow(host, entry.first);
                         destroyNativeViewsForWindow(host, entry.first);
                         destroyChildWebViewsForWindow(host, entry.first);
                         entry.second.hwnd = nullptr;
@@ -7030,6 +7109,327 @@ static bool createNativeWindow(Host *host, Window &window) {
     return true;
 }
 
+/* ------------------------------------------------------------- dialogs */
+
+static DialogRequest openDialogSpec(const WindowsOpenDialogOpts *opts) {
+    DialogRequest spec;
+    spec.kind = kDialogOpen;
+    spec.title = slice(opts->title, opts->title_len);
+    spec.default_path = slice(opts->default_path, opts->default_path_len);
+    spec.extensions = slice(opts->extensions, opts->extensions_len);
+    spec.allow_directories = opts->allow_directories != 0;
+    spec.allow_multiple = opts->allow_multiple != 0;
+    return spec;
+}
+
+static DialogRequest saveDialogSpec(const WindowsSaveDialogOpts *opts) {
+    DialogRequest spec;
+    spec.kind = kDialogSave;
+    spec.title = slice(opts->title, opts->title_len);
+    spec.default_path = slice(opts->default_path, opts->default_path_len);
+    spec.default_name = slice(opts->default_name, opts->default_name_len);
+    spec.extensions = slice(opts->extensions, opts->extensions_len);
+    return spec;
+}
+
+static DialogRequest messageDialogSpec(const WindowsMessageDialogOpts *opts) {
+    DialogRequest spec;
+    spec.kind = kDialogMessage;
+    spec.style = opts->style;
+    spec.title = slice(opts->title, opts->title_len);
+    spec.message = slice(opts->message, opts->message_len);
+    spec.informative_text = slice(opts->informative_text, opts->informative_text_len);
+    spec.primary_button = slice(opts->primary_button, opts->primary_button_len);
+    spec.secondary_button = slice(opts->secondary_button, opts->secondary_button_len);
+    spec.tertiary_button = slice(opts->tertiary_button, opts->tertiary_button_len);
+    return spec;
+}
+
+/* Show an open dialog modally on the calling thread, which has COM
+ * initialized. S_OK with the chosen paths, or the failure Show reported
+ * (HRESULT_FROM_WIN32(ERROR_CANCELLED) when the user cancelled). */
+static HRESULT showOpenDialogOn(HWND owner, const DialogRequest &spec, std::vector<std::wstring> *paths) {
+    IFileOpenDialog *dialog = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
+    if (FAILED(hr) || !dialog) return FAILED(hr) ? hr : E_FAIL;
+
+    DWORD options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options))) {
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+        if (spec.allow_directories) options |= FOS_PICKFOLDERS;
+        else options |= FOS_FILEMUSTEXIST;
+        if (spec.allow_multiple) options |= FOS_ALLOWMULTISELECT;
+        dialog->SetOptions(options);
+    }
+    setDialogTitle(dialog, spec.title.data(), spec.title.size());
+    setDialogFolder(dialog, spec.default_path.data(), spec.default_path.size());
+    if (!spec.allow_directories) setDialogFilters(dialog, spec.extensions.data(), spec.extensions.size());
+
+    hr = dialog->Show(owner);
+    if (SUCCEEDED(hr)) {
+        IShellItemArray *items = nullptr;
+        if (SUCCEEDED(dialog->GetResults(&items)) && items) {
+            DWORD count = 0;
+            items->GetCount(&count);
+            for (DWORD index = 0; index < count; ++index) {
+                IShellItem *item = nullptr;
+                if (SUCCEEDED(items->GetItemAt(index, &item)) && item) {
+                    PWSTR path = nullptr;
+                    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                        paths->push_back(std::wstring(path));
+                        CoTaskMemFree(path);
+                    }
+                    item->Release();
+                }
+            }
+            items->Release();
+        }
+    }
+    dialog->Release();
+    return hr;
+}
+
+/* The save dialog's counterpart of showOpenDialogOn. */
+static HRESULT showSaveDialogOn(HWND owner, const DialogRequest &spec, std::wstring *path) {
+    IFileSaveDialog *dialog = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
+    if (FAILED(hr) || !dialog) return FAILED(hr) ? hr : E_FAIL;
+
+    DWORD options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options))) dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    setDialogTitle(dialog, spec.title.data(), spec.title.size());
+    setDialogFolder(dialog, spec.default_path.data(), spec.default_path.size());
+    setDialogFilters(dialog, spec.extensions.data(), spec.extensions.size());
+    std::wstring default_name = widen(spec.default_name);
+    if (!default_name.empty()) dialog->SetFileName(default_name.c_str());
+
+    hr = dialog->Show(owner);
+    if (SUCCEEDED(hr)) {
+        IShellItem *item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item)) && item) {
+            PWSTR chosen = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &chosen)) && chosen) {
+                *path = std::wstring(chosen);
+                CoTaskMemFree(chosen);
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
+    return hr;
+}
+
+/* TaskDialogIndirect is a comctl32 v6 export: it only resolves when the
+ * process activates the v6 side-by-side assembly (application manifest).
+ * A static import would abort the whole process at load time with
+ * STATUS_ENTRYPOINT_NOT_FOUND on the system default v5, so it is resolved
+ * dynamically, and null sends callers to MessageBoxW (fixed button
+ * captions, same 0/1/2 result contract). */
+using TaskDialogIndirectFn = HRESULT(WINAPI *)(const TASKDIALOGCONFIG *, int *, int *, BOOL *);
+
+static TaskDialogIndirectFn taskDialogIndirect() {
+    static TaskDialogIndirectFn task_dialog = reinterpret_cast<TaskDialogIndirectFn>(
+        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"comctl32.dll"), "TaskDialogIndirect")));
+    return task_dialog;
+}
+
+/* Run a message dialog as a task dialog. *pressed is 100, 101 or 102 for
+ * the primary, secondary or tertiary button, and IDCANCEL when it was
+ * closed without one (Esc, the close button, WM_CLOSE). */
+static HRESULT runTaskDialog(TaskDialogIndirectFn task_dialog, HWND owner, const DialogRequest &spec, int *pressed) {
+    std::wstring title = widen(spec.title);
+    std::wstring message = widen(spec.message);
+    std::wstring informative = widen(spec.informative_text);
+    std::wstring primary = widen(spec.primary_button);
+    std::wstring secondary = widen(spec.secondary_button);
+    std::wstring tertiary = widen(spec.tertiary_button);
+    if (primary.empty()) primary = L"OK";
+
+    TASKDIALOG_BUTTON buttons[3] = {};
+    int button_count = 0;
+    buttons[button_count++] = { 100, primary.c_str() };
+    if (!secondary.empty()) buttons[button_count++] = { 101, secondary.c_str() };
+    if (!tertiary.empty()) buttons[button_count++] = { 102, tertiary.c_str() };
+
+    TASKDIALOGCONFIG config = {};
+    config.cbSize = sizeof(config);
+    config.hwndParent = owner;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    config.pszWindowTitle = title.empty() ? L"native-sdk" : title.c_str();
+    config.pszMainInstruction = message.empty() ? config.pszWindowTitle : message.c_str();
+    config.pszContent = informative.empty() ? nullptr : informative.c_str();
+    config.cButtons = static_cast<UINT>(button_count);
+    config.pButtons = buttons;
+    config.nDefaultButton = 100;
+    config.pszMainIcon = spec.style == 2 ? TD_ERROR_ICON : (spec.style == 1 ? TD_WARNING_ICON : TD_INFORMATION_ICON);
+    *pressed = 100;
+    return task_dialog(&config, pressed, nullptr, nullptr);
+}
+
+/* The comctl32 v5 fallback: MessageBoxW, returning its IDOK-style code
+ * (0 when it failed). messageBoxButton maps that to 0/1/2. */
+static int runMessageBox(HWND owner, const DialogRequest &spec) {
+    const int button_count = 1 + (spec.secondary_button.empty() ? 0 : 1) + (spec.tertiary_button.empty() ? 0 : 1);
+    UINT type = MB_OK;
+    if (button_count == 2) type = MB_OKCANCEL;
+    if (button_count == 3) type = MB_YESNOCANCEL;
+    type |= spec.style == 2 ? MB_ICONERROR : (spec.style == 1 ? MB_ICONWARNING : MB_ICONINFORMATION);
+    std::wstring title = widen(spec.title);
+    std::wstring text = widen(spec.message);
+    std::wstring informative = widen(spec.informative_text);
+    if (!informative.empty()) {
+        if (!text.empty()) text += L"\n\n";
+        text += informative;
+    }
+    return MessageBoxW(owner, text.c_str(), title.empty() ? L"native-sdk" : title.c_str(), type);
+}
+
+static int messageBoxButton(const DialogRequest &spec, int result) {
+    if (!spec.secondary_button.empty() && !spec.tertiary_button.empty()) {
+        if (result == IDNO) return 1;
+        if (result == IDCANCEL) return 2;
+        return 0;
+    }
+    if (result == IDCANCEL) return 1;
+    return 0;
+}
+
+/* The request a dialog thread is running, for dialogCreateHook. */
+thread_local DialogRequest *t_dialog_request = nullptr;
+thread_local DialogQueue *t_dialog_queue = nullptr;
+
+/* A dialog thread's WH_CALLWNDPROC hook: a dialog the app cancelled
+ * before its window existed closes as soon as that window is set up. A
+ * cancel after this point finds the window (cancelDialog). */
+static LRESULT CALLBACK dialogCreateHook(int code, WPARAM wparam, LPARAM lparam) {
+    if (code == HC_ACTION && t_dialog_request && t_dialog_queue) {
+        const CWPSTRUCT *sent = reinterpret_cast<const CWPSTRUCT *>(lparam);
+        if (sent->message == WM_INITDIALOG && (GetWindowLongPtrW(sent->hwnd, GWL_STYLE) & WS_CHILD) == 0) {
+            std::lock_guard<std::mutex> lock(t_dialog_queue->mutex);
+            if (t_dialog_request->cancel_requested) PostMessageW(sent->hwnd, WM_CLOSE, 0, 0);
+        }
+    }
+    return CallNextHookEx(nullptr, code, wparam, lparam);
+}
+
+static void runDialogRequest(DialogRequest &request) {
+    if (request.kind == kDialogOpen || request.kind == kDialogSave) {
+        std::vector<std::wstring> paths;
+        HRESULT hr = S_OK;
+        if (request.kind == kDialogOpen) {
+            hr = showOpenDialogOn(request.owner, request, &paths);
+        } else {
+            std::wstring path;
+            hr = showSaveDialogOn(request.owner, request, &path);
+            if (!path.empty()) paths.push_back(path);
+        }
+        for (const std::wstring &path : paths) {
+            std::string utf8 = narrow(path);
+            if (!utf8.empty()) request.paths.push_back(utf8);
+        }
+        if (SUCCEEDED(hr)) {
+            request.outcome = request.paths.empty() ? kDialogCancelled : kDialogSelected;
+        } else {
+            request.outcome = hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) ? kDialogCancelled : kDialogFailed;
+        }
+        return;
+    }
+    if (TaskDialogIndirectFn task_dialog = taskDialogIndirect()) {
+        int pressed = 100;
+        const HRESULT hr = runTaskDialog(task_dialog, request.owner, request, &pressed);
+        if (FAILED(hr)) {
+            request.outcome = kDialogFailed;
+        } else if (pressed >= 100 && pressed <= 102) {
+            request.outcome = kDialogSelected;
+            request.button = pressed - 100;
+        } else {
+            request.outcome = kDialogCancelled;
+        }
+        return;
+    }
+    const int result = runMessageBox(request.owner, request);
+    if (result == 0) {
+        request.outcome = kDialogFailed;
+    } else {
+        // A message box closed by WM_CLOSE reports a button anyway; one
+        // the app cancelled is no answer.
+        std::lock_guard<std::mutex> lock(t_dialog_queue->mutex);
+        request.outcome = request.cancel_requested ? kDialogCancelled : kDialogSelected;
+        request.button = messageBoxButton(request, result);
+    }
+}
+
+/* A dialog thread: a single-threaded apartment of its own, running the
+ * dialog modally, then queueing the result and waking the loop. */
+static void runDialogThread(std::shared_ptr<DialogQueue> queue, std::shared_ptr<DialogRequest> request) {
+    bool cancel_requested = false;
+    {
+        std::lock_guard<std::mutex> lock(queue->mutex);
+        request->thread_id = GetCurrentThreadId();
+        cancel_requested = request->cancel_requested;
+    }
+    if (!cancel_requested) {
+        bool uninitialize = false;
+        if (initializeCom(&uninitialize)) {
+            t_dialog_request = request.get();
+            t_dialog_queue = queue.get();
+            HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, dialogCreateHook, nullptr, GetCurrentThreadId());
+            runDialogRequest(*request);
+            if (hook) UnhookWindowsHookEx(hook);
+            t_dialog_request = nullptr;
+            t_dialog_queue = nullptr;
+            finishCom(uninitialize);
+        } else {
+            request->outcome = kDialogFailed;
+        }
+    }
+    std::lock_guard<std::mutex> lock(queue->mutex);
+    request->thread_id = 0;
+    queue->finished.push_back(request);
+    if (queue->loop_window) PostMessageW(queue->loop_window, kWakeMessage, 0, 0);
+}
+
+/* Posted to every dialog window of a dialog thread, the top one first,
+ * so a save dialog's overwrite prompt closes before the dialog that
+ * raised it. Other top-level windows of the thread (COM's) are left
+ * alone. */
+static BOOL CALLBACK closeDialogWindow(HWND hwnd, LPARAM lparam) {
+    (void)lparam;
+    wchar_t class_name[8] = {};
+    if (GetClassNameW(hwnd, class_name, 8) > 0 && wcscmp(class_name, L"#32770") == 0) PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    return TRUE;
+}
+
+/* Close a dialog early; it reports through its thread like any other
+ * finish. One whose window does not exist yet closes from
+ * dialogCreateHook, and one whose thread has not started never shows. */
+static void cancelDialog(Host *host, DialogRequest &dialog) {
+    DWORD thread_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(host->dialog_queue->mutex);
+        dialog.cancel_requested = true;
+        thread_id = dialog.thread_id;
+    }
+    if (thread_id != 0) EnumThreadWindows(thread_id, closeDialogWindow, 0);
+}
+
+/* A closing window takes its dialogs down with it. */
+static void cancelDialogsForWindow(Host *host, uint64_t window_id) {
+    for (auto &entry : host->dialogs) {
+        if (entry.second->parent_window_id == window_id) cancelDialog(host, *entry.second);
+    }
+}
+
+/* Host teardown: every dialog closes, and the threads finish without the
+ * loop. Results already queued are dropped with the queue. */
+static void cancelAllDialogs(Host *host) {
+    for (auto &entry : host->dialogs) cancelDialog(host, *entry.second);
+    host->dialogs.clear();
+    std::lock_guard<std::mutex> lock(host->dialog_queue->mutex);
+    host->dialog_queue->loop_window = nullptr;
+    host->dialog_queue->finished.clear();
+}
+
 } // namespace
 
 extern "C" {
@@ -7070,6 +7470,10 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
         return nullptr;
     }
     host->loop_window.store(loop_window, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(host->dialog_queue->mutex);
+        host->dialog_queue->loop_window = loop_window;
+    }
     /* One hardware Direct2D/DirectWrite resource domain for every canvas
      * child. Creation also requires the in-memory font and constrained
      * fallback seams: without them packet text cannot match engine layout,
@@ -7118,6 +7522,9 @@ void native_sdk_windows_destroy(Host *host) {
      * nobody will pump again. */
     HWND loop_window = host->loop_window.exchange(nullptr, std::memory_order_acq_rel);
     host->lifetime->alive = false;
+    /* Dialog threads outlive the host: close their dialogs and let them
+     * finish on their own; their results have nowhere to go. */
+    cancelAllDialogs(host);
     /* DestroyWindow below dispatches WM_DESTROY/WM_ACTIVATEAPP
      * synchronously through windowProc; the run loop's handler state is
      * already gone by the time destroy is called, so those teardown
@@ -8328,52 +8735,17 @@ WindowsOpenDialogResult native_sdk_windows_show_open_dialog(Host *host, const Wi
     bool uninitialize = false;
     if (!initializeCom(&uninitialize)) return result;
 
-    IFileOpenDialog *dialog = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
-    if (FAILED(hr) || !dialog) {
-        finishCom(uninitialize);
-        return result;
-    }
-
-    DWORD options = 0;
-    if (SUCCEEDED(dialog->GetOptions(&options))) {
-        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
-        if (opts->allow_directories) options |= FOS_PICKFOLDERS;
-        else options |= FOS_FILEMUSTEXIST;
-        if (opts->allow_multiple) options |= FOS_ALLOWMULTISELECT;
-        dialog->SetOptions(options);
-    }
-    setDialogTitle(dialog, opts->title, opts->title_len);
-    setDialogFolder(dialog, opts->default_path, opts->default_path_len);
-    if (!opts->allow_directories) setDialogFilters(dialog, opts->extensions, opts->extensions_len);
-
-    if (SUCCEEDED(dialog->Show(parentWindow(host)))) {
-        IShellItemArray *items = nullptr;
-        if (SUCCEEDED(dialog->GetResults(&items)) && items) {
-            DWORD count = 0;
-            items->GetCount(&count);
-            size_t offset = 0;
-            size_t written_count = 0;
-            for (DWORD index = 0; index < count; ++index) {
-                IShellItem *item = nullptr;
-                if (SUCCEEDED(items->GetItemAt(index, &item)) && item) {
-                    bool overflow = false;
-                    PWSTR path = nullptr;
-                    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                        overflow = !appendPathToBuffer(buffer, buffer_len, &offset, &written_count, std::wstring(path));
-                        CoTaskMemFree(path);
-                    }
-                    item->Release();
-                    if (overflow) break;
-                }
-            }
-            result.count = written_count;
-            result.bytes_written = offset;
-            items->Release();
+    std::vector<std::wstring> paths;
+    if (SUCCEEDED(showOpenDialogOn(parentWindow(host), openDialogSpec(opts), &paths))) {
+        size_t offset = 0;
+        size_t written_count = 0;
+        for (const std::wstring &path : paths) {
+            if (!appendPathToBuffer(buffer, buffer_len, &offset, &written_count, path)) break;
         }
+        result.count = written_count;
+        result.bytes_written = offset;
     }
 
-    dialog->Release();
     finishCom(uninitialize);
     return result;
 }
@@ -8384,41 +8756,18 @@ size_t native_sdk_windows_show_save_dialog(Host *host, const WindowsSaveDialogOp
     bool uninitialize = false;
     if (!initializeCom(&uninitialize)) return 0;
 
-    IFileSaveDialog *dialog = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
-    if (FAILED(hr) || !dialog) {
-        finishCom(uninitialize);
-        return 0;
-    }
-
-    DWORD options = 0;
-    if (SUCCEEDED(dialog->GetOptions(&options))) dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-    setDialogTitle(dialog, opts->title, opts->title_len);
-    setDialogFolder(dialog, opts->default_path, opts->default_path_len);
-    setDialogFilters(dialog, opts->extensions, opts->extensions_len);
-    std::wstring default_name = widen(slice(opts->default_name, opts->default_name_len));
-    if (!default_name.empty()) dialog->SetFileName(default_name.c_str());
-
     size_t written = 0;
-    if (SUCCEEDED(dialog->Show(parentWindow(host)))) {
-        IShellItem *item = nullptr;
-        if (SUCCEEDED(dialog->GetResult(&item)) && item) {
-            PWSTR path = nullptr;
-            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                std::string utf8_path = narrow(std::wstring(path));
-                if (utf8_path.size() > buffer_len) {
-                    written = overflowSize(buffer_len);
-                } else {
-                    written = utf8_path.size();
-                    if (written > 0) memcpy(buffer, utf8_path.data(), written);
-                }
-                CoTaskMemFree(path);
-            }
-            item->Release();
+    std::wstring path;
+    if (SUCCEEDED(showSaveDialogOn(parentWindow(host), saveDialogSpec(opts), &path)) && !path.empty()) {
+        std::string utf8_path = narrow(path);
+        if (utf8_path.size() > buffer_len) {
+            written = overflowSize(buffer_len);
+        } else {
+            written = utf8_path.size();
+            if (written > 0) memcpy(buffer, utf8_path.data(), written);
         }
     }
 
-    dialog->Release();
     finishCom(uninitialize);
     return written;
 }
@@ -8431,69 +8780,103 @@ size_t native_sdk_windows_show_save_dialog(Host *host, const WindowsSaveDialogOp
 int native_sdk_windows_show_message_dialog(Host *host, const WindowsMessageDialogOpts *opts) {
     if (!host || !opts) return 0;
     if (host->session_ending) return -1;
-    std::wstring title = widen(slice(opts->title, opts->title_len));
-    std::wstring message = widen(slice(opts->message, opts->message_len));
-    std::wstring informative = widen(slice(opts->informative_text, opts->informative_text_len));
-    std::wstring primary = widen(slice(opts->primary_button, opts->primary_button_len));
-    std::wstring secondary = widen(slice(opts->secondary_button, opts->secondary_button_len));
-    std::wstring tertiary = widen(slice(opts->tertiary_button, opts->tertiary_button_len));
-    if (primary.empty()) primary = L"OK";
-
-    TASKDIALOG_BUTTON buttons[3] = {};
-    int button_count = 0;
-    buttons[button_count++] = { 100, primary.c_str() };
-    if (!secondary.empty()) buttons[button_count++] = { 101, secondary.c_str() };
-    if (!tertiary.empty()) buttons[button_count++] = { 102, tertiary.c_str() };
-
-    TASKDIALOGCONFIG config = {};
-    config.cbSize = sizeof(config);
-    config.hwndParent = parentWindow(host);
-    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
-    config.pszWindowTitle = title.empty() ? L"native-sdk" : title.c_str();
-    config.pszMainInstruction = message.empty() ? config.pszWindowTitle : message.c_str();
-    config.pszContent = informative.empty() ? nullptr : informative.c_str();
-    config.cButtons = static_cast<UINT>(button_count);
-    config.pButtons = buttons;
-    config.nDefaultButton = 100;
-    config.pszMainIcon = opts->style == 2 ? TD_ERROR_ICON : (opts->style == 1 ? TD_WARNING_ICON : TD_INFORMATION_ICON);
-
-    /* TaskDialogIndirect is a comctl32 v6 export: it only resolves when
-     * the process activates the v6 side-by-side assembly (application
-     * manifest). A static import would abort the whole process at load
-     * time with STATUS_ENTRYPOINT_NOT_FOUND on the system default v5, so
-     * resolve it dynamically and fall back to MessageBoxW (fixed button
-     * captions, same 0/1/2 result contract) when only v5 is available. */
-    using TaskDialogIndirectFn = HRESULT(WINAPI *)(const TASKDIALOGCONFIG *, int *, int *, BOOL *);
-    static TaskDialogIndirectFn task_dialog = reinterpret_cast<TaskDialogIndirectFn>(
-        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"comctl32.dll"), "TaskDialogIndirect")));
-    if (task_dialog) {
+    const DialogRequest spec = messageDialogSpec(opts);
+    if (TaskDialogIndirectFn task_dialog = taskDialogIndirect()) {
         int pressed = 100;
-        HRESULT hr = task_dialog(&config, &pressed, nullptr, nullptr);
+        HRESULT hr = runTaskDialog(task_dialog, parentWindow(host), spec, &pressed);
         if (host->session_ending) return -1;
         if (FAILED(hr)) return 0;
         if (pressed == 101) return 1;
         if (pressed == 102) return 2;
         return 0;
     }
-
-    UINT type = MB_OK;
-    if (button_count == 2) type = MB_OKCANCEL;
-    if (button_count == 3) type = MB_YESNOCANCEL;
-    type |= opts->style == 2 ? MB_ICONERROR : (opts->style == 1 ? MB_ICONWARNING : MB_ICONINFORMATION);
-    std::wstring text = message;
-    if (!informative.empty()) {
-        if (!text.empty()) text += L"\n\n";
-        text += informative;
-    }
-    const int result = MessageBoxW(parentWindow(host), text.c_str(), title.empty() ? L"native-sdk" : title.c_str(), type);
+    const int result = runMessageBox(parentWindow(host), spec);
     if (host->session_ending) return -1;
-    if (button_count == 3) {
-        if (result == IDNO) return 1;
-        if (result == IDCANCEL) return 2;
+    return messageBoxButton(spec, result);
+}
+
+/* Show a dialog without blocking: it runs on a thread of its own and
+ * reports through native_sdk_windows_poll_dialog_result after a wake.
+ * The owner is the request's window unless something else already
+ * disabled it (another modal on it), as Electron does: this dialog would
+ * otherwise re-enable a window still held by that one when it closes.
+ * Returns 0 when nothing was started. */
+int native_sdk_windows_request_dialog(Host *host, const WindowsDialogRequest *request) {
+    if (!host || !request || request->id == 0 || host->session_ending || host->shutdown_delivered) return 0;
+    if (host->dialogs.count(request->id) != 0) return 0;
+    auto dialog = std::make_shared<DialogRequest>();
+    switch (request->kind) {
+        case kDialogOpen:
+            if (!request->open_opts) return 0;
+            *dialog = openDialogSpec(request->open_opts);
+            break;
+        case kDialogSave:
+            if (!request->save_opts) return 0;
+            *dialog = saveDialogSpec(request->save_opts);
+            break;
+        case kDialogMessage:
+            if (!request->message_opts) return 0;
+            *dialog = messageDialogSpec(request->message_opts);
+            break;
+        default:
+            return 0;
+    }
+    dialog->id = request->id;
+    auto window = host->windows.find(request->parent_window_id);
+    if (request->parent_window_id != 0 && window != host->windows.end() && window->second.hwnd && IsWindowEnabled(window->second.hwnd)) {
+        dialog->owner = window->second.hwnd;
+        dialog->parent_window_id = request->parent_window_id;
+    }
+    try {
+        std::thread(runDialogThread, host->dialog_queue, dialog).detach();
+    } catch (...) {
         return 0;
     }
-    if (result == IDCANCEL) return 1;
-    return 0;
+    host->dialogs[dialog->id] = dialog;
+    return 1;
+}
+
+void native_sdk_windows_cancel_dialog(Host *host, uint64_t id) {
+    if (!host) return;
+    auto found = host->dialogs.find(id);
+    if (found != host->dialogs.end()) cancelDialog(host, *found->second);
+}
+
+/* Hand back the oldest finished dialog. Returns 0 when none is waiting. */
+int native_sdk_windows_poll_dialog_result(Host *host, char *buffer, size_t buffer_len, WindowsDialogResult *result) {
+    if (!host || !result) return 0;
+    std::shared_ptr<DialogRequest> dialog;
+    {
+        std::lock_guard<std::mutex> lock(host->dialog_queue->mutex);
+        if (host->dialog_queue->finished.empty()) return 0;
+        dialog = host->dialog_queue->finished.front();
+        host->dialog_queue->finished.pop_front();
+    }
+    host->dialogs.erase(dialog->id);
+    *result = {};
+    result->id = dialog->id;
+    result->outcome = dialog->outcome;
+    result->button = dialog->button;
+    size_t offset = 0;
+    size_t count = 0;
+    for (const std::string &path : dialog->paths) {
+        const size_t needed = path.size() + (count > 0 ? 1 : 0);
+        if (!buffer || needed > buffer_len - offset) {
+            /* More paths than the runtime holds: a failure, not a
+             * silently shortened selection. */
+            result->outcome = kDialogFailed;
+            offset = 0;
+            count = 0;
+            break;
+        }
+        if (count > 0) buffer[offset++] = '\n';
+        memcpy(buffer + offset, path.data(), path.size());
+        offset += path.size();
+        count += 1;
+    }
+    result->count = count;
+    result->bytes_written = offset;
+    return 1;
 }
 
 int native_sdk_windows_show_notification(Host *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len) {
