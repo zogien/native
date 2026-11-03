@@ -206,6 +206,10 @@ const result = await window.zero.invoke("native-sdk.dialog.showMessage", {
 });
 ```
 
+Each promise resolves when its dialog closes; the app keeps running meanwhile. `openFile` gives an array of paths and `saveFile` a path, or `null` when cancelled; `showMessage` gives `"primary"`, `"secondary"`, `"tertiary"`, or `"dismissed"` when closed without a button.
+
+From Zig, use `runtime.requestOpenDialog`, `requestSaveDialog` or `requestMessageDialog` with a `DialogCompletion`: the answer arrives in `on_result` on a later dispatch. The older `runtime.showOpenDialog` family blocks the event dispatch until the dialog closes; do not use it in new code.
+
 Use native dialogs for trusted app UI. Do not expose arbitrary filesystem access to remote or untrusted origins.
 
 ## Error handling
