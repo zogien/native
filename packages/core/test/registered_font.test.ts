@@ -36,6 +36,17 @@ test("registered font preserves ordered lookups whitespace exclusion and first o
   const all=run(2,bytes);assert.deepEqual(all.actions,[1,2,1,2,3,4,1,2,3,4,0]);
   const w=new DataView(all.out.buffer);assert.equal(w.getUint32(84,true),1);assert.ok(w.getFloat32(92,true)>w.getFloat32(88,true));
 });
+test("built-in styled font traversal does not rescale supplied glyph advances",()=>{
+  for(const font of [3,4,6]){
+    const bytes=new TextEncoder().encode("H"),p=packet(0,bytes,false),w=new DataView(p.buffer);
+    w.setUint32(12,font,true);w.setUint32(16,0,true);
+    let next=checked(p);new DataView(next.buffer).setUint32(104,1,true);next[108]=72;
+    next=checked(next);const reply=new DataView(next.buffer);
+    assert.equal(reply.getUint32(72,true),2);reply.setUint32(44,1,true);reply.setFloat32(48,730,true);
+    const out=checked(next);
+    assert.equal(new DataView(out.buffer).getFloat32(80,true),Math.fround(13.25*Math.fround(730/1000)));
+  }
+});
 test("registered font keeps full identity words and avoids reserved mono shortcuts",()=>{
   const bytes=new TextEncoder().encode("A"),p=packet(0,bytes),w=new DataView(p.buffer);w.setUint32(12,2,true);
   let first=checked(p);const v=new DataView(first.buffer);v.setUint32(104,1,true);first[108]=65;

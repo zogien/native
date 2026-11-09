@@ -3,6 +3,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("canvas_layers_core");
 const decoder = @import("canvas_layers_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const parity = @import("effects_media_parity.zig");
 const canvas = sdk.canvas;
 const geometry = sdk.geometry;
@@ -83,7 +84,7 @@ pub fn nativeSuffix(model: *const NativeModel, builder: *canvas.Builder, _: geom
     if (model.phase == 1) try builder.strokePath(.{ .id = 7, .elements = &open_elements, .stroke = .{ .width = 6.5, .fill = .{ .color = .rgba(0.75, 0.5, 0.25, 1) } }, .cap = .butt });
 }
 fn options(comptime compiled: bool) Adapter.Options {
-    return .{ .name = "canvas-layers", .scene = scene, .canvas_label = "layers-canvas", .view = if (compiled) decoder.build else View.build };
+    return .{ .name = "canvas-layers", .scene = scene, .canvas_label = "layers-canvas", .view = if (compiled) CompiledView.build else View.build };
 }
 fn pointerClick(runtime: *sdk.Runtime, app: sdk.App, root: *const canvas.Widget, name: []const u8, timestamp: u64) !void {
     const widget = parity.find(root, name) orelse return error.WidgetNotFound;

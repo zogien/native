@@ -55,7 +55,7 @@ pub fn resultValid(request: []const u8, result: []const u8) bool {
 pub const Result = struct { width: f32, accepted: bool, ink: metrics.TextInkMetrics };
 pub fn measure(policy: Policy, registered_face: ?*const font_ttf.Face, font: u64, text: []const u8, size: f32, mode: Mode, advances: []f32) Result {
     if (mode == .advances and advances.len < text.len) @panic("registered font advance buffer too short");
-    const face = registered_face orelse &font_ttf.geist_regular;
+    const face = registered_face orelse font_ttf.bundledFaceForFontId(font);
     var request: [128]u8 = @splat(0);
     var result: [128]u8 = undefined;
     request[0..5].* = .{ 62, 1, @intFromEnum(mode), 0, @intFromBool(registered_face != null) };

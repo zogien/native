@@ -340,6 +340,8 @@ pub const conditional_exports = [_][]const u8{
     "native_status_policy",
     "native_virtual_requests",
     "native_virtual_view",
+    "native_dev_view_prepare",
+    "native_dev_view_reset",
 };
 
 // ------------------------------------------------------------ reading

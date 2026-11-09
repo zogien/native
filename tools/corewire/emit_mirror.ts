@@ -28,7 +28,7 @@ class MirrorEmitter extends CodeWriter {
     this.inlined = projectionPlan(this.s).inlined;
   }
   run(): void {
-    this.header(); this.mirrorTypes(); this.modelStruct(); this.modelStruct(true); this.msgUnion(); this.wiringAliases();
+    this.header(); this.mirrorTypes(); this.modelStruct(); this.modelStruct(true); this.msgUnion(); this.wiringAliases(); this.hostFacts();
     this.tagTable(); this.entryPoints(); this.channels(); this.helperPlumbing(); this.snapshotPlumbing();
   }
   header(): void {
@@ -126,22 +126,31 @@ class MirrorEmitter extends CodeWriter {
           [zigIdent(h.name), name, params, returns, tuple, returns, String(i), h.arena ? "arena" : "shim_rt.frameAllocator()"]);
       }
     }
-    // Native markup and its Debug interpreter need the same stable helpers
-    // even when the compiled TypeScript view ABI is absent.
-    if (usesVirtualExtentHelpers(this.s)) this.virtualEstimates();
+    // Native markup and its Debug interpreter reflect over the model type, so
+    // it forwards the file-scope virtual extent capability.
+    if (usesVirtualExtentHelpers(this.s)) this.raw(text.virtualExtentForwarding);
     this.unboundDecl(this.s.model_unbound); this.raw("\n};\n");
   }
+  hostFacts(): void {
+    const windows = this.s.model_helpers.some(helper => helper.name === "windows");
+    this.print(text.hostFacts, [String(windows)]);
+    if (usesVirtualExtentHelpers(this.s)) { this.raw(text.virtualExtentRoot); this.virtualEstimates(); }
+  }
   virtualEstimates(): void {
-    this.raw('\n    /// Stable compiled helper identities; retained tables hold no model or arena pointer.\n    pub fn virtualExtentHelper(name: []const u8) ?u32 {\n');
+    this.raw('\n/// Stable compiled helper identities; retained tables hold no model or arena pointer.\npub fn virtualExtentHelper(name: []const u8) ?u32 {\n');
     const helpers = this.s.model_helpers.map((helper, index) => ({ helper, index })).filter(({ helper }) => helper.params.length === 1 && ["i64", "f64"].includes(helper.params[0].kind) && ["i64", "f64"].includes(helper.returns.kind));
-    for (const { helper, index } of helpers) this.print('        if (std.mem.eql(u8, name, "{f}")) return {d};\n', [zigString(helper.name), String(index)]);
-    this.raw('        return null;\n    }\n\n    pub fn virtualExtentEstimate(context: ?*const anyopaque, index: u64) f32 {\n        if (index > 9007199254740991) @panic("virtual extent index exceeds safe integers");\n        const helper: u32 = @intCast(@intFromPtr(context orelse @panic("missing virtual extent identity")) - 1);\n        var args: [8]u8 = undefined;\n        defer abi.frame_reset();\n        const value: f64 = switch (helper) {\n');
+    if (helpers.length === 0) {
+      this.raw('    _ = name;\n    return null;\n}\n\npub fn virtualExtentEstimate(context: ?*const anyopaque, index: u64) f32 {\n    _ = context;\n    _ = index;\n    @panic("invalid virtual extent helper");\n}\n');
+      return;
+    }
+    for (const { helper, index } of helpers) this.print('    if (std.mem.eql(u8, name, "{f}")) return {d};\n', [zigString(helper.name), String(index)]);
+    this.raw('    return null;\n}\n\npub fn virtualExtentEstimate(context: ?*const anyopaque, index: u64) f32 {\n    if (index > 9007199254740991) @panic("virtual extent index exceeds safe integers");\n    const helper: u32 = @intCast(@intFromPtr(context orelse @panic("missing virtual extent identity")) - 1);\n    var args: [8]u8 = undefined;\n    defer abi.frame_reset();\n    const value: f64 = switch (helper) {\n');
     for (const { helper, index } of helpers) {
       const parameter = this.spellRef(helper.params[0], "helpers", helper.name, "helpers." + helper.name + ".params[0]");
       const encoded = helper.params[0].kind === "i64" ? "@as(" + parameter + ", @intCast(index))" : "@as(f64, @floatFromInt(index))";
-      this.print('            {d} => blk: {{\n                std.mem.writeInt(u64, &args, @bitCast({s}), .little);\n                break :blk {s}callHelper({s}, {d}, &args, shim_rt.frameAllocator()){s};\n            }},\n', [String(index), encoded, helper.returns.kind === "i64" ? "@floatFromInt(" : "", this.spellRef(helper.returns, "helpers", helper.name, "helpers." + helper.name + ".return"), String(index), helper.returns.kind === "i64" ? ")" : ""]);
+      this.print('        {d} => blk: {{\n            std.mem.writeInt(u64, &args, @bitCast({s}), .little);\n            break :blk {s}callHelper({s}, {d}, &args, shim_rt.frameAllocator()){s};\n        }},\n', [String(index), encoded, helper.returns.kind === "i64" ? "@floatFromInt(" : "", this.spellRef(helper.returns, "helpers", helper.name, "helpers." + helper.name + ".return"), String(index), helper.returns.kind === "i64" ? ")" : ""]);
     }
-    this.raw('            else => @panic("invalid virtual extent helper"),\n        };\n        if (!std.math.isFinite(value) or value < 0 or value > std.math.floatMax(f32)) @panic("invalid virtual extent result");\n        return @floatCast(value);\n    }\n');
+    this.raw('        else => @panic("invalid virtual extent helper"),\n    };\n    if (!std.math.isFinite(value) or value < 0 or value > std.math.floatMax(f32)) @panic("invalid virtual extent result");\n    return @floatCast(value);\n}\n');
   }
   unboundDecl(names: string[]): void {
     if (names.length === 0) return;
@@ -258,6 +267,7 @@ class MirrorEmitter extends CodeWriter {
       { name: "native_db_policy", code: text.nativeDbPolicy }, { name: "native_effect_policy", code: text.nativeEffectPolicy },
       { name: "native_stream_policy", code: text.nativeStreamPolicy }, { name: "native_window_policy", code: text.nativeWindowPolicy },
       { name: "native_theme_policy", code: text.nativeThemePolicy }, { name: "native_status_policy", code: text.nativeStatusPolicy },
+      { name: "native_dev_view_prepare", code: text.nativeDevView },
     ];
     for (const e of extensions) if (this.s.abi.exports.includes(e.name)) this.raw(e.code);
     if (c.command_msg) this.print(text.commandChannel, [msg]);

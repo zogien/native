@@ -21,11 +21,11 @@ jobs:
       tag: ${{ steps.metadata.outputs.tag }}
       channel: ${{ steps.metadata.outputs.channel }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
-      - uses: vercel-labs/setup-zig@v1
+      - uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
         with:
           version: 0.16.0
       - name: Check release identity and tag
@@ -48,7 +48,7 @@ jobs:
       - name: Build all platform binaries
         run: bash packages/native-sdk/scripts/build-binaries.sh
       - name: Verify installed packages and default app build
-        run: npm --prefix packages/native-sdk run package:check
+        run: npm --prefix packages/native-sdk run package:check:install
       - name: Pack platform packages and main package
         run: |
           mkdir -p zig-out/packages
@@ -79,8 +79,8 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org

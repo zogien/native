@@ -452,8 +452,14 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             if (options.pty_key_resolver != null) @panic("TsUiApp owns pty_key_resolver - remove custom PTY identity wiring");
             stamped.pty_key_resolver = Host.resolvePtyKey;
             if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+                // The compiled core's window policy answers from its request bytes
+                // alone (no module state, deterministic core), so layout may reuse
+                // an earlier answer to an identical request.
+                canvas.decision_reuse.registerPurePolicy(core.nativeWindowPolicy);
                 if (options.construction_policy != null) @panic("TsUiApp owns construction_policy - remove custom construction wiring");
                 stamped.construction_policy = core.nativeWindowPolicy;
+                if (options.expression_policy != null) @panic("TsUiApp owns expression_policy - remove custom expression wiring");
+                stamped.expression_policy = core.nativeWindowPolicy;
                 if (options.composition_policy != null) @panic("TsUiApp owns composition_policy - remove custom composition wiring");
                 stamped.composition_policy = core.nativeWindowPolicy;
                 if (options.code_content_policy != null) @panic("TsUiApp owns code_content_policy - remove custom code content wiring");
@@ -494,6 +500,24 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.widget_routing_policy = core.nativeWindowPolicy;
                 if (options.widget_change_policy != null) @panic("TsUiApp owns widget_change_policy - remove custom change wiring");
                 stamped.widget_change_policy = core.nativeWindowPolicy;
+                if (options.widget_retention_policy != null) @panic("TsUiApp owns widget_retention_policy - remove custom retention wiring");
+                stamped.widget_retention_policy = core.nativeWindowPolicy;
+                if (options.widget_reconcile_policy != null) @panic("TsUiApp owns widget_reconcile_policy - remove custom reconcile wiring");
+                stamped.widget_reconcile_policy = core.nativeWindowPolicy;
+                if (options.scroll_tree_policy != null) @panic("TsUiApp owns scroll_tree_policy - remove custom scroll tree wiring");
+                stamped.scroll_tree_policy = core.nativeWindowPolicy;
+                if (options.scroll_mutation_policy != null) @panic("TsUiApp owns scroll_mutation_policy - remove custom scroll mutation wiring");
+                stamped.scroll_mutation_policy = core.nativeWindowPolicy;
+                if (options.widget_continuity_policy != null) @panic("TsUiApp owns widget_continuity_policy - remove custom continuity wiring");
+                stamped.widget_continuity_policy = core.nativeWindowPolicy;
+                if (options.staged_rebuild_policy != null) @panic("TsUiApp owns staged_rebuild_policy - remove custom staged rebuild wiring");
+                stamped.staged_rebuild_policy = core.nativeWindowPolicy;
+                if (options.virtual_window_policy != null) @panic("TsUiApp owns virtual_window_policy - remove custom virtual window wiring");
+                stamped.virtual_window_policy = core.nativeWindowPolicy;
+                if (options.context_menu_policy != null) @panic("TsUiApp owns context_menu_policy - remove custom context menu wiring");
+                stamped.context_menu_policy = core.nativeWindowPolicy;
+                if (options.web_pane_policy != null) @panic("TsUiApp owns web_pane_policy - remove custom pane coordination wiring");
+                stamped.web_pane_policy = core.nativeWindowPolicy;
                 if (options.widget_paint_policy != null) @panic("TsUiApp owns widget_paint_policy - remove custom paint wiring");
                 stamped.widget_paint_policy = core.nativeWindowPolicy;
                 if (options.widget_presentation_policy != null) @panic("TsUiApp owns widget_presentation_policy - remove custom presentation wiring");

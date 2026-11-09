@@ -101,7 +101,7 @@ pub fn initModel() Model {
 }
 
 pub fn mobileOptions() Adapter.Options {
-    if (comptime @hasDecl(core.Model, "windows")) {
+    if (comptime core.has_windows) {
         @compileError("model-declared secondary windows are a desktop shell capability; omit windows(model) from mobile targets");
     }
     var options: Adapter.Options = .{

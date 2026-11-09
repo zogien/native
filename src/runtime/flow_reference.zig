@@ -252,6 +252,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.snapshot_policy = app.snapshot_policy;
                     self.frame_profile.policy = app.snapshot_policy;
                     self.command_policy = app.command_policy;
+                    self.context_menu_policy = app.context_menu_policy;
                     self.text_cache_policy = app.text_cache_policy;
                     self.render_cache_policy = app.render_cache_policy;
                     self.render_plan_policy = app.render_plan_policy;

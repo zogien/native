@@ -3,6 +3,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("composition_core");
 const decoder = @import("composition_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const parity = @import("effects_media_parity.zig");
 const canvas = sdk.canvas;
 const Ui = canvas.Ui(core.Msg);
@@ -56,7 +57,7 @@ test "compiled app composition preserves whole generated trees geometry handlers
                 var reference = Ui.init(arena.allocator());
                 var compiled = Ui.init(arena.allocator());
                 const expected = try reference.finalize(View.build(&reference, &model));
-                const root = decoder.build(&compiled, &model);
+                const root = CompiledView.build(&compiled, &model);
                 core.rt.frameReset();
                 const actual = try compiled.finalize(root);
                 try parity.equal(expected.root, actual.root);

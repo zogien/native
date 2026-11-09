@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("code_editor_core");
 const decoder = @import("code_editor_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("code-editor-reference/main.zig");
 const Host = sdk.TsCoreHost(core);
 const testing = std.testing;
@@ -442,7 +443,7 @@ fn viewEqual(expected: *const reference.AppModel, actual: *const core.Model) !vo
         var a = reference.BrowserUi.init(arena.allocator());
         const old = try a.finalize(reference.CompiledCodeEditorView.build(&a, &session.browser));
         var b = canvas.Ui(core.Msg).init(arena.allocator());
-        const new = try b.finalize(if (index == 0) decoder.build(&b, actual) else decoder.buildWindow(&b, actual, labels[index]));
+        const new = try b.finalize(if (index == 0) CompiledView.build(&b, actual) else CompiledView.buildWindow(&b, actual, labels[index]));
         core.rt.frameReset();
         try widgetEqual(old.root, new.root);
         try testing.expectEqual(old.handlers.len, new.handlers.len);

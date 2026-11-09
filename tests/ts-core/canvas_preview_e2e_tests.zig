@@ -2,6 +2,7 @@ const std = @import("std");
 const native_sdk = @import("native_sdk");
 const core = @import("canvas_preview_core");
 const decoder = @import("canvas_preview_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const main = @import("canvas_preview_reference.zig");
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
@@ -16,7 +17,7 @@ fn createApp() !*PreviewApp {
         .name = "canvas-preview",
         .scene = main.shell_scene,
         .canvas_label = main.canvas_label,
-        .view = decoder.build,
+        .view = CompiledView.build,
         .on_command = core.commandMsg,
     });
 }
@@ -96,7 +97,7 @@ fn viewParity(native: *const main.Model, model: *const core.Model) !void {
     const View = canvas.CompiledMarkupView(core.Model, core.Msg, @embedFile("app.native"));
     for (0..2) |backend| {
         var b = Ui.init(arena.allocator());
-        const root = if (backend == 0) View.build(&b, model) else decoder.build(&b, model);
+        const root = if (backend == 0) View.build(&b, model) else CompiledView.build(&b, model);
         core.rt.frameReset();
         const actual = try b.finalize(root);
         try equal(expected.root, actual.root);

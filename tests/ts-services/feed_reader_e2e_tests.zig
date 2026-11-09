@@ -112,6 +112,7 @@ fn referenceWindowView(ui: *App.Ui, model: *const core.Model, label: []const u8)
     return CompiledWindowView.build(ui, model);
 }
 const TsView = @import("ts_compiled_view.zig");
+const CompiledView = TsView.ViewFor(core.Model);
 
 const fixture_feed = @embedFile("fixture_feed.xml");
 
@@ -131,8 +132,8 @@ fn appOptions(reference: bool) App.Options {
         .name = "feed-reader-e2e",
         .scene = app_scene,
         .canvas_label = canvas_label,
-        .view = if (reference) CompiledAppView.build else TsView.build,
-        .window_view = if (reference) referenceWindowView else TsView.buildWindow,
+        .view = if (reference) CompiledAppView.build else CompiledView.build,
+        .window_view = if (reference) referenceWindowView else CompiledView.buildWindow,
         .on_command = core.commandMsg,
     };
 }
@@ -716,10 +717,10 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     // The wire may carry exact raw bytes instead of a JSON string. Keep
     // the full buffer comparisons above and assert text through its consumer.
     var primary_ui = canvas.Ui(core.Msg).init(allocator);
-    const primary_tree = try primary_ui.finalize(TsView.build(&primary_ui, Bridge.model()));
+    const primary_tree = try primary_ui.finalize(CompiledView.build(&primary_ui, Bridge.model()));
     try std.testing.expect(findTextIn(primary_tree.root, "Service Feed Reader"));
     var secondary_ui = canvas.Ui(core.Msg).init(allocator);
-    const secondary_tree = try secondary_ui.finalize(TsView.buildWindow(&secondary_ui, Bridge.model(), "feed"));
+    const secondary_tree = try secondary_ui.finalize(CompiledView.buildWindow(&secondary_ui, Bridge.model(), "feed"));
     try std.testing.expect(findTextIn(secondary_tree.root, "Native SDK Notes"));
 }
 

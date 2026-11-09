@@ -78,14 +78,46 @@ const ts_view = @import("compiled_view.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
-/// Re-exported so the model-contract step (and any test) reflects the
-/// core's real surface: `native check` verifies app.native against it.
-pub const Model = core.Model;
 pub const Msg = core.Msg;
 
 const dev = builtin.mode == .Debug;
-const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled, .compiled_model = ts_view.enabled });
+const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled, .compiled_model = ts_view.enabled, .view_reload = view_reload_enabled });
 const App = Adapter.App;
+
+/// A Debug `native dev` build of compiled views (`-Dview-reload`)
+/// stages the development view exports; every other build has neither the
+/// exports nor this wiring.
+const view_reload_enabled = dev and @hasDecl(core, "nativeDevViewPrepare");
+var view_reload: if (view_reload_enabled) ViewReload else void = if (view_reload_enabled) .{} else {};
+
+const ViewReload = struct {
+    driver: ?native_sdk.view_reload.Driver(core) = null,
+
+    /// Announce this session to the markup watcher and hook the app's
+    /// watch timer to its updates. Replays keep the views they recorded.
+    fn arm(self: *ViewReload, init: std.process.Init) void {
+        const dir = init.environ_map.get(native_sdk.view_reload.env_var) orelse return;
+        if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY") != null) return;
+        var session: [8]u8 = undefined;
+        init.io.random(&session);
+        self.driver = native_sdk.view_reload.Driver(core).init(std.heap.page_allocator, init.io, dir, std.mem.readInt(u64, &session, .little)) catch |err| {
+            std.debug.print("markup reload is off: could not open {s} ({t})\n", .{ dir, err });
+            return;
+        };
+        self.driver.?.announce(@embedFile("view_reload_contract.json")) catch |err| {
+            std.debug.print("markup reload is off: could not write {s}/{s} ({t})\n", .{ dir, native_sdk.view_reload.build_file, err });
+            self.disarm();
+            return;
+        };
+        native_sdk.view_reload.installed = self.driver.?.hook();
+    }
+
+    fn disarm(self: *ViewReload) void {
+        native_sdk.view_reload.installed = null;
+        if (self.driver) |*driver| driver.deinit();
+        self.driver = null;
+    }
+};
 
 const shell_scene = native_sdk.app_manifest.shellConfigFrom(manifest);
 const canvas_label = native_sdk.app_manifest.firstGpuSurfaceLabel(shell_scene);
@@ -142,7 +174,7 @@ fn appOptions(io: ?std.Io) Adapter.Options {
         .theme_accent = comptime runner.manifestThemeAccent(),
     };
     if (comptime ts_view.enabled) options.view = ts_view.buildRuntime else if (comptime !dev) options.view = CompiledAppView.build;
-    if (comptime @hasDecl(core.Model, "windows")) {
+    if (comptime core.has_windows) {
         if (comptime ts_view.enabled) {
             options.window_view = ts_view.buildRuntimeWindow;
         } else {
@@ -377,6 +409,12 @@ pub fn main(init: std.process.Init) !void {
     }
     defer if (comptime manifestDeclaresPersist()) persist_restore_value.deinit(std.heap.page_allocator);
     defer if (persist_coordinator_started) persist_coordinator_value.deinit();
+
+    // Markup reload from `native dev`: only a Debug build made with
+    // `-Dview-reload` has the development exports, and it arms only when
+    // the dev loop names its update directory.
+    if (comptime view_reload_enabled) view_reload.arm(init);
+    defer if (comptime view_reload_enabled) view_reload.disarm();
 
     // The app struct (and any real model) is multi-MB: `create`
     // heap-allocates and constructs in place, so neither rides the stack.

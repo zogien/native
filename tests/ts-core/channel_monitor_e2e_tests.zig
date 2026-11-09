@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("channel_monitor_core");
 const decoder = @import("channel_monitor_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("channel-monitor-reference/main.zig");
 const parity = @import("effects_media_parity.zig");
 const Host = sdk.TsCoreHost(core);
@@ -58,7 +59,7 @@ fn viewParity(native: *const reference.Model, model: *const core.Model) !void {
     const View = canvas.CompiledMarkupView(core.Model, core.Msg, @embedFile("app.native"));
     for (0..2) |backend| {
         var b = Ui.init(arena.allocator());
-        const actual = try b.finalize(if (backend == 0) View.build(&b, model) else decoder.build(&b, model));
+        const actual = try b.finalize(if (backend == 0) View.build(&b, model) else CompiledView.build(&b, model));
         core.rt.frameReset();
         try parity.equal(expected.root, actual.root);
         try testing.expectEqual(expected.handlers.len, actual.handlers.len);
@@ -346,7 +347,7 @@ fn monitorReplay(comptime compiled_view: bool, failed: bool) !void {
     defer if (full_model) |bytes| testing.allocator.free(bytes);
     defer if (persistence) |bytes| testing.allocator.free(bytes);
     {
-        const state = try Adapter.create(testing.allocator, .{}, .{ .name = "channel-monitor", .scene = shell_scene, .canvas_label = canvas_label, .view = if (compiled_view) decoder.build else View.build });
+        const state = try Adapter.create(testing.allocator, .{}, .{ .name = "channel-monitor", .scene = shell_scene, .canvas_label = canvas_label, .view = if (compiled_view) CompiledView.build else View.build });
         defer state.destroy();
         state.effects.executor = .fake;
         state.effects.channel_sources = .{ .context = &source, .start_fn = Source.start };
@@ -386,7 +387,7 @@ fn monitorReplay(comptime compiled_view: bool, failed: bool) !void {
         try testing.expect(recorder.effect_count >= 38);
     }
     const calls = source.calls;
-    const state = try Adapter.create(testing.allocator, .{}, .{ .name = "channel-monitor", .scene = shell_scene, .canvas_label = canvas_label, .view = if (compiled_view) decoder.build else View.build });
+    const state = try Adapter.create(testing.allocator, .{}, .{ .name = "channel-monitor", .scene = shell_scene, .canvas_label = canvas_label, .view = if (compiled_view) CompiledView.build else View.build });
     defer state.destroy();
     state.effects.channel_sources = .{ .context = &source, .start_fn = Source.start };
     const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(560, 420) });

@@ -92,6 +92,10 @@ pub const RunOptions = struct {
             .version = manifestStringField("version"),
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
+            .webview_inspection = if (@hasDecl(build_options, "webview_inspection"))
+                build_options.webview_inspection orelse (@import("builtin").mode == .Debug)
+            else
+                @import("builtin").mode == .Debug,
             .declares_tray = manifestDeclaresTrayCapability(),
             .dock_visible = manifestDockVisible(),
             .window_title = self.window_title,
@@ -1469,4 +1473,14 @@ fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *n
         _ = window_placement.applySavedWindow(&app_info.main_window, store.loadWindow(app_info.main_window.label, &buffers.read) catch null);
     }
     return store;
+}
+
+test "runner inspection capability follows the app build mode and explicit override" {
+    var buffers: StateBuffers = .{};
+    const info = (RunOptions{ .app_name = "inspection-test", .bundle_id = "dev.native_sdk.inspection_test" }).appInfo(&buffers);
+    if (comptime @hasDecl(build_options, "webview_inspection_expected")) {
+        try std.testing.expectEqual(build_options.webview_inspection_expected, info.webview_inspection);
+    }
+    // Direct embedding stays default-deny, including inside Debug builds.
+    try std.testing.expect(!(native_sdk.AppInfo{}).webview_inspection);
 }

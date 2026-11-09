@@ -24,7 +24,7 @@ fn initialize(bytes: []u8, mode: u8, available: bool, font: u64, size: f32, leng
     put(bytes, 12, if (mode == 1 or mode == 2) length else 0);
     std.mem.writeInt(u64, bytes[16..24], font, .little);
     setFloat(bytes, 24, size);
-    const face = &font_ttf.geist_regular;
+    const face = font_ttf.bundledFaceForFontId(font);
     setFloat(bytes, 28, face.advance(0) / face.units_per_em);
 }
 /// Validate every range and codepoint before invoking a font capability.
@@ -57,7 +57,45 @@ fn run(policy: Policy, request: []const u8, result: []u8) void {
     @memset(result, 0xa5);
     if (policy(request, result) != result.len or !resultValid(request, result)) @panic("invalid scalar text decision");
 }
+/// Text layout asks for the same glyph and cluster advances on every frame.
+/// An estimate depends only on the policy, the font, the size, the cluster
+/// flag and the bytes (bundled font tables are static), so short probes keep
+/// their exact result per thread instead of re-entering a policy registered as
+/// pure (`decision_reuse.registerPurePolicy`). A slot
+/// is reused only when every input matches; a collision just replaces it.
+const EstimateEntry = struct {
+    policy: ?Policy = null,
+    font: u64 = 0,
+    size: u32 = 0,
+    cluster: bool = false,
+    len: u8 = 0,
+    bytes: [estimate_key_bytes]u8 = undefined,
+    advance: f32 = 0,
+};
+const estimate_key_bytes = 32;
+const estimate_slots = 1024;
+threadlocal var estimates: [estimate_slots]EstimateEntry = @splat(.{});
+
+fn estimateSlot(policy: Policy, font: u64, text: []const u8, size: u32, cluster: bool) *EstimateEntry {
+    var hash: u64 = 0xcbf29ce484222325 ^ font ^ (@as(u64, size) << 1) ^ @intFromBool(cluster) ^ @intFromPtr(policy);
+    for (text) |byte| hash = (hash ^ byte) *% 0x100000001b3;
+    hash ^= hash >> 29;
+    return &estimates[@intCast(hash % estimate_slots)];
+}
+
 pub fn estimate(policy: Policy, font: u64, text: []const u8, size: f32, cluster: bool) f32 {
+    if (text.len > estimate_key_bytes or !@import("decision_reuse.zig").isPure(policy)) return estimateUncached(policy, font, text, size, cluster);
+    const size_bits: u32 = @bitCast(size);
+    const slot = estimateSlot(policy, font, text, size_bits, cluster);
+    if (slot.policy == policy and slot.font == font and slot.size == size_bits and slot.cluster == cluster and
+        slot.len == text.len and std.mem.eql(u8, slot.bytes[0..text.len], text)) return slot.advance;
+    const advance = estimateUncached(policy, font, text, size, cluster);
+    slot.* = .{ .policy = policy, .font = font, .size = size_bits, .cluster = cluster, .len = @intCast(text.len), .advance = advance };
+    @memcpy(slot.bytes[0..text.len], text);
+    return advance;
+}
+
+fn estimateUncached(policy: Policy, font: u64, text: []const u8, size: f32, cluster: bool) f32 {
     const total = std.math.add(usize, 64, std.math.mul(usize, text.len, 9) catch @panic("scalar text capacity")) catch @panic("scalar text capacity");
     if (total > std.math.maxInt(u32)) @panic("scalar text packet range");
     // Glyph and cluster probes should not initialize a whole run's scratch
@@ -88,7 +126,7 @@ fn estimateInStorage(policy: Policy, font: u64, text: []const u8, size: f32, clu
     for (0..word(packet, 36)) |i| {
         const cp = word(packet, 64 + i * 8);
         if (cp == 0xffffffff) continue;
-        if (metrics.bundledGlyphAdvanceEm(@intCast(cp))) |advance| setFloat(packet, 64 + i * 8 + 4, advance);
+        if (metrics.bundledGlyphAdvanceEmForFont(font, @intCast(cp))) |advance| setFloat(packet, 64 + i * 8 + 4, advance);
     }
     run(policy, packet, result);
     if (result[3] != 2) @panic("scalar text did not finish");
@@ -153,4 +191,44 @@ test "scalar text copied transport rejects oversized font facts and changed immu
     try std.testing.expect(resultValid(&request, &result));
     result[68] ^= 1;
     try std.testing.expect(!resultValid(&request, &result));
+}
+
+var estimate_test_calls: usize = 0;
+fn estimateTestPolicy(request: []const u8, result: []u8) usize {
+    estimate_test_calls += 1;
+    @memcpy(result[0..request.len], request);
+    const slots: usize = word(request, 12);
+    @memset(result[32..60], 0);
+    @memset(result[64 .. 64 + slots * 8], 0);
+    result[3] = 2;
+    // A deterministic stand-in decision over every input the cache keys on.
+    var advance = float(request, 24) * @as(f32, @floatFromInt(request[2]));
+    for (request[64 + slots * 8 ..]) |byte| advance += @floatFromInt(byte);
+    advance += @floatFromInt(std.mem.readInt(u64, request[16..24], .little));
+    setFloat(result, 32, advance);
+    return request.len;
+}
+
+test "scalar estimates reuse exact results only for identical inputs" {
+    estimate_test_calls = 0;
+    _ = estimate(estimateTestPolicy, 7, "ab", 12, true);
+    _ = estimate(estimateTestPolicy, 7, "ab", 12, true);
+    try std.testing.expectEqual(@as(usize, 2), estimate_test_calls);
+    @import("decision_reuse.zig").registerPurePolicy(estimateTestPolicy);
+    estimate_test_calls = 0;
+    const first = estimate(estimateTestPolicy, 7, "ab", 12, true);
+    try std.testing.expectEqual(first, estimate(estimateTestPolicy, 7, "ab", 12, true));
+    try std.testing.expectEqual(@as(usize, 1), estimate_test_calls);
+    // Every keyed input selects a different decision.
+    try std.testing.expect(estimate(estimateTestPolicy, 8, "ab", 12, true) != first);
+    try std.testing.expect(estimate(estimateTestPolicy, 7, "ac", 12, true) != first);
+    try std.testing.expect(estimate(estimateTestPolicy, 7, "ab", 13, true) != first);
+    try std.testing.expect(estimate(estimateTestPolicy, 7, "ab", 12, false) != first);
+    try std.testing.expect(estimate(estimateTestPolicy, 7, "a", 12, true) != first);
+    try std.testing.expectEqual(@as(usize, 6), estimate_test_calls);
+    // Probes longer than the key always run the policy.
+    const long = "a long run that does not fit the cached probe key";
+    _ = estimate(estimateTestPolicy, 7, long, 12, false);
+    _ = estimate(estimateTestPolicy, 7, long, 12, false);
+    try std.testing.expectEqual(@as(usize, 8), estimate_test_calls);
 }

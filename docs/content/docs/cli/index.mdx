@@ -66,7 +66,7 @@ Build a ReleaseFast binary into `zig-out/bin/`, printing a one-line completion a
 native test [dir]
 ```
 
-Run the app's test suite, printing the zig build summary (step/test tally) plus a final `native test: passed` line. It also refreshes the model-contract artifact `native check` reads.
+Run the app's test suite, printing the zig build summary (step/test tally) plus a final `native test: passed` line. For a Zig core it also refreshes the model-contract artifact `native check` reads.
 
 ### `native check`
 
@@ -74,7 +74,7 @@ Run the app's test suite, printing the zig build summary (step/test tally) plus 
 native check [dir] [--strict]
 ```
 
-Validate the whole tree without building the app. A TypeScript core (`src/core.ts`) runs the subset checker first — real tsc semantics plus the app-core rules, diagnostics verbatim — then every `src/**.native` markup file and the app manifest are checked as before. With a fresh model contract (`zig-out/model-contract.zon`, refreshed by `native test`) it also checks bindings, iterables, and message tags against your `Model`/`Msg` — for a TypeScript core, against its model contract — and warns on model state no view uses. Without the artifact it degrades to structural checking and says so: "model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks". Markup accessibility findings are reported per file in full, and a failing `src/*.native` file that no Zig source embeds gets a leftover-file hint.
+Validate the whole tree without building the app. A TypeScript core (`src/core.ts`) runs the subset checker first — real tsc semantics plus the app-core rules, diagnostics verbatim — then every `src/**.native` markup file and the app manifest are checked. For a TypeScript core, the views are then compiled against the core with the build's own view compiler, so bindings, iterables, and message tags are always checked, and model state or `Msg` kinds no view uses are reported as warnings. A Zig core checks the same things against a fresh model contract (`zig-out/model-contract.zon`, refreshed by `native test`); without the artifact it degrades to structural checking and says so: "model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks". Markup accessibility findings are reported per file in full, and a failing `src/*.native` file that no Zig source embeds gets a leftover-file hint.
 
 <dl>
   <dt><code>--strict</code></dt>

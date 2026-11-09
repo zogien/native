@@ -31,6 +31,8 @@
 
 const authorization = @import("authorization_policy.zig");
 const std = @import("std");
+pub const web_pane_policy = @import("web_pane_policy.zig");
+pub const virtual_window_policy = @import("virtual_window_policy.zig");
 const builtin = @import("builtin");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
@@ -39,6 +41,7 @@ const security = @import("../security/root.zig");
 const platform = @import("../platform/root.zig");
 const core = @import("core.zig");
 const canvas_frame = @import("canvas_frame.zig");
+const view_reload = @import("view_reload.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_events = @import("canvas_widget_events.zig");
 const drag_policy = @import("canvas_drag_policy.zig");
@@ -106,6 +109,11 @@ pub const UiAppFeatures = struct {
     /// Generated TypeScript views observe compiled state directly. This
     /// selects their stateless host handle instead of a decoded model mirror.
     compiled_model: bool = false,
+    /// Debug builds of compiled views that reload markup edits
+    /// (view_reload.zig). Their views report where each widget was
+    /// authored, so `provenance` and write-back work without the
+    /// runtime markup engine.
+    view_reload: bool = false,
 };
 
 pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {
@@ -125,6 +133,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Debug build (the dev loop) are present; everywhere else its
         /// state, polling, and registration collapse to nothing.
         const fragment_watch_enabled = features.runtime_markup and builtin.mode == .Debug;
+
+        /// A compiled view's own development reload (Debug only; see
+        /// view_reload.zig). When the app wiring installs a hook, the
+        /// markup watch timer polls it; this app rebuilds every open window
+        /// from the reloaded view and reports failures through the markup
+        /// diagnostic, keeping the last good view.
+        const view_reload_enabled = builtin.mode == .Debug;
+        /// The widget provenance table: the markup interpreter's, or a
+        /// reloading compiled view's (Debug).
+        const provenance_enabled = features.runtime_markup or (features.view_reload and view_reload_enabled);
 
         /// Fixed budget of watched fragments per app. Registrations past
         /// it are not watched (a teaching warning names the budget when
@@ -518,6 +536,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             chart_content_policy: ?canvas.ChartContentPolicy.Policy = null,
             markdown_content_policy: ?canvas.MarkdownContentPolicy.Policy = null,
             construction_policy: ?canvas.ComponentConstructionPolicy.Policy = null,
+            expression_policy: ?*const fn ([]const u8, []u8) usize = null,
             shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             view_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
             window_lifecycle_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -537,6 +556,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             markup_development_policy: markup_development.Policy = null,
             /// Installed by TsUiApp for compiled command and status policy.
             command_policy: ?*const fn ([]const u8, []u8) usize = null,
+            context_menu_policy: ?*const fn ([]const u8, []u8) usize = null,
             text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
             render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
             render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -571,6 +591,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             accessibility_policy: ?*const fn ([]const u8, []u8) usize = null,
             widget_routing_policy: ?*const fn ([]const u8, []u8) usize = null,
             widget_change_policy: ?*const fn ([]const u8, []u8) usize = null,
+            widget_retention_policy: ?*const fn ([]const u8, []u8) usize = null,
+            widget_reconcile_policy: ?*const fn ([]const u8, []u8) usize = null,
+            scroll_tree_policy: ?*const fn ([]const u8, []u8) usize = null,
+            scroll_mutation_policy: ?*const fn ([]const u8, []u8) usize = null,
+            widget_continuity_policy: ?*const fn ([]const u8, []u8) usize = null,
+            staged_rebuild_policy: ?*const fn ([]const u8, []u8) usize = null,
+            virtual_window_policy: ?virtual_window_policy.Policy = null,
             widget_paint_policy: ?*const fn ([]const u8, []u8) usize = null,
             widget_presentation_policy: ?*const fn ([]const u8, []u8) usize = null,
             terminal_paint_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -873,6 +900,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// selected (`-Dweb-engine=system|cef`); platforms without
             /// child webviews log a warning and continue.
             web_panes: ?*const fn (model: *const ModelT, out: []WebViewPane) usize = null,
+            web_pane_policy: ?web_pane_policy.Policy = null,
             /// Menu-bar extra installed once, on the installing frame.
             /// macOS-proven (`NSStatusItem`); platforms without a
             /// status-bar service log a warning and continue.
@@ -1130,16 +1158,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         markup_fragment_slots: if (fragment_watch_enabled) [max_watched_fragments]MarkupFragmentSlot else void,
         /// Widget provenance (write-back's read half): the retained
         /// structural-id -> authored-markup table the `provenance`
-        /// automation verb answers from. Exists only in markup-interpreter
-        /// builds; filled only while automation is enabled.
-        provenance: if (features.runtime_markup) ui_app_provenance.ProvenanceTable else void =
-            if (features.runtime_markup) .{} else {},
+        /// automation verb answers from. Exists in markup-interpreter builds
+        /// and in reloading compiled-view builds (Debug); filled only while
+        /// automation is enabled.
+        provenance: if (provenance_enabled) ui_app_provenance.ProvenanceTable else void =
+            if (provenance_enabled) .{} else {},
         /// Import-closure staging for the file table: filled by the
         /// hashing loader during a resolve, committed on adopt so a failed
         /// mid-edit reload can never re-anchor spans to bytes the running
         /// view was not built from.
-        provenance_closure: if (features.runtime_markup) ui_app_provenance.ClosureFiles else void =
-            if (features.runtime_markup) .{} else {},
+        provenance_closure: if (provenance_enabled) ui_app_provenance.ClosureFiles else void =
+            if (provenance_enabled) .{} else {},
         layout_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
         gpu_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined,
         /// Packet transport buffer, sized for the larger of the two wire
@@ -1454,8 +1483,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return .{
                 .model = model,
                 .options = options,
-                .provenance = if (comptime features.runtime_markup) .{ .policy = options.markup_development_policy, .allocator = backing } else {},
-                .provenance_closure = if (comptime features.runtime_markup) .{ .policy = options.markup_development_policy } else {},
+                .provenance = if (comptime provenance_enabled) .{ .policy = options.markup_development_policy, .allocator = backing } else {},
+                .provenance_closure = if (comptime provenance_enabled) .{ .policy = options.markup_development_policy } else {},
                 .backing = backing,
                 .arenas = .{
                     std.heap.ArenaAllocator.init(backing),
@@ -1522,8 +1551,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.* = .{
                 .model = undefined,
                 .options = options,
-                .provenance = if (comptime features.runtime_markup) .{ .policy = options.markup_development_policy, .allocator = backing } else {},
-                .provenance_closure = if (comptime features.runtime_markup) .{ .policy = options.markup_development_policy } else {},
+                .provenance = if (comptime provenance_enabled) .{ .policy = options.markup_development_policy, .allocator = backing } else {},
+                .provenance_closure = if (comptime provenance_enabled) .{ .policy = options.markup_development_policy } else {},
                 .backing = backing,
                 .arenas = .{
                     std.heap.ArenaAllocator.init(backing),
@@ -1604,6 +1633,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .snapshot_policy = self.options.snapshot_policy,
                 .host_flow_policy = self.options.host_flow_policy,
                 .command_policy = self.options.command_policy,
+                .context_menu_policy = self.options.context_menu_policy,
                 .text_cache_policy = self.options.text_cache_policy,
                 .render_cache_policy = self.options.render_cache_policy,
                 .render_plan_policy = self.options.render_plan_policy,
@@ -1676,6 +1706,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .minimize_fn = effectsMinimizeWindowByLabel,
                 .hide_fn = effectsHideWindowByLabel,
                 .show_fn = effectsShowWindowByLabel,
+                .replay_show_fn = effectsReplayShowWindowByLabel,
                 .dock_presence_fn = effectsSetDockPresence,
                 .quit_fn = effectsQuitApp,
             });
@@ -1688,6 +1719,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .start_capability_fn = effectsStartCapability,
                 .cancel_capability_fn = effectsCancelCapability,
                 .replay_window_result_fn = effectsRestoreWindowResult,
+                .keyboard_input = .{
+                    .context = runtime,
+                    .send_key_chord_fn = effectsSendKeyChord,
+                    .access_fn = effectsKeyboardInputAccess,
+                },
             });
             if (runtime.options.session_recorder) |recorder| {
                 if (self.options.recording_policy) |policy| recorder.recording_policy = policy;
@@ -2108,6 +2144,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.accessibility_policy = self.options.accessibility_policy;
                 tokens.widget_routing_policy = self.options.widget_routing_policy;
                 tokens.widget_change_policy = self.options.widget_change_policy;
+                tokens.widget_retention_policy = self.options.widget_retention_policy;
+                tokens.widget_reconcile_policy = self.options.widget_reconcile_policy;
+                tokens.scroll_tree_policy = self.options.scroll_tree_policy;
+                tokens.scroll_mutation_policy = self.options.scroll_mutation_policy;
+                tokens.widget_continuity_policy = self.options.widget_continuity_policy;
+                tokens.staged_rebuild_policy = self.options.staged_rebuild_policy;
                 tokens.widget_paint_policy = self.options.widget_paint_policy;
                 tokens.widget_presentation_policy = self.options.widget_presentation_policy;
                 tokens.widget_paint_walk_policy = self.options.widget_paint_walk_policy;
@@ -2177,6 +2219,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens.accessibility_policy = self.options.accessibility_policy;
             tokens.widget_routing_policy = self.options.widget_routing_policy;
             tokens.widget_change_policy = self.options.widget_change_policy;
+            tokens.widget_retention_policy = self.options.widget_retention_policy;
+            tokens.widget_reconcile_policy = self.options.widget_reconcile_policy;
+            tokens.scroll_tree_policy = self.options.scroll_tree_policy;
+            tokens.scroll_mutation_policy = self.options.scroll_mutation_policy;
+            tokens.widget_continuity_policy = self.options.widget_continuity_policy;
+            tokens.staged_rebuild_policy = self.options.staged_rebuild_policy;
             tokens.widget_paint_policy = self.options.widget_paint_policy;
             tokens.widget_presentation_policy = self.options.widget_presentation_policy;
             tokens.widget_paint_walk_policy = self.options.widget_paint_walk_policy;
@@ -2196,13 +2244,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Re-derive once per rebuild and reject malformed adapter input at
         /// the declaration boundary. A valid retained state contains no
         /// borrowed accent text, so it remains safe between dispatches.
-        fn refreshThemeState(self: *Self) error{InvalidThemeAccent}!void {
+        fn refreshThemeState(self: *Self, runtime: *Runtime) anyerror!void {
             // Complete-token paths outrank the stock-theme helper entirely.
             // Do not even validate an unused model accent: the app has
             // explicitly claimed the whole DesignTokens register.
             if (self.themeControl(.system).mode != 0) {
                 self.theme_state = .{};
                 self.theme_state_known = true;
+                try self.applyWindowColorSchemes(runtime);
                 return;
             }
             const next = if (self.options.theme_state_fn) |theme_state_fn| theme_state_fn(&self.model) else ThemeState{};
@@ -2216,6 +2265,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!self.theme_state_known or !std.meta.eql(self.theme_state, next)) {
                 self.theme_state = next;
                 self.theme_state_known = true;
+            }
+            try self.applyWindowColorSchemes(runtime);
+        }
+
+        fn windowColorScheme(self: *const Self) platform.WindowColorScheme {
+            return switch (self.theme_state.color_scheme) {
+                .system => .system,
+                .light => .light,
+                .dark => .dark,
+            };
+        }
+
+        /// Forward the model-owned declaration, not the resolved OS scheme:
+        /// `system` must remove the native override. Hidden and not-yet-rendered
+        /// windows participate too; no canvas installation is required.
+        fn applyWindowColorSchemes(self: *const Self, runtime: *Runtime) anyerror!void {
+            for (runtime.windows[0..runtime.window_count]) |window| {
+                if (window.info.open) try runtime.options.platform.services.setWindowColorScheme(window.info.id, self.windowColorScheme());
             }
         }
 
@@ -2303,14 +2370,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     self.tree = null;
                     self.main_tree_current = false;
                     self.releaseContextMenuSnapshotForWindow(window_id);
-                    try self.refreshThemeState();
+                    try self.refreshThemeState(runtime);
                     self.applyStatusItem(runtime);
                     self.applyWindows(runtime);
                     return;
                 }
             }
             self.syncModel(runtime, window_id);
-            try self.refreshThemeState();
+            try self.refreshThemeState(runtime);
             if (comptime features.runtime_markup) {
                 // Under automation, drive the interpreter from the first
                 // frame even when a compiled view is present: provenance
@@ -2591,6 +2658,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 ui.chart_content_policy = self.options.chart_content_policy;
                 ui.markdown_content_policy = self.options.markdown_content_policy;
                 ui.construction_policy = self.options.construction_policy;
+                ui.expression_policy = self.options.expression_policy;
                 // The house video chrome renders the channel's honest
                 // snapshot, stamped before the view fn runs — the model
                 // carries none of it.
@@ -2616,6 +2684,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         ui.provenance_sink = self.provenance.sink();
                     }
                 }
+                if (comptime features.view_reload and view_reload_enabled) {
+                    if (view_reload.installed != null and runtime.options.automation != null) {
+                        self.provenance.resetRecords();
+                        view_reload.view_files_len = 0;
+                        ui.provenance_sink = self.provenance.sink();
+                    }
+                }
                 // Frame-profile stamps (no-ops unless profiling is on): the
                 // view build fn + tree finalize is the `rebuild` stage, the
                 // flex pass below is `layout`; reconcile/emit are stamped at
@@ -2623,6 +2698,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // are attributed too.
                 const rebuild_begin = runtime.frame_profile.begin();
                 const node = try self.buildViewNode(&ui);
+                // A compiled view names its markup files as it decodes;
+                // they must be in the table before finalize appends the
+                // records that point at them.
+                if (comptime features.view_reload and view_reload_enabled) {
+                    if (ui.provenance_sink != null) self.commitViewSourceFiles();
+                }
                 tree = try ui.finalizeWithTokens(node, tokens);
                 runtime.frame_profile.end(.rebuild, rebuild_begin);
 
@@ -2672,9 +2753,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // coverage miss does, so the installed frame already
                 // consumed it; a residual delta rides to the next
                 // rebuild, atomically with the geometry either way.
-                const corrected = self.measureVirtualWindows(layout);
+                var virtual_plan: ?virtual_window_policy.Layout = null;
+                if (self.virtual_window_count != 0) {
+                    if (self.options.virtual_window_policy) |policy| virtual_plan =
+                        virtual_window_policy.Layout.init(policy, self.virtual_windows[0..self.virtual_window_count], layout.nodes);
+                }
+                const plan = if (virtual_plan) |*value| value else null;
+                const corrected = self.measureVirtualWindows(layout, plan);
                 pass += 1;
-                if (pass >= 2 or (!corrected and !self.virtualWindowsUndercovered(layout))) break;
+                if (self.options.virtual_window_policy) |policy| {
+                    var decision = virtual_window_policy.retry(policy, pass, corrected, null);
+                    if (decision == .probe) decision = virtual_window_policy.retry(policy, pass, corrected, self.virtualWindowsUndercovered(layout, plan));
+                    if (decision == .stop) break;
+                    if (decision != .rebuild) @panic("nonprogressing virtual window retry");
+                } else if (pass >= 2 or (!corrected and !self.virtualWindowsUndercovered(layout, null))) break;
                 window_source.fresh = layout;
             }
             return .{ .tree = tree, .layout = layout };
@@ -2802,7 +2894,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Whether any declared virtual window fails to cover the visible
         /// range its FRESH geometry implies (first-build viewport guess,
         /// resize growth): the trigger for the one coverage-retry build.
-        fn virtualWindowsUndercovered(self: *const Self, layout: canvas.WidgetLayoutTree) bool {
+        fn virtualWindowsUndercovered(self: *const Self, layout: canvas.WidgetLayoutTree, plan: ?*const virtual_window_policy.Layout) bool {
+            if (plan) |program| {
+                for (self.virtual_windows[0..self.virtual_window_count], 0..) |record, i| {
+                    const step = program.list(i);
+                    if (step.coverage == .skip) continue;
+                    const node = layout.nodes[step.node.?];
+                    const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+                    switch (step.coverage) {
+                        .skip => unreachable,
+                        .variable => {
+                            const table = self.virtualExtentTableForId(record.id) orelse continue;
+                            const offset = @max(0, node.widget.value);
+                            if (canvas.virtual_extent_policy.undercovered(self.options.virtual_window_policy.?, record.item_count, table.indexAtOffset(offset), table.indexAtOffset(offset + viewport.height), record.overscan, record.start_index, record.end_index)) return true;
+                        },
+                        .fixed => if (virtual_window_policy.fixedUndercovered(self.options.virtual_window_policy.?, record, node)) return true,
+                    }
+                }
+                return false;
+            }
             for (self.virtual_windows[0..self.virtual_window_count]) |record| {
                 const node = layout.findById(record.id) orelse continue;
                 const viewport = node.frame.inset(node.widget.layout.padding).normalized();
@@ -2901,7 +3011,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// the pending offset delta keeps it visually fixed. Returns
         /// whether any table accumulated a correction worth the retry
         /// pass.
-        fn measureVirtualWindows(self: *Self, layout: canvas.WidgetLayoutTree) bool {
+        fn measureVirtualWindows(self: *Self, layout: canvas.WidgetLayoutTree, plan: ?*const virtual_window_policy.Layout) bool {
+            if (plan) |program| {
+                var deltas: [canvas.max_virtual_windows]f32 = @splat(0);
+                for (self.virtual_windows[0..self.virtual_window_count], 0..) |record, i| {
+                    const step = program.list(i);
+                    // Empty measurement batches are significant: the table
+                    // refreshes its anchor even when no eligible row exists.
+                    if (!step.measure) continue;
+                    const table = self.virtualExtentTableForId(record.id) orelse continue;
+                    const list_node = layout.nodes[step.node.?];
+                    var measurements: std.ArrayList(canvas.VirtualExtentMeasurement) = .empty;
+                    defer measurements.deinit(std.heap.page_allocator);
+                    for (0..step.rows.len / 4) |j| {
+                        const node = layout.nodes[virtual_window_policy.row(step.rows, j)];
+                        measurements.append(std.heap.page_allocator, .{ .physical = @intCast(node.widget.semantics.list_item_index.?), .extent = node.frame.normalized().height }) catch @panic("virtual row measurement allocation failed");
+                    }
+                    table.applyMeasurements(list_node.widget.layout.virtual_anchor_index, null, measurements.items);
+                    deltas[i] = table.pending_offset_delta;
+                }
+                return virtual_window_policy.corrected(self.options.virtual_window_policy.?, deltas[0..self.virtual_window_count]);
+            }
             var corrected = false;
             for (self.virtual_windows[0..self.virtual_window_count]) |record| {
                 if (!record.variable or record.item_count == 0) continue;
@@ -2942,6 +3072,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         fn isVirtualWindowId(self: *const Self, id: canvas.ObjectId) bool {
+            if (self.options.virtual_window_policy) |policy| return virtual_window_policy.contains(policy, id, self.virtual_windows[0..self.virtual_window_count]);
             if (id == 0) return false;
             for (self.virtual_windows[0..self.virtual_window_count]) |record| {
                 if (record.id == id) return true;
@@ -3263,6 +3394,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             slot.tree = null;
             slot.arena_index = 0;
             self.window_slot_count += 1;
+            // A deferred secondary window has not presented its first canvas
+            // yet. Apply the retained theme before it can become visible.
+            runtime.options.platform.services.setWindowColorScheme(info.id, self.windowColorScheme()) catch |err| {
+                ui_app_log.warn("declared window '{s}' appearance failed: {s}", .{ descriptor.label, @errorName(err) });
+            };
         }
 
         fn setWindowSlotOnClose(self: *Self, slot: *WindowSlot, msg: ?MsgT) void {
@@ -3365,7 +3501,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
             if (self.options.window_view == null) return;
-            try self.refreshThemeState();
+            try self.refreshThemeState(runtime);
             var tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
             const next_index = self.contextMenuRebuildIndex(slot.window_id, slot.arena_index);
             const bounds = geometry.RectF.fromSize(slot.canvas_size).deflate(runtime.viewportInsetsForWindow(slot.window_id));
@@ -3512,6 +3648,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             ui.chart_content_policy = self.options.chart_content_policy;
             ui.markdown_content_policy = self.options.markdown_content_policy;
             ui.construction_policy = self.options.construction_policy;
+            ui.expression_policy = self.options.expression_policy;
             // Window views render the same honest video chrome state,
             // and their `<video src>` declarations reconcile the channel
             // too — `Ui.video` promises that declaring the element IS
@@ -3561,6 +3698,52 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         fn applyWebPane(self: *Self, runtime: *Runtime, window_id: platform.WindowId, layout: canvas.WidgetLayoutTree, pane: WebViewPane) void {
+            if (self.options.web_pane_policy) |policy| return self.applyCompiledWebPane(runtime, window_id, layout, pane, policy);
+            self.applyNativeWebPane(runtime, window_id, layout, pane);
+        }
+
+        fn applyCompiledWebPane(self: *Self, runtime: *Runtime, window_id: platform.WindowId, layout: canvas.WidgetLayoutTree, pane: WebViewPane, policy: web_pane_policy.Policy) void {
+            const planned = web_pane_policy.frame(policy, layout.nodes, pane.frame, pane.anchor);
+            switch (planned.kind) {
+                .missing_anchor => {
+                    ui_app_log.warn(
+                        "webview pane '{s}': no canvas widget carries semantics label '{s}' - mark the region's widget with .semantics = .{{ .label = \"{s}\" }}",
+                        .{ pane.label, pane.anchor.?, pane.anchor.? },
+                    );
+                    return;
+                },
+                .collapsed => return,
+                .apply => {},
+            }
+            const claimed = web_pane_policy.slot(policy, self.web_pane_states[0..self.web_pane_state_count], pane.label, app_manifest.max_view_label_bytes) orelse {
+                ui_app_log.warn("webview pane '{s}' ignored: more than {d} distinct pane labels", .{ pane.label, max_web_panes });
+                return;
+            };
+            const state = &self.web_pane_states[claimed.index];
+            if (claimed.create) {
+                state.* = .{};
+                @memcpy(state.label_storage[0..claimed.label_bytes], pane.label[0..claimed.label_bytes]);
+                state.label_len = claimed.label_bytes;
+                self.web_pane_state_count += 1;
+            }
+            const actual = runtime.webViewLocalFrame(window_id, pane.label) orelse {
+                ui_app_log.warn("webview pane '{s}': the scene declares no .webview shell view with this label", .{pane.label});
+                return;
+            };
+            const planned_patch = web_pane_policy.patch(policy, actual, planned.value, state.url(), pane.url, state.reload_token, pane.reload_token);
+            if (!planned_patch.frame and !planned_patch.url) return;
+            const patch: platform.ViewPatch = .{ .frame = if (planned_patch.frame) planned.value else null, .url = if (planned_patch.url) pane.url else null };
+            const success = if (runtime.updateView(window_id, pane.label, patch)) |_| true else |err| failed: {
+                ui_app_log.warn("webview pane '{s}' update failed: {s} - the scene must declare a .webview shell view with this label and the URL's origin must be in security.navigation.allowed_origins", .{ pane.label, @errorName(err) });
+                break :failed false;
+            };
+            const bytes = web_pane_policy.commit(policy, success, pane.url.len, state.url_storage.len) orelse return;
+            @memcpy(state.url_storage[0..bytes], pane.url[0..bytes]);
+            state.url_len = bytes;
+            state.reload_token = pane.reload_token;
+        }
+
+        fn applyNativeWebPane(self: *Self, runtime: *Runtime, window_id: platform.WindowId, layout: canvas.WidgetLayoutTree, pane: WebViewPane) void {
             var frame = pane.frame;
             if (pane.anchor) |anchor| {
                 frame = webPaneAnchorFrame(layout, anchor) orelse {
@@ -3776,7 +3959,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const arena = self.markup_arenas[next_index].allocator();
             const owned_source = try arena.dupe(u8, source);
             var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
-            const document = canvas.ui_markup.resolveImports(arena, "", owned_source, hashing.loader(), &diagnostic) catch |err| {
+            const document = canvas.ui_markup.resolveImportsWithPolicy(self.options.expression_policy, arena, "", owned_source, hashing.loader(), &diagnostic) catch |err| {
                 if (self.options.markup_development_policy) |callback| {
                     const program = markup_development.reload(callback, 0, true, true, err == error.MarkupSyntax or err == error.MarkupImport, false, self.installed);
                     for (program) |byte| switch (@as(markup_development.Action, @enumFromInt(byte))) {
@@ -3793,7 +3976,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 try self.applyRootMarkupProgram(callback, 0, document, arena, next_index, hashing.hasher.final(), "", owned_source, null, 0);
                 return;
             }
-            const canonical = try canvas.ui_markup.canonicalize(arena, document);
+            const canonical = try canvas.ui_markup.canonicalizeWithPolicy(self.options.expression_policy, arena, document);
             self.adoptMarkupDocument(canonical, next_index, hashing.hasher.final());
             // Embedded resolve: root nodes carry an empty src_path, and
             // imported entries are markup-root-relative (joined onto the
@@ -3806,7 +3989,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             var canonical = document;
             for (program) |byte| switch (@as(markup_development.Action, @enumFromInt(byte))) {
                 .end => break,
-                .canonicalize => canonical = if (kind == 0) try canvas.ui_markup.canonicalize(arena, document) else canvas.ui_markup.canonicalize(arena, document) catch document,
+                .canonicalize => canonical = if (kind == 0) try canvas.ui_markup.canonicalizeWithPolicy(self.options.expression_policy, arena, document) else canvas.ui_markup.canonicalizeWithPolicy(self.options.expression_policy, arena, document) catch document,
                 .adopt_root => self.adoptMarkupDocument(canonical, next_index, hash),
                 .provenance => self.commitProvenanceFiles(path, source, kind == 1),
                 .rebuild_root => if (runtime) |value| {
@@ -3915,8 +4098,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// from the retained table and publish the response artifact.
         /// Setting the runtime's handshake flag tells the dispatcher an
         /// answer landed (its fallback teaches when no app responds).
+        /// The markup files the compiled view just decoded, with the hashes
+        /// of the bytes it was compiled from; edits refuse a file that has
+        /// changed since. The watcher reloads every edit, so the table is
+        /// always watching.
+        fn commitViewSourceFiles(self: *Self) void {
+            self.provenance.resetFiles();
+            self.provenance.watching = true;
+            for (view_reload.view_files[0..view_reload.view_files_len]) |file| {
+                self.provenance.addFile(file.stamped, file.disk, file.hash) catch break;
+            }
+        }
+
         fn handleProvenanceQuery(self: *Self, runtime: *Runtime, query: core.AutomationProvenanceEvent) anyerror!void {
-            if (comptime !features.runtime_markup) return;
+            if (comptime !provenance_enabled) return;
             if (!std.mem.eql(u8, query.view_label, self.options.canvas_label)) return;
             const server = runtime.options.automation orelse return;
             var buffer: [4096]u8 = undefined;
@@ -3971,6 +4166,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // on purpose. Direct stderr is visible in both.
                 if (info.path.len > 0) {
                     std.debug.print("markup view failed to build ({s}:{d}:{d}): {s}\n", .{ info.path, info.line, info.column, info.message });
+                } else if (view_reload_enabled and info.line == 0 and info.column == 0) {
+                    // A view reload refusal has no source location (a
+                    // program for another build, for example).
+                    std.debug.print("markup view failed to build: {s}\n", .{info.message});
                 } else {
                     std.debug.print("markup view failed to build ({d}:{d}): {s}\n", .{ info.line, info.column, info.message });
                 }
@@ -3990,6 +4189,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// once, on first install, and only when something is watchable —
         /// a root watch path with io, or (Debug only) registered fragments.
         fn startMarkupWatch(self: *Self, runtime: *Runtime) void {
+            if (comptime view_reload_enabled) {
+                if (view_reload.installed != null) {
+                    runtime.startTimer(markup_watch_timer_id, markup_watch_interval_ns, true) catch {};
+                    if (comptime @hasDecl(Runtime, "setMarkupWatchArmed")) runtime.setMarkupWatchArmed(true);
+                    return;
+                }
+            }
             if (comptime !features.runtime_markup) return;
             const root_armed = if (self.options.markup) |markup_options|
                 markup_options.watch_path != null and markup_options.io != null
@@ -4042,7 +4248,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // next reload attempt, so this costs nothing durable.
                 const scratch_index = slot.arena_index ^ 1;
                 _ = slot.arenas[scratch_index].reset(.retain_capacity);
-                slot.baseline_hash = embeddedClosureHash(slot.arenas[scratch_index].allocator(), spec.source, spec.sources, self.options.markup_development_policy);
+                slot.baseline_hash = embeddedClosureHash(slot.arenas[scratch_index].allocator(), spec.source, spec.sources, self.options.markup_development_policy, self.options.expression_policy);
                 slot.hash = slot.baseline_hash;
             }
             return count > 0;
@@ -4053,13 +4259,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // hashing side effect; the arena resets on the next reload.
             const scratch_index = self.markup_arena_index ^ 1;
             _ = self.markup_arenas[scratch_index].reset(.retain_capacity);
-            return embeddedClosureHash(self.markup_arenas[scratch_index].allocator(), markup_options.source, markup_options.sources, self.options.markup_development_policy);
+            return embeddedClosureHash(self.markup_arenas[scratch_index].allocator(), markup_options.source, markup_options.sources, self.options.markup_development_policy, self.options.expression_policy);
         }
 
         /// Hash an embedded source closure exactly like the disk poll
         /// hashes the on-disk one: root bytes plus every loaded file's
         /// root-relative path and bytes, in resolution order.
-        fn embeddedClosureHash(arena: std.mem.Allocator, source: []const u8, sources: []const canvas.ui_markup.SourceFile, policy: markup_development.Policy) u64 {
+        fn embeddedClosureHash(arena: std.mem.Allocator, source: []const u8, sources: []const canvas.ui_markup.SourceFile, policy: markup_development.Policy, parser_policy: ?canvas.ui_markup.expr.Policy) u64 {
             if (sources.len == 0) {
                 return std.hash.Wyhash.hash(0, source);
             }
@@ -4067,7 +4273,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             var hashing = HashingLoader.init(set_loader.loader(), source, "");
             hashing.policy = policy;
             var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
-            _ = canvas.ui_markup.resolveImports(
+            _ = canvas.ui_markup.resolveImportsWithPolicy(
+                parser_policy,
                 arena,
                 "",
                 source,
@@ -4102,7 +4309,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 hashing.closure = &self.provenance_closure;
             }
             var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
-            const document = canvas.ui_markup.resolveImports(arena, watch_path, source, hashing.loader(), &diagnostic) catch |err| {
+            const document = canvas.ui_markup.resolveImportsWithPolicy(self.options.expression_policy, arena, watch_path, source, hashing.loader(), &diagnostic) catch |err| {
                 const hash = hashing.hasher.final();
                 if (self.options.markup_development_policy) |callback| {
                     const program = markup_development.reload(callback, 1, hash != self.markup_source_hash, true, err == error.MarkupSyntax or err == error.MarkupImport, false, self.installed);
@@ -4129,12 +4336,30 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (hash == self.markup_source_hash) return;
             // Canonicalize for per-frame cost only; on OOM the raw
             // document builds identically through attrTyped's fallback.
-            const canonical = canvas.ui_markup.canonicalize(arena, document) catch document;
+            const canonical = canvas.ui_markup.canonicalizeWithPolicy(self.options.expression_policy, arena, document) catch document;
             self.adoptMarkupDocument(canonical, next_index, hash);
             // Disk resolve: root nodes carry the watch path, and imported
             // entries are already cwd-relative disk paths.
             self.commitProvenanceFiles(watch_path, source, true);
             if (self.installed) self.rebuild(runtime, window_id) catch {};
+        }
+
+        fn pollViewReload(self: *Self, runtime: *Runtime, reload: view_reload.Hook) anyerror!void {
+            var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+            switch (reload.poll(reload.context, &diagnostic)) {
+                .unchanged => {},
+                .failed => self.recordMarkupDiagnostic(diagnostic),
+                .reloaded => {
+                    self.markup_diagnostic = null;
+                    // A sealed replay starts from the markup the session
+                    // launched with, so a session that changed its view
+                    // can no longer replay faithfully.
+                    if (runtime.options.session_recorder) |recorder| recorder.abandon("the view's markup was reloaded during the session; record again without editing markup to replay it");
+                    if (!self.installed) return;
+                    try self.rebuild(runtime, self.canvas_window_id);
+                    try self.rebuildWindowSlots(runtime);
+                },
+            }
         }
 
         /// Timer-driven poll of every registered fragment (Debug dev runs
@@ -4161,7 +4386,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 var hashing = HashingLoader.init(disk_loader.loader(), source, watch_dir);
                 hashing.policy = self.options.markup_development_policy;
                 var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
-                const document = canvas.ui_markup.resolveImports(arena, spec.path, source, hashing.loader(), &diagnostic) catch |err| {
+                const document = canvas.ui_markup.resolveImportsWithPolicy(self.options.expression_policy, arena, spec.path, source, hashing.loader(), &diagnostic) catch |err| {
                     const hash = hashing.hasher.final();
                     if (self.options.markup_development_policy) |callback| {
                         const program = markup_development.reload(callback, 2, hash != slot.hash, true, err == error.MarkupSyntax or err == error.MarkupImport, false, self.installed);
@@ -4187,7 +4412,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     for (program) |byte| switch (@as(markup_development.Action, @enumFromInt(byte))) {
                         .end => break,
                         .observed_hash => slot.hash = hash,
-                        .canonicalize => canonical = canvas.ui_markup.canonicalize(arena, document) catch document,
+                        .canonicalize => canonical = canvas.ui_markup.canonicalizeWithPolicy(self.options.expression_policy, arena, document) catch document,
                         .restore_fragment => slot.document = null,
                         .adopt_fragment => slot.document = canonical,
                         .switch_arena => slot.arena_index = next_index,
@@ -4207,7 +4432,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // Canonicalize for per-frame cost only; on OOM the raw
                     // document builds identically through attrTyped's
                     // fallback.
-                    slot.document = canvas.ui_markup.canonicalize(arena, document) catch document;
+                    slot.document = canvas.ui_markup.canonicalizeWithPolicy(self.options.expression_policy, arena, document) catch document;
                 }
                 slot.arena_index = next_index;
                 // One diagnostic channel, adopt clears it — the root
@@ -4949,6 +5174,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn handleTimer(self: *Self, runtime: *Runtime, timer_event: platform.TimerEvent) anyerror!void {
             if (timer_event.id == markup_watch_timer_id) {
+                if (comptime view_reload_enabled) {
+                    if (view_reload.installed) |reload| return self.pollViewReload(runtime, reload);
+                }
                 self.pollMarkupWatch(runtime, self.canvas_window_id);
                 self.pollFragmentWatch(runtime);
                 return;
@@ -6979,6 +7207,11 @@ fn effectsShowWindowByLabel(context: *anyopaque, window_label: []const u8) bool 
     return true;
 }
 
+fn effectsReplayShowWindowByLabel(context: *anyopaque, window_label: []const u8) void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    runtime.restoreWindowShow(window_label);
+}
+
 fn effectsSetDockPresence(context: *anyopaque, visible: bool) bool {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     runtime.options.platform.services.setDockPresence(visible) catch return false;
@@ -7004,6 +7237,16 @@ fn effectsRevealPath(context: *anyopaque, path: []const u8) anyerror!void {
 fn effectsFormatLocalTime(context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     return runtime.formatLocalTime(timestamp_ms, style, buffer);
+}
+
+fn effectsSendKeyChord(context: *anyopaque, chord: platform.KeyChord) anyerror!void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.sendKeyChord(chord);
+}
+
+fn effectsKeyboardInputAccess(context: *anyopaque, prompt: bool) anyerror!platform.KeyboardInputAccess {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.keyboardInputAccess(prompt);
 }
 
 /// The build storage pinned under a presented native context menu:

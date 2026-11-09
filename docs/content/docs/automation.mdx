@@ -243,7 +243,7 @@ zig build test-webview-smoke -Dplatform=macos
 
 Because views are data, automation can go the other way too: select a widget in the running app, jump to the markup that authored it, and write an edit back into the source file — the app's own hot-reload watch picks the change up and repaints.
 
-The read half is `provenance`. Every markup-built widget's structural id maps back to its authored source, captured at view build time: the file, the node's byte span and line:column, the template instantiation chain (a widget inside a template reports both its definition site and every `<use>` that put it there), and the iteration keys that say which `<for>` row it is. Widgets built with the Zig builder report `authored=zig` — write-back edits markup files only.
+The read half is `provenance`. Every markup-built widget's structural id maps back to its authored source, captured at view build time: the file, the node's byte span and line:column, the template instantiation chain (a widget inside a template reports both its definition site and every `<use>` that put it there), and the iteration keys that say which `<for>` row it is. Widgets built with the Zig builder report `authored=zig` — write-back edits markup files only. TypeScript apps report provenance from their compiled views in `native dev`, and an edit reloads in place through the same dev loop.
 
 ```bash
 # Where does this widget come from? (id from the snapshot, or hit-test a point)

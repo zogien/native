@@ -6,11 +6,11 @@
      Verify without writing:
        node packages/core/scripts/gen_service_surface.mjs --check -->
 
-# Service compile surface — scriptc 0.3.0
+# Service compile surface — scriptc 0.3.2
 
 What TypeScript under `src/services/` can use, as stated by the pinned
-compiler itself (surface manifest schema 2, 650 entries:
-522 static, 128 unsupported).
+compiler itself (surface manifest schema 2, 674 entries:
+548 static, 126 unsupported).
 
 How to read the tables:
 
@@ -182,7 +182,6 @@ manifest row in the Notes column:
 | `node-builtin.cluster.isMaster` | cluster.isMaster | static |  | constant value read |
 | `node-builtin.cluster.isPrimary` | cluster.isPrimary | static |  | constant value read |
 | `node-builtin.cluster.isWorker` | cluster.isWorker | static |  | constant value read |
-| `node-builtin.console.Console` | console.Console | unsupported | `SC2020` | custom Console instances are not supported yet; direct node:console log/info/debug/error/warn calls use the process output streams |
 | `node-builtin.crypto.createCipheriv` | crypto.createCipheriv | unsupported | `SC2020` | symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.createDecipheriv` | crypto.createDecipheriv | unsupported | `SC2020` | symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.createDiffieHellman` | crypto.createDiffieHellman | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
@@ -293,29 +292,47 @@ manifest row in the Notes column:
 | `node-builtin.net.getDefaultAutoSelectFamilyAttemptTimeout` | net.getDefaultAutoSelectFamilyAttemptTimeout | static |  |  |
 | `node-builtin.net.setDefaultAutoSelectFamilyAttemptTimeout` | net.setDefaultAutoSelectFamilyAttemptTimeout | static |  |  |
 | `node-builtin.os.EOL` | os.EOL | static |  | constant value read |
+| `node-builtin.os.arch` | os.arch | static |  |  |
 | `node-builtin.os.availableParallelism` | os.availableParallelism | static |  |  |
+| `node-builtin.os.constants` | os.constants | static |  | the platform's dlopen, errno, signals and priority groups; members a platform lacks read as undefined |
+| `node-builtin.os.cpus` | os.cpus | static |  |  |
+| `node-builtin.os.devNull` | os.devNull | static |  | constant value read |
+| `node-builtin.os.endianness` | os.endianness | static |  |  |
+| `node-builtin.os.freemem` | os.freemem | static |  |  |
+| `node-builtin.os.getPriority` | os.getPriority | static |  |  |
 | `node-builtin.os.homedir` | os.homedir | static |  |  |
+| `node-builtin.os.hostname` | os.hostname | static |  |  |
+| `node-builtin.os.loadavg` | os.loadavg | static |  |  |
+| `node-builtin.os.machine` | os.machine | static |  |  |
 | `node-builtin.os.networkInterfaces` | os.networkInterfaces | static |  |  |
 | `node-builtin.os.platform` | os.platform | static |  |  |
 | `node-builtin.os.release` | os.release | static |  |  |
 | `node-builtin.os.tmpdir` | os.tmpdir | static |  |  |
 | `node-builtin.os.totalmem` | os.totalmem | static |  |  |
 | `node-builtin.os.type` | os.type | static |  |  |
+| `node-builtin.os.uptime` | os.uptime | static |  |  |
 | `node-builtin.os.userInfo` | os.userInfo | static |  |  |
+| `node-builtin.os.version` | os.version | static |  |  |
 | `node-builtin.path.basename` | path.basename | static |  |  |
 | `node-builtin.path.delimiter` | path.delimiter | static |  | constant value read |
 | `node-builtin.path.dirname` | path.dirname | static |  |  |
 | `node-builtin.path.extname` | path.extname | static |  |  |
+| `node-builtin.path.format` | path.format | static |  |  |
 | `node-builtin.path.isAbsolute` | path.isAbsolute | static |  |  |
 | `node-builtin.path.join` | path.join | static |  |  |
+| `node-builtin.path.matchesGlob` | path.matchesGlob | static |  |  |
 | `node-builtin.path.normalize` | path.normalize | static |  |  |
+| `node-builtin.path.parse` | path.parse | static |  |  |
 | `node-builtin.path.posix.basename` | path/posix.basename | static |  |  |
 | `node-builtin.path.posix.delimiter` | path/posix.delimiter | static |  | constant value read |
 | `node-builtin.path.posix.dirname` | path/posix.dirname | static |  |  |
 | `node-builtin.path.posix.extname` | path/posix.extname | static |  |  |
+| `node-builtin.path.posix.format` | path/posix.format | static |  |  |
 | `node-builtin.path.posix.isAbsolute` | path/posix.isAbsolute | static |  |  |
 | `node-builtin.path.posix.join` | path/posix.join | static |  |  |
+| `node-builtin.path.posix.matchesGlob` | path/posix.matchesGlob | static |  |  |
 | `node-builtin.path.posix.normalize` | path/posix.normalize | static |  |  |
+| `node-builtin.path.posix.parse` | path/posix.parse | static |  |  |
 | `node-builtin.path.posix.relative` | path/posix.relative | static |  |  |
 | `node-builtin.path.posix.resolve` | path/posix.resolve | static |  |  |
 | `node-builtin.path.posix.sep` | path/posix.sep | static |  | constant value read |
@@ -328,9 +345,12 @@ manifest row in the Notes column:
 | `node-builtin.path.win32.delimiter` | path/win32.delimiter | static |  | constant value read |
 | `node-builtin.path.win32.dirname` | path/win32.dirname | static |  |  |
 | `node-builtin.path.win32.extname` | path/win32.extname | static |  |  |
+| `node-builtin.path.win32.format` | path/win32.format | static |  |  |
 | `node-builtin.path.win32.isAbsolute` | path/win32.isAbsolute | static |  |  |
 | `node-builtin.path.win32.join` | path/win32.join | static |  |  |
+| `node-builtin.path.win32.matchesGlob` | path/win32.matchesGlob | static |  |  |
 | `node-builtin.path.win32.normalize` | path/win32.normalize | static |  |  |
+| `node-builtin.path.win32.parse` | path/win32.parse | static |  |  |
 | `node-builtin.path.win32.relative` | path/win32.relative | static |  |  |
 | `node-builtin.path.win32.resolve` | path/win32.resolve | static |  |  |
 | `node-builtin.path.win32.sep` | path/win32.sep | static |  | constant value read |
@@ -368,7 +388,6 @@ manifest row in the Notes column:
 | `node-builtin.querystring.stringify` | querystring.stringify | static |  |  |
 | `node-builtin.querystring.unescape` | querystring.unescape | static |  |  |
 | `node-builtin.readline.createInterface` | readline.createInterface | static |  |  |
-| `node-builtin.stream.consumers.arrayBuffer` | stream/consumers.arrayBuffer | unsupported | `SC2020` | collecting a stream directly into an ArrayBuffer has no native lowering yet; buffer(stream) collects the same bytes as a Buffer |
 | `node-builtin.stream.consumers.blob` | stream/consumers.blob | unsupported | `SC2020` | Blob values have no representation in a compiled binary — buffer(stream) collects the same bytes as a Buffer, text(stream) the decoded text |
 | `node-builtin.timers.promises.setImmediate` | timers/promises.setImmediate | static |  |  |
 | `node-builtin.timers.promises.setTimeout` | timers/promises.setTimeout | static |  |  |
@@ -381,9 +400,14 @@ manifest row in the Notes column:
 | `node-builtin.url.fileURLToPath` | url.fileURLToPath | static |  |  |
 | `node-builtin.url.fileURLToPathBuffer` | url.fileURLToPathBuffer | static |  |  |
 | `node-builtin.url.pathToFileURL` | url.pathToFileURL | static |  |  |
+| `node-builtin.util.callbackify` | util.callbackify | static |  |  |
+| `node-builtin.util.debug` | util.debug | static |  |  |
+| `node-builtin.util.debuglog` | util.debuglog | static |  |  |
+| `node-builtin.util.deprecate` | util.deprecate | static |  |  |
 | `node-builtin.util.getSystemErrorMap` | util.getSystemErrorMap | static |  |  |
 | `node-builtin.util.getSystemErrorMessage` | util.getSystemErrorMessage | static |  |  |
 | `node-builtin.util.getSystemErrorName` | util.getSystemErrorName | static |  |  |
+| `node-builtin.util.inherits` | util.inherits | static |  |  |
 | `node-builtin.util.isDeepStrictEqual` | util.isDeepStrictEqual | static |  |  |
 | `node-builtin.util.parseArgs` | util.parseArgs | static |  |  |
 | `node-builtin.util.parseEnv` | util.parseEnv | static |  |  |

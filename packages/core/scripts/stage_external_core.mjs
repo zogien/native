@@ -24,16 +24,28 @@
 //   node stage_external_core.mjs --src <app src dir> --sdk <sdk dir>
 //     --static <compile-surface core.ts> --facade <core_facade.ts>
 //     --profile <core_profile.json> --out <stage dir>
+//     [--view-markup <app.native> --view-contract <core.contract.json>
+//      [--view-reload]]
+//
+// --view-reload (Debug builds for `native dev` only) also stages the
+// development view evaluator and its two exports, so the running app can
+// replace its views from markup edits without a rebuild.
 
 import fs from "node:fs";
 import path from "node:path";
-import { compileViewBundle } from "../src/view_frontend.ts";
+import { compileViewProgram } from "../src/view_frontend.ts";
+import { appViewSources } from "../src/view_sources.ts";
 import { stageContractTypes } from "./scriptc_toolchain.mjs";
 
 function parseArgs(argv) {
   const args = {};
   for (let i = 2; i < argv.length; i += 2) {
     const key = argv[i];
+    if (key === "--view-reload") {
+      args["view-reload"] = true;
+      i -= 1;
+      continue;
+    }
     const value = argv[i + 1];
     if (!key.startsWith("--") || value === undefined) {
       console.error("usage: stage_external_core.mjs --src <dir> --sdk <dir> --static <file> --facade <file> --profile <file> --out <dir>");
@@ -157,25 +169,20 @@ fs.writeFileSync(path.join(args.out, "sdk", "core.ts"), dedupeAliases(fs.readFil
 // the profile's entry spelling expects.
 fs.copyFileSync(args.facade, path.join(args.out, "core_facade.ts"));
 fs.copyFileSync(args.profile, path.join(args.out, "profile.json"));
+if (args["view-reload"] && !args["view-markup"]) throw new Error("--view-reload requires compiled views (--view-markup)");
 if (args["view-markup"]) {
   if (!args["view-contract"]) throw new Error("compiled views require --view-contract");
   const contract = JSON.parse(fs.readFileSync(args["view-contract"], "utf8"));
-  const sources = new Map();
-  const markupFiles = (dir, relative = "") => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const rel = relative + entry.name;
-      if (entry.isDirectory() && rel !== "services") markupFiles(path.join(dir, entry.name), rel + "/");
-      else if (entry.isFile() && rel.endsWith(".native")) sources.set(rel, fs.readFileSync(path.join(dir, entry.name), "utf8"));
-    }
-  };
-  markupFiles(args.src);
-  const windowSources = new Map([...sources].filter(([name]) => name.startsWith("windows/"))
-    .map(([name, source]) => [name.slice("windows/".length), source]));
-  const windows = [...windowSources].filter(([name]) => !name.includes("/"))
-    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-    .map(([entry, source]) => ({ label: entry.slice(0, -".native".length), entry, source, sources: windowSources }));
-  const view = compileViewBundle(fs.readFileSync(args["view-markup"], "utf8"), contract, { sources }, windows);
+  const { sources, windows } = appViewSources(args.src);
+  const reload = args["view-reload"] === true;
+  const compiled = compileViewProgram(fs.readFileSync(args["view-markup"], "utf8"), contract, { sources }, windows, undefined, reload);
+  const view = compiled.text;
   fs.appendFileSync(path.join(args.out, "core_facade.ts"), resolveSpecifiers(view, "core_facade.ts"));
+  if (reload) {
+    const { viewReloadFacade, viewReloadIdentity } = await import("../src/view_reload.ts");
+    const identity = viewReloadIdentity(contract, { windows: windows.map((window) => window.label), virtual: compiled.virtual });
+    fs.appendFileSync(path.join(args.out, "core_facade.ts"), viewReloadFacade(contract, identity));
+  }
   const profile = JSON.parse(fs.readFileSync(args.profile, "utf8"));
   profile.exports.push({ export: "native_view", symbol: `${profile.abi.prefix}native_view`, params: [], returns: "bytes" });
   if (windows.length) profile.exports.push({ export: "native_window_view", symbol: `${profile.abi.prefix}native_window_view`, params: ["bytes"], returns: "bytes" });
@@ -203,6 +210,10 @@ if (args["view-markup"]) {
   if (view.includes("export function native_virtual_requests(")) {
     profile.exports.push({ export: "native_virtual_requests", symbol: `${profile.abi.prefix}native_virtual_requests`, params: ["bytes", "bytes"], returns: "bytes" });
     profile.exports.push({ export: "native_virtual_view", symbol: `${profile.abi.prefix}native_virtual_view`, params: ["bytes", "bytes", "bytes"], returns: "bytes" });
+  }
+  if (reload) {
+    profile.exports.push({ export: "native_dev_view_prepare", symbol: `${profile.abi.prefix}native_dev_view_prepare`, params: ["bytes"], returns: "bytes" });
+    profile.exports.push({ export: "native_dev_view_reset", symbol: `${profile.abi.prefix}native_dev_view_reset`, params: [], returns: "bytes" });
   }
   fs.writeFileSync(path.join(args.out, "profile.json"), JSON.stringify(profile, null, 2) + "\n");
 }

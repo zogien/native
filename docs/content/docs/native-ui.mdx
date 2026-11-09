@@ -15,7 +15,7 @@ An app is four things:
 - `Msg` — a tagged union of everything that can happen.
 - `update(model, msg)` — the only place state changes.
 
-The runtime owns installation, presentation, resize, event dispatch, timers, and hot reload. In `native dev`, `.native` edits refresh the running view while preserving the model and retained state of widgets whose identity remains stable. Zig views can register embedded fragments in `Options.fragment_watch` through `View.fragment("src/header.native")`. TypeScript builds and tests use [compiled TypeScript views](/docs/typescript#compiled-typescript-views-preview) by default; direct runs of that backend require a rebuild after markup edits. Zig release builds compile markup at comptime and report invalid views with a line and column.
+The runtime owns installation, presentation, resize, event dispatch, timers, and hot reload. In `native dev`, `.native` edits refresh the running view while preserving the model and retained state of widgets whose identity remains stable. Zig views can register embedded fragments in `Options.fragment_watch` through `View.fragment("src/header.native")`. TypeScript apps use [compiled TypeScript views](/docs/typescript#compiled-typescript-views-preview) by default; `native dev` reloads their markup edits in place, and other direct runs of that backend need a rebuild after markup edits. Zig release builds compile markup at comptime and report invalid views with a line and column.
 
 ## A complete view
 
@@ -930,12 +930,14 @@ Zig-built views get the same discipline at tree level: `canvas.expectA11yAuditSw
 
 ### The model–view contract
 
-The model-contract artifact — `zig-out/model-contract.zon`, a reflection of your `Model`/`Msg` — is refreshed by `native test` in every app shape (apps that own their build can also run `zig build model-contract` directly). With that artifact fresh, `native check` verifies markup against your app's actual surface — no app compile in the loop:
+`native check` verifies markup against your app's actual model surface, with no app compile in the loop:
 
-- View → model: every binding path, `for each` iterable, `key` field, message tag, and payload type must exist on the model with the right shape, and expressions type-check with the real binding types — `{count > 'a'}` is an error naming `count` and its core type. Unknown names get a did-you-mean over your model's actual fields.
+- View → model: every binding path, `for each` iterable, `key` field, message tag, and payload type must exist on the model with the right shape, and expressions type-check with the real binding types. Zig cores also get a did-you-mean over the model's actual fields.
 - Model → view: model fields, derived helpers/query functions, and `Msg` tags that no view binds or dispatches are reported as **warnings**. State only `update` or effects logic touches is legitimate, so opt it out in the core's vocabulary: TypeScript declares `export const viewUnbound = ["nextId", "tick"] as const` in `src/core.ts`; Zig declares `pub const view_unbound = .{ "next_id", "tick" };` on `Model` or `Msg`. Use the names exactly as that core authored them. `--strict` promotes the warnings to failures.
-- Template args are part of a template's interface: the kinds of use-site arguments flow into the template body (a string passed into a `width` arg fails at the use), slot content checks in the consumer's scope, and the check follows the whole `<import>` closure.
+- Template args are part of a template's interface: use-site arguments flow into the template body, slot content checks in the consumer's scope, and the check follows the whole `<import>` closure.
 
-A missing or stale artifact (the artifact carries a hash of the app's core sources) degrades to structural checking with one loud line ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks") — never a false pass; the compiled engine still enforces the same contract at build time, and a conformance suite holds the two checkers to identical accept/reject sets. Model state consumed only by a Zig-built view needs `view_unbound` too — the markup checker cannot see Zig view reads.
+**TypeScript core** (`src/core.ts`): `native check` compiles `src/app.native` and every `src/windows/*.native` view against the core's contract with the same view compiler the build uses, so a view that checks is a view that builds. There is no artifact to refresh, and the check is never stale.
+
+**Zig core**: the check reads the model-contract artifact `zig-out/model-contract.zon`, a reflection of your `Model`/`Msg` that `native test` refreshes (apps that own their build can also run `zig build model-contract` directly). A missing or stale artifact (the artifact carries a hash of the app's core sources) degrades to structural checking with one loud line ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks") — never a false pass; the compiled engine still enforces the same contract at build time, and a conformance suite holds the two checkers to identical accept/reject sets. Model state consumed only by a Zig-built view needs `view_unbound` too — the markup checker cannot see Zig view reads.
 
 For the component catalog and styling model, see [Built-in Components](/docs/built-in-components). For dropping down to the programmatic API, the `canvas.Ui(Msg)` builder produces exactly the same trees the markup compiles to.

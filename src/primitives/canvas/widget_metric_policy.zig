@@ -28,6 +28,9 @@ pub const Result = struct {
         return .init(float(&self.bytes, 8), float(&self.bytes, 12), float(&self.bytes, 16), float(&self.bytes, 20));
     }
 };
+/// Each continuation step is a pure function of the request bytes, and every
+/// step's measurement is computed again before the next request is formed.
+const metric_decisions = @import("decision_reuse.zig").Table(512, 224, @sizeOf(Result));
 pub const Request = struct {
     bytes: [224]u8 = @splat(0),
     pub fn init(op: Operation, widget: widgets.Widget, tokens: tokens_model.DesignTokens, base: f32) Request {
@@ -60,7 +63,7 @@ pub const Request = struct {
         const policy = tokens.control_geometry_policy orelse @panic("missing widget metric owner");
         for (0..3) |_| {
             var copied: Result = .{ .bytes = @splat(0xa5) };
-            if (policy(&self.bytes, &copied.bytes) != copied.bytes.len or read(&copied.bytes, 0) != 1) @panic("invalid compiled widget metric length");
+            if (metric_decisions.decide(policy, &self.bytes, &copied.bytes) != copied.bytes.len or read(&copied.bytes, 0) != 1) @panic("invalid compiled widget metric length");
             const mode = read(&copied.bytes, 4);
             const ranges: []const [2]usize = switch (mode) {
                 1 => &.{.{ 12, 32 }},

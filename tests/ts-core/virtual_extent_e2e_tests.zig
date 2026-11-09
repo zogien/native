@@ -307,3 +307,110 @@ test "compiled extent plans preserve callback sampling cache boundaries and empt
         try std.testing.expectEqual(native_samples.hash, compiled_samples.hash);
     }
 }
+
+test "compiled extent programs retain complete state and exact callback observation order" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const Observation = struct { logical: u64, id: u64, count: usize, base: u64, gap: u32, pending: u32 };
+    const Trace = struct {
+        var table: *Table = undefined;
+        var values: [4096]Observation = undefined;
+        var length: usize = 0;
+        var recording = false;
+        fn read(_: ?*const anyopaque, index: u64) f32 {
+            if (recording) {
+                std.debug.assert(length < values.len);
+                values[length] = .{ .logical = index, .id = table.id, .count = table.item_count, .base = table.index_base, .gap = @bitCast(table.gap), .pending = @bitCast(table.pending_offset_delta) };
+                length += 1;
+            }
+            return @as(f32, @floatFromInt(index % 7)) * 0.125;
+        }
+        fn alternate(context: ?*const anyopaque, index: u64) f32 {
+            return read(context, index) + 2.125;
+        }
+    };
+    var tables = pair();
+    var args = canvas.VirtualExtentSyncArgs{ .id = 9007199254740993, .item_count = 130, .index_base = 9007199254741100, .gap = 0.125, .estimate_fn = Trace.read };
+    for (0..12) |step| {
+        switch (step) {
+            1 => args.estimate_fn = Trace.alternate,
+            2 => {
+                args.item_count = 193;
+                args.gap = 1.125;
+            },
+            3 => {
+                args.index_base -= 7;
+                args.item_count = 190;
+            },
+            4 => {
+                args.index_base += 9;
+                args.item_count = 140;
+                args.gap = 2.25;
+            },
+            5 => args.item_count = 64,
+            6 => args.item_count = 0,
+            7 => {
+                args.id += 1;
+                args.item_count = 65;
+                args.gap = -0.0;
+            },
+            8 => args.gap = std.math.nan(f32),
+            9 => args.item_count = 129,
+            10 => args.item_count = 193,
+            11 => args.item_count = 1,
+            else => {},
+        }
+        var reference: canvas.VirtualExtentSyncInfo = undefined;
+        var observations: [4096]Observation = undefined;
+        var count: usize = 0;
+        for (&tables, 0..) |*table, lane| {
+            Trace.table = table;
+            Trace.length = 0;
+            Trace.recording = true;
+            const result = table.sync(args);
+            Trace.recording = false;
+            if (lane == 0) {
+                reference = result;
+                count = Trace.length;
+                @memcpy(observations[0..count], Trace.values[0..count]);
+            } else {
+                try exact(reference, result);
+                try exact(count, Trace.length);
+                try exact(observations[0..count], Trace.values[0..Trace.length]);
+            }
+        }
+        // Full retained values and active storage, without undefined spare
+        // capacity or pointer normalization. Both lanes use the same callback.
+        try expectTables(&tables[0], &tables[1]);
+        if (step == 0 or step == 7) try batch(&tables, 32, null, &.{ .{ .physical = 2, .extent = 10.5 }, .{ .physical = 63, .extent = 4.5 } });
+        if (step == 9) {
+            // An unfinished measurement batch must rebuild the dirty prefix
+            // on the next append without folding an end-correction shift.
+            for (&tables) |*table| {
+                table.beginCorrections(3, null);
+                table.recordMeasured(2, 17.125);
+            }
+            try expectTables(&tables[0], &tables[1]);
+        }
+    }
+}
+
+test "compiled extent programs copy instructions and preserve borrowed core snapshots" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const borrowed = core.modelSnapshot();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    var table = Table{ .id = 9007199254740993, .item_count = 130, .index_base = 9007199254741100 };
+    const args = canvas.VirtualExtentSyncArgs{ .id = table.id, .item_count = 140, .index_base = table.index_base - 7, .gap = 1.125 };
+    const program = policy.syncProgram(core.nativeWindowPolicy, &table, args);
+    const copy = program;
+    table.index_base = 0;
+    _ = policy.correctionProgram(core.nativeWindowPolicy, 3);
+    try exact(copy.bytes[0 .. 16 + copy.count * 16], program.bytes[0 .. 16 + program.count * 16]);
+    try exact(@as(u8, 4), program.flags);
+    try exact(@as(usize, 7), program.instruction(program.count - 2).argument);
+    try exact(@as(u32, 10), program.instruction(program.count - 1).kind);
+    try std.testing.expectEqualSlices(u8, saved, borrowed);
+    try std.testing.expectEqualSlices(u8, saved, core.modelSnapshot());
+}

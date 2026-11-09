@@ -1153,9 +1153,8 @@ fn isReferenceTextSpace(byte: u8) bool {
 /// The face a run's font id inks with: a runtime-registered face when
 /// the id matches one (validated at registration, so a registered id
 /// always resolves — no render-time fallback decision), otherwise the
-/// bundled mapping — the mono face for the reserved mono id, the sans
-/// face for everything else (the weight and italic span variants keep
-/// the regular outlines at their estimator advances, exactly as before).
+/// bundled mapping — Geist Mono for mono text, and the corresponding
+/// regular, medium or bold Geist face for reserved sans ids.
 /// Glyphs missing from whichever face wins keep the per-glyph notdef
 /// block fallback in `drawGlyphBox`; a registered face never cascades
 /// into the bundled faces mid-run.
@@ -1163,8 +1162,7 @@ fn referenceFaceForFontId(fonts: []const ReferenceFont, font_id: canvas.FontId) 
     for (fonts) |font| {
         if (font.id == font_id) return font.face;
     }
-    if (font_id == canvas.default_mono_font_id) return &font_ttf.geist_mono;
-    return &font_ttf.geist_regular;
+    return font_ttf.bundledFaceForFontId(font_id);
 }
 
 /// Decode the first codepoint of the cluster `text[start..start+len]`;

@@ -259,7 +259,12 @@ jobs:
           node-version: 24
       - run: npm --prefix packages/native-sdk run version:check
       - run: npm --prefix packages/native-sdk run scripts:check
+      # Pack the CLI and use it as a Zig path dependency in a fresh project:
+      # its build.zig must compile and configure from the packed files alone.
       - run: npm --prefix packages/native-sdk run package:check
+      # Install the packed CLI with its host binary, then build the default and
+      # full app templates from the installed SDK.
+      - run: npm --prefix packages/native-sdk run package:check:install
 
   native-example-shards:
     name: Native Examples (${{ matrix.name }})

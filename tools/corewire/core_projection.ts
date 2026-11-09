@@ -102,14 +102,15 @@ function chromeRecord(s: CoreContract, r: RecordType): boolean {
   return insets && buttons && tabs;
 }
 function mirrorNames(s: CoreContract, out: Diagnostic[]): void {
-  const reserved = ["bootCommand", "decoded_model", "RuntimeModel", "RuntimeResult", "runtime_model", "initialRuntimeModel", "updateRuntimeModel", "commitRuntimeModel", "restoreRuntimeModel", "restoreCommittedModel", "runtimeSubscriptions", "runtimeFrameMsg", "dispatchMessage", "std", "shim_rt", "core_abi", "abi", "rt", "msg_tags", "boot", "initialModel", "update", "commitModelRoot", "sidecar_build_id", "sidecar_model_fingerprint", "sidecar_abi_version", "sidecar_snapshot_format", "deterministic", "async_free", "snapshotModel", "modelSnapshot", "persistenceSnapshot", "restoreModel", "referenceAttestedExports", "T", "n", "model", "msg", "payload", "encoded", "cmd_ptr", "cmd_len", "subs_ptr", "subs_len", "snap_ptr", "snap_len", "out", "out_ptr", "out_len", "tag", "tag_name", "name", "frame", "key", "pinch", "value", "self", "index", "args", "args_tuple", "allocator", "fields", "field", "next", "helper_args", "view_unbound"];
+  const reserved = ["bootCommand", "decoded_model", "RuntimeModel", "RuntimeResult", "runtime_model", "initialRuntimeModel", "updateRuntimeModel", "commitRuntimeModel", "restoreRuntimeModel", "restoreCommittedModel", "runtimeSubscriptions", "runtimeFrameMsg", "dispatchMessage", "std", "shim_rt", "core_abi", "abi", "rt", "msg_tags", "boot", "initialModel", "update", "commitModelRoot", "sidecar_build_id", "sidecar_model_fingerprint", "sidecar_abi_version", "sidecar_snapshot_format", "deterministic", "async_free", "snapshotModel", "modelSnapshot", "persistenceSnapshot", "restoreModel", "referenceAttestedExports", "T", "n", "model", "msg", "payload", "encoded", "cmd_ptr", "cmd_len", "subs_ptr", "subs_len", "snap_ptr", "snap_len", "out", "out_ptr", "out_len", "tag", "tag_name", "name", "frame", "key", "pinch", "value", "self", "index", "args", "args_tuple", "allocator", "fields", "field", "next", "helper_args", "view_unbound", "has_windows"];
   for (const h of s.model_helpers) for (let i = 0; i < h.params.length; i++) reserved.push(`p${i}`);
   reserved.push("subscriptions", "commandMsg", "frameMsg", "keyMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs");
   if (s.model !== "Model") reserved.push("Model");
   if (s.msg.name !== "Msg") reserved.push("Msg");
   if (s.abi.exports.includes("native_view")) reserved.push("nativeView", "nativeViewEvent", "ptr", "len", "arena");
   if (s.abi.exports.includes("native_virtual_requests")) reserved.push("nativeVirtualRequests", "nativeVirtualView");
-  if (usesVirtualExtentHelpers(s)) reserved.push("virtualExtentHelper", "virtualExtentEstimate");
+  if (s.abi.exports.includes("native_dev_view_prepare")) reserved.push("nativeDevViewPrepare", "nativeDevViewReset", "program", "arena");
+  if (usesVirtualExtentHelpers(s)) reserved.push("virtualExtentHelper", "virtualExtentEstimate", "shim_root");
   if (s.abi.exports.includes("native_media_view")) reserved.push("nativeMediaView");
   if (s.abi.exports.includes("native_media_window_view")) reserved.push("nativeMediaWindowView");
   if (s.abi.exports.includes("native_window_view")) reserved.push("nativeWindowView", "label", "ptr", "len", "arena");

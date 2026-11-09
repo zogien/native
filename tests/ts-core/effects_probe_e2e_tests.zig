@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("effects_probe_core");
 const decoder = @import("effects_probe_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("effects_probe_reference.zig");
 const parity = @import("effects_media_parity.zig");
 const canvas = sdk.canvas;
@@ -41,7 +42,7 @@ fn viewParity(native: *const reference.Model, model: *const core.Model) !void {
     const View = canvas.CompiledMarkupView(core.Model, core.Msg, @embedFile("app.native"));
     for (0..2) |backend| {
         var b = Ui.init(arena.allocator());
-        const actual = try b.finalize(if (backend == 0) View.build(&b, model) else decoder.build(&b, model));
+        const actual = try b.finalize(if (backend == 0) View.build(&b, model) else CompiledView.build(&b, model));
         core.rt.frameReset();
         try parity.equal(expected.root, actual.root);
         try testing.expectEqual(expected.handlers.len, actual.handlers.len);
@@ -167,7 +168,7 @@ fn probeReplay(comptime compiled_view: bool) !void {
     var full_model: ?[]u8 = null;
     defer if (full_model) |bytes| testing.allocator.free(bytes);
     {
-        const state = try Adapter.create(testing.allocator, .{}, .{ .name = "effects-probe", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) decoder.build else View.build });
+        const state = try Adapter.create(testing.allocator, .{}, .{ .name = "effects-probe", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) CompiledView.build else View.build });
         defer state.destroy();
         state.effects.executor = .fake;
         const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(560, 480) });
@@ -195,7 +196,7 @@ fn probeReplay(comptime compiled_view: bool) !void {
         try testing.expect(!recorder.failed);
         try testing.expect(recorder.effect_count >= 32);
     }
-    const state = try Adapter.create(testing.allocator, .{}, .{ .name = "effects-probe", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) decoder.build else View.build });
+    const state = try Adapter.create(testing.allocator, .{}, .{ .name = "effects-probe", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) CompiledView.build else View.build });
     defer state.destroy();
     const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(560, 480) });
     defer harness.destroy(testing.allocator);

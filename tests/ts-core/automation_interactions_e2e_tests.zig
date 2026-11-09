@@ -98,7 +98,10 @@ const Pair = struct {
             var nodes: [16]sdk.canvas.WidgetLayoutNode = undefined;
             const tree = try sdk.canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, .init(0, 0, 320, 240), &nodes);
             _ = try h.runtime.setCanvasWidgetLayout(1, "canvas", tree);
-            if (i == 1) h.runtime.automation_interaction_policy = compiled;
+            if (i == 1) {
+                h.runtime.automation_interaction_policy = compiled;
+                h.runtime.context_menu_policy = compiled;
+            }
         }
         try self.same();
     }

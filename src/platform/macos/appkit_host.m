@@ -1046,6 +1046,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
  * menu items (Reload, Toggle Web Inspector, Undo/Redo) so canvas-only
  * apps never ship menu items nothing answers. */
 @property(nonatomic, assign) BOOL hasWebContent;
+/* Set before any WebView or default menu is created. */
+@property(nonatomic, assign) BOOL webViewInspection;
 /* The decoded manifest icon (nil until the async decode lands, or when
  * the file is missing). The About panel needs it passed explicitly:
  * unbundled dev binaries have no bundle icon for the standard panel to
@@ -1091,7 +1093,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags;
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent webViewInspection:(BOOL)webViewInspection dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags;
 - (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
 - (void)orderWindowForImplicitShow:(uint64_t)windowId;
 - (void)showDeferredWindowIfPending:(uint64_t)windowId reason:(const char *)reason;
@@ -8179,7 +8181,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 
 @implementation NativeSdkAppKitHost
 
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent webViewInspection:(BOOL)webViewInspection dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
     self = [super init];
     if (!self) {
         return nil;
@@ -8197,6 +8199,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.appVersion = version ?: @"";
     self.aboutDescription = aboutDescription ?: @"";
     self.hasWebContent = hasWebContent;
+    self.webViewInspection = webViewInspection;
     NSString *configuredBundleIdentifier = bundleIdentifier.length > 0 ? bundleIdentifier : @"dev.native_sdk.app";
     self.bundleIdentifier = NativeSdkPackagedBundleIdentifier() ?: configuredBundleIdentifier;
     self.iconPath = iconPath ?: @"";
@@ -8746,7 +8749,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }
     configuration.userContentController = userContentController;
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
-        [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+        [configuration.preferences setValue:@(self.webViewInspection) forKey:@"developerExtrasEnabled"];
     }
     WKWebView *webView = [[NativeSdkWebView alloc] initWithFrame:container.bounds configuration:configuration];
     ((NativeSdkWebView *)webView).host = self;
@@ -8759,7 +8762,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     webView.layer.backgroundColor = NSColor.clearColor.CGColor;
     [webView setValue:@NO forKey:@"drawsBackground"];
     if ([webView respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
-        [webView setValue:@YES forKey:@"inspectable"];
+        [webView setValue:@(self.webViewInspection) forKey:@"inspectable"];
     }
     webView.navigationDelegate = self;
     webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -9430,7 +9433,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         configuration.userContentController = controller;
     }
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
-        [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+        [configuration.preferences setValue:@(self.webViewInspection) forKey:@"developerExtrasEnabled"];
     }
 
     if (windowDragRegions) {
@@ -9449,7 +9452,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         [webview setValue:@NO forKey:@"drawsBackground"];
     }
     if ([webview respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
-        [webview setValue:@YES forKey:@"inspectable"];
+        [webview setValue:@(self.webViewInspection) forKey:@"inspectable"];
     }
     webview.navigationDelegate = self;
     webview.autoresizingMask = NSViewNotSizable;
@@ -10152,7 +10155,9 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [viewMenuItem setSubmenu:viewMenu];
     if (self.hasWebContent) {
         [viewMenu addItem:[self menuItem:@"Reload" action:@selector(reload:) key:@"r" modifiers:NSEventModifierFlagCommand]];
-        [viewMenu addItem:[self menuItem:@"Toggle Web Inspector" action:@selector(toggleWebInspector:) key:@"i" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagOption)]];
+        if (self.webViewInspection) {
+            [viewMenu addItem:[self menuItem:@"Toggle Web Inspector" action:@selector(toggleWebInspector:) key:@"i" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagOption)]];
+        }
         [viewMenu addItem:[NSMenuItem separatorItem]];
     }
     [viewMenu addItem:[self menuItem:@"Enter Full Screen" action:@selector(toggleFullScreen:) key:@"f" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagControl)]];
@@ -12964,6 +12969,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
 
 - (void)toggleWebInspector:(id)sender {
     (void)sender;
+    if (!self.webViewInspection) return;
     WKWebView *webView = [self mainWebViewForWindow:NSApp.keyWindow];
     if (!webView) return;
     SEL selector = NSSelectorFromString(@"_showInspector");
@@ -13226,7 +13232,7 @@ static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url) 
     return NO;
 }
 
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int webview_inspection, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     @autoreleasepool {
         NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"native-sdk";
         NSString *displayNameString = [[NSString alloc] initWithBytes:display_name length:display_name_len encoding:NSUTF8StringEncoding] ?: @"";
@@ -13236,7 +13242,7 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         NSString *bundleIdString = [[NSString alloc] initWithBytes:bundle_id length:bundle_id_len encoding:NSUTF8StringEncoding] ?: @"dev.native_sdk.app";
         NSString *iconPathString = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *windowLabelString = [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] ?: @"main";
-        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) dockVisible:(dock_visible != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags];
+        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) webViewInspection:(webview_inspection != 0) dockVisible:(dock_visible != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags];
         return (__bridge_retained native_sdk_appkit_host_t *)host;
     }
 }
@@ -13964,6 +13970,22 @@ int native_sdk_appkit_focus_window(native_sdk_appkit_host_t *host, uint64_t wind
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object focusWindowWithId:window_id];
+    return 1;
+}
+
+int native_sdk_appkit_set_window_color_scheme(native_sdk_appkit_host_t *host, uint64_t window_id, int color_scheme) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window || color_scheme < 0 || color_scheme > 2) return 0;
+    NSAppearance *appearance = color_scheme == 0 ? nil : [NSAppearance appearanceNamed:
+        color_scheme == 2 ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+    if (window.appearance == appearance || [window.appearance isEqual:appearance]) return 1;
+    // Keep NSApp's effective appearance untouched: the runtime must still
+    // observe real OS changes while the app forces a window's scheme.
+    window.appearance = appearance;
+    // The canvas present owns backgroundColor (including transparent clear
+    // colors). Changing appearance must not overwrite that retained color.
+    [window.contentView setNeedsDisplay:YES];
     return 1;
 }
 

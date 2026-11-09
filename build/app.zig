@@ -983,6 +983,7 @@ fn tsCoreStage(
     relational_capability: bool,
     credentials_capability: bool,
     credentials_permission: bool,
+    keyboard_input_permission: bool,
     persist_version: ?u64,
     service_packages: []const ServicePackageConfig,
     service_carrier_choice: ServiceCarrierOption,
@@ -990,6 +991,7 @@ fn tsCoreStage(
     build_trace: bool,
     scriptc_optimization: ?[]const u8,
     typescript_view: bool,
+    view_reload: bool,
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const window_views = collectTsWindowViews(b, app_root);
@@ -1095,6 +1097,7 @@ fn tsCoreStage(
     if (relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
     if (credentials_capability) check.addArgs(&.{ "--capability", "credentials" });
     if (credentials_permission) check.addArgs(&.{ "--permission", "credentials" });
+    if (keyboard_input_permission) check.addArgs(&.{ "--permission", "keyboard_input" });
     // Activate the cross-tier registry check even when discovery found no
     // roots: the empty set must reject a core that declares a window.
     check.addArg("--window-views");
@@ -1263,6 +1266,10 @@ fn tsCoreStage(
         for (window_views.sources) |source| {
             stage_run.addFileInput(b.path(appPath(b, app_root, source.source_path)));
         }
+        if (view_reload) {
+            stage_run.addArg("--view-reload");
+            addViewReloadInputs(dep.builder, stage_run);
+        }
     }
     if (service_client) |client| {
         stage_run.addArg("--services-client");
@@ -1350,6 +1357,9 @@ fn tsCoreStage(
         \\
     , .{ service_carrier, service_pool_workers }));
     _ = staged.addCopyFile(migrations_zig, "migrations.zig");
+    // A view-reload build announces its contract to the markup watcher at
+    // launch, so the watcher compiles programs for exactly this core.
+    if (view_reload) _ = staged.addCopyFile(contract, "view_reload_contract.json");
     // Every imported file is an input to Debug's embedded source resolver and
     // the release/mobile compiled view, so stage those beside the runner.
     // Keep the ROOT out of this directory: changing any file in one WriteFiles
@@ -1496,8 +1506,18 @@ pub fn addViewFrontendInputs(b: *std.Build, sdk_builder: *std.Build, stage: *std
     stage.addFileInput(sdk_builder.path(manifest));
     stage.addFileInput(sdk_builder.path("packages/core/src/portable_sources.ts"));
     stage.addFileInput(sdk_builder.path("packages/core/src/view_frontend.ts"));
+    stage.addFileInput(sdk_builder.path("packages/core/src/view_program.ts"));
+    stage.addFileInput(sdk_builder.path("packages/core/src/view_sources.ts"));
     for (sources) |source| {
         stage.addFileInput(sdk_builder.path(b.fmt("packages/core/{s}", .{source})));
+    }
+}
+
+/// The modules stage_external_core.mjs reads for `--view-reload`: the
+/// development evaluator, its bridge generator and the reload format.
+pub fn addViewReloadInputs(sdk_builder: *std.Build, stage: *std.Build.Step.Run) void {
+    for ([_][]const u8{ "view_reload.ts", "view_bridge.ts", "view_evaluator.ts", "view_check.ts" }) |source| {
+        stage.addFileInput(sdk_builder.path(sdk_builder.fmt("packages/core/src/{s}", .{source})));
     }
 }
 
@@ -1812,6 +1832,12 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         .zig;
     const typescript_view = b.option(bool, "typescript-view", "Compile Native markup beside the TypeScript model (default for TypeScript apps; rebuild after markup edits)") orelse (core_tree == .ts);
     if (typescript_view and core_tree != .ts) @panic("-Dtypescript-view requires src/core.ts");
+    const view_reload = b.option(bool, "view-reload", "Debug builds with -Dtypescript-view: let `native dev` apply markup edits to the running app without a rebuild") orelse false;
+    if (view_reload) {
+        if (!typescript_view) @panic("\n-Dview-reload reloads compiled TypeScript views; it requires -Dtypescript-view=true\n");
+        if (app_optimize != .Debug) @panic("\n-Dview-reload is a development feature; it requires -Doptimize=Debug\n");
+        if (target.result.os.tag == .ios or target.result.abi.isAndroid()) @panic("\n-Dview-reload applies to desktop development runs; mobile builds reload by rebuilding\n");
+    }
     if (core_tree == .both) {
         @panic("\nthis app declares two cores: src/core.ts (TypeScript) and src/main.zig (Zig)." ++
             "\nAn app has exactly one core - the tree is the truth. Keep src/core.ts and delete" ++
@@ -1860,6 +1886,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             app_config.relational_capability,
             app_config.credentials_capability,
             app_config.credentials_permission,
+            app_config.keyboard_input_permission,
             app_config.persist_version,
             app_config.service_packages,
             service_carrier_choice,
@@ -1867,6 +1894,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             build_trace,
             scriptc_optimization,
             typescript_view,
+            view_reload,
         )
     else
         null;
@@ -1909,6 +1937,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
     const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
     const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
+    const webview_inspection = b.option(bool, "webview-inspect", "Enable macOS system WebView inspection (default: Debug builds only)");
     const js_bridge_enabled = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
     const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
     const web_layer_override = b.option(WebLayerOption, "web-layer", "Override app.zon webview_layer: auto, include, exclude");
@@ -1950,6 +1979,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     options.addOption([]const u8, "web_engine", @tagName(web_engine));
     options.addOption(bool, "debug_overlay", debug_overlay);
     options.addOption(bool, "automation", automation_enabled);
+    options.addOption(?bool, "webview_inspection", webview_inspection);
     options.addOption(bool, "js_bridge", js_bridge_enabled);
     options.addOption(bool, "web_layer", web_layer);
     const options_mod = options.createModule();
@@ -2122,49 +2152,53 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     });
     test_step.dependOn(&entry_analysis.step);
 
-    // `zig build model-contract`: reflect the app's Model/Msg into
+    // `zig build model-contract`: reflect a Zig core's Model/Msg into
     // zig-out/model-contract.zon so `native check` can verify markup
     // bindings against the app's real surface without compiling the app.
     // The artifact carries a hash over the app's Zig sources; the checker
     // degrades to structural checking when it goes stale. Apps without a
     // pub Model/Msg pair make this a silent no-op. The test step refreshes
-    // the artifact too, so CI-checked apps always hold a fresh one.
-    const contract_root = b.addWriteFiles().add("model_contract_emit.zig",
-        \\//! Generated by the app build: emits the model contract artifact
-        \\//! (see the toolkit's ui_markup_contract.zig).
-        \\const std = @import("std");
-        \\const native_sdk = @import("native_sdk");
-        \\const app = @import("app");
-        \\
-        \\pub fn main(init: std.process.Init) !void {
-        \\    try native_sdk.canvas.emitModelContractMain(app, init);
-        \\}
-        \\
-    );
-    // The emit root must share the app module's native_sdk instance so
-    // the Msg payload types it classifies are the same types the app
-    // declares its variants with.
-    const contract_mod = b.createModule(.{
-        .root_source_file = contract_root,
-        .target = target,
-        .optimize = optimize,
-    });
-    contract_mod.addImport("app", test_app_mod);
-    if (test_app_mod.import_table.get("native_sdk")) |sdk_mod| {
-        contract_mod.addImport("native_sdk", sdk_mod);
+    // the artifact too, so CI-checked apps always hold a fresh one. A
+    // TypeScript core needs no artifact: `native check` compiles its views
+    // against the core contract directly.
+    if (ts_stage == null) {
+        const contract_root = b.addWriteFiles().add("model_contract_emit.zig",
+            \\//! Generated by the app build: emits the model contract artifact
+            \\//! (see the toolkit's ui_markup_contract.zig).
+            \\const std = @import("std");
+            \\const native_sdk = @import("native_sdk");
+            \\const app = @import("app");
+            \\
+            \\pub fn main(init: std.process.Init) !void {
+            \\    try native_sdk.canvas.emitModelContractMain(app, init);
+            \\}
+            \\
+        );
+        // The emit root must share the app module's native_sdk instance so
+        // the Msg payload types it classifies are the same types the app
+        // declares its variants with.
+        const contract_mod = b.createModule(.{
+            .root_source_file = contract_root,
+            .target = target,
+            .optimize = optimize,
+        });
+        contract_mod.addImport("app", test_app_mod);
+        if (test_app_mod.import_table.get("native_sdk")) |sdk_mod| {
+            contract_mod.addImport("native_sdk", sdk_mod);
+        }
+        const contract_exe = b.addExecutable(.{
+            .name = b.fmt("{s}-model-contract", .{app_options.name}),
+            .root_module = contract_mod,
+            .use_llvm = useLlvmWorkaround(target),
+        });
+        const contract_run = b.addRunArtifact(contract_exe);
+        contract_run.setCwd(b.path(app_options.app_root));
+        contract_run.addArgs(&.{ "--src", "src", "--out", "zig-out/model-contract.zon" });
+        contract_run.has_side_effects = true;
+        const contract_step = b.step("model-contract", "Emit zig-out/model-contract.zon for `native check`");
+        contract_step.dependOn(&contract_run.step);
+        test_step.dependOn(&contract_run.step);
     }
-    const contract_exe = b.addExecutable(.{
-        .name = b.fmt("{s}-model-contract", .{app_options.name}),
-        .root_module = contract_mod,
-        .use_llvm = useLlvmWorkaround(target),
-    });
-    const contract_run = b.addRunArtifact(contract_exe);
-    contract_run.setCwd(b.path(app_options.app_root));
-    contract_run.addArgs(&.{ "--src", "src", "--out", "zig-out/model-contract.zon" });
-    contract_run.has_side_effects = true;
-    const contract_step = b.step("model-contract", "Emit zig-out/model-contract.zon for `native check`");
-    contract_step.dependOn(&contract_run.step);
-    test_step.dependOn(&contract_run.step);
 
     // `zig build package`: bundle the built binary through the `native`
     // CLI (built from the native_sdk dependency), so a scaffolded app can
@@ -3057,6 +3091,7 @@ const AppManifestBuildConfig = struct {
     relational_capability: bool = false,
     credentials_capability: bool = false,
     credentials_permission: bool = false,
+    keyboard_input_permission: bool = false,
     filesystem_permission: bool = false,
     max_image_pixel_bytes: usize = 1024 * 1024,
     updates_enabled: bool = false,
@@ -3163,6 +3198,7 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8, manifest_name: []
         .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
         .credentials_capability = hasManifestCapability(raw.capabilities, "credentials"),
         .credentials_permission = hasManifestPermission(raw.permissions, "credentials"),
+        .keyboard_input_permission = hasManifestPermission(raw.permissions, "keyboard_input"),
         .filesystem_permission = hasManifestPermission(raw.permissions, "filesystem"),
         .max_image_pixel_bytes = raw.images.max_image_pixel_bytes,
         .updates_enabled = raw.updates != null,

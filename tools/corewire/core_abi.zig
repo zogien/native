@@ -116,6 +116,10 @@ pub fn Bindings(comptime prefix: []const u8) type {
         pub const native_media_window_view = Symbol(fn (label: [*]const u8, label_len: usize, request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_media_window_view");
         pub const native_virtual_requests = Symbol(fn (label: [*]const u8, label_len: usize, video: [*]const u8, video_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_virtual_requests");
         pub const native_virtual_view = Symbol(fn (label: [*]const u8, label_len: usize, context: [*]const u8, context_len: usize, video: [*]const u8, video_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_virtual_view");
+        /// Debug-only development view: prepare a changed markup program, or
+        /// return to the compiled view. Results borrow until frame_reset.
+        pub const native_dev_view_prepare = Symbol(fn (program: [*]const u8, program_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_dev_view_prepare");
+        pub const native_dev_view_reset = Symbol(fn (out: *[*]const u8, len: *usize) callconv(.c) void, "native_dev_view_reset");
         pub const native_window_view = Symbol(fn (label: [*]const u8, label_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_window_view");
 
         /// Pure retained radio policy over native tree/eligibility bytes.

@@ -154,6 +154,8 @@ pub const EffectChannelEventKind = runtime_effects.EffectChannelEventKind;
 pub const EffectAudioCaptureEvent = runtime_effects.EffectAudioCaptureEvent;
 pub const EffectAudioCaptureEventKind = runtime_effects.EffectAudioCaptureEventKind;
 pub const decodeAudioCaptureChannelEvent = runtime_effects.decodeAudioCaptureChannelEvent;
+pub const EffectGlobalShortcutEvent = runtime_effects.EffectGlobalShortcutEvent;
+pub const EffectGlobalShortcutEventKind = runtime_effects.EffectGlobalShortcutEventKind;
 pub const HostChannelSourceBinding = runtime_effects.HostChannelSourceBinding;
 pub const EffectChannelSourceState = runtime_effects.EffectChannelSourceState;
 pub const EffectChannelSourceResult = runtime_effects.EffectChannelSourceResult;
@@ -203,6 +205,7 @@ pub const ts_core_db_key_base = runtime_ts_core_host.db_key_base;
 pub const ts_core_file_stream_key_base = runtime_ts_core_host.file_stream_key_base;
 
 const runtime_ts_ui_app = @import("ts_ui_app.zig");
+pub const view_reload = @import("view_reload.zig");
 pub const TsUiApp = runtime_ts_ui_app.TsUiApp;
 pub const TsUiAppWithFeatures = runtime_ts_ui_app.TsUiAppWithFeatures;
 

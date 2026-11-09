@@ -6,6 +6,7 @@ const geometry = @import("geometry");
 const types = @import("text_layout_types.zig");
 const interaction = @import("text_interaction.zig");
 const run = @import("text_run_policy.zig");
+const reuse = @import("decision_reuse.zig");
 pub const Result = struct {
     bounds: ?geometry.RectF,
     position: ?interaction.TextCaretPosition,
@@ -84,6 +85,130 @@ pub fn resultValid(request: []const u8, result: []const u8) bool {
         else => false,
     };
 }
+/// Text layout runs the same queries on every frame. A query is a chain of
+/// policy steps, each a pure function of the packet. Between steps the host
+/// changes the packet only by copying the step's result back, by copying line
+/// slots out of it, and by writing the capability answer. So a trace keeps
+/// the initial packet and every step's result and answer. A later query
+/// replays recorded results only while its initial packet and each freshly
+/// computed answer so far match the trace byte for byte: exactly the case in
+/// which the policy would return the same bytes. Capabilities always run.
+/// Traces are per thread and bounded; a query nested inside a capability,
+/// or one whose policy is not registered as pure, bypasses them.
+const trace_slot_count = 1024;
+const max_trace_bytes = 64 * 1024;
+threadlocal var trace_buffers: [trace_slot_count]std.ArrayList(u8) = @splat(.empty);
+threadlocal var trace_owners: [trace_slot_count]?run.Policy = @splat(null);
+threadlocal var trace_active: bool = false;
+
+const Trace = struct {
+    slot: ?usize = null,
+    policy: ?run.Policy = null,
+    /// The recorded trace being followed, until the query diverges from it.
+    reading: ?[]const u8 = null,
+    cursor: usize = 0,
+    /// The trace this query writes when it was not served entirely from one.
+    recording: ?std.ArrayList(u8) = null,
+
+    fn begin(policy: run.Policy, packet: []const u8, text_bytes: []const u8) Trace {
+        if (trace_active or !reuse.isPure(policy)) return .{};
+        trace_active = true;
+        const hash = reuse.slotHash(@intFromPtr(policy), packet, 640) ^ reuse.slotHash(0, text_bytes, 64);
+        const index: usize = @intCast(hash % trace_slot_count);
+        var self: Trace = .{ .slot = index, .policy = policy };
+        const stored = trace_buffers[index].items;
+        const owned = if (trace_owners[index]) |owner| owner == policy else false;
+        if (owned and stored.len >= 4 + packet.len and
+            std.mem.readInt(u32, stored[0..4], .little) == packet.len and reuse.bytesEqual(stored[4..][0..packet.len], packet))
+        {
+            self.reading = stored;
+            self.cursor = 4 + packet.len;
+        } else {
+            self.startRecording(&.{});
+            self.appendLength(packet.len);
+            self.append(packet);
+        }
+        return self;
+    }
+
+    fn startRecording(self: *Trace, prefix: []const u8) void {
+        var list: std.ArrayList(u8) = .empty;
+        list.appendSlice(std.heap.smp_allocator, prefix) catch return;
+        self.recording = list;
+    }
+
+    fn append(self: *Trace, bytes: []const u8) void {
+        if (self.recording) |*list| {
+            if (list.items.len + bytes.len > max_trace_bytes) return self.dropRecording();
+            list.appendSlice(std.heap.smp_allocator, bytes) catch self.dropRecording();
+        }
+    }
+
+    fn appendLength(self: *Trace, len: usize) void {
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, std.math.cast(u32, len) orelse return self.dropRecording(), .little);
+        self.append(&bytes);
+    }
+
+    fn dropRecording(self: *Trace) void {
+        if (self.recording) |*list| list.deinit(std.heap.smp_allocator);
+        self.recording = null;
+    }
+
+    /// Copy the next recorded result, when the query is still on its trace.
+    fn recordedResult(self: *Trace, result: *[1024]u8) bool {
+        const stored = self.reading orelse return false;
+        if (self.cursor + result.len > stored.len) {
+            self.diverge();
+            return false;
+        }
+        @memcpy(result, stored[self.cursor..][0..result.len]);
+        self.cursor += result.len;
+        return true;
+    }
+
+    fn recordResult(self: *Trace, result: *const [1024]u8) void {
+        if (self.reading == null) self.append(result);
+    }
+
+    /// The host's answer for this step (empty for steps without one).
+    fn answer(self: *Trace, head: []const u8, tail: []const u8) void {
+        const len = head.len + tail.len;
+        if (self.reading) |stored| {
+            if (self.cursor + 4 + len <= stored.len and std.mem.readInt(u32, stored[self.cursor..][0..4], .little) == len and
+                reuse.bytesEqual(stored[self.cursor + 4 ..][0..head.len], head) and
+                reuse.bytesEqual(stored[self.cursor + 4 + head.len ..][0..tail.len], tail))
+            {
+                self.cursor += 4 + len;
+                return;
+            }
+            self.diverge();
+        }
+        self.appendLength(len);
+        self.append(head);
+        self.append(tail);
+    }
+
+    /// Leave the trace: everything consumed so far becomes the new trace's
+    /// prefix, and later steps run the policy.
+    fn diverge(self: *Trace) void {
+        const stored = self.reading orelse return;
+        self.reading = null;
+        self.startRecording(stored[0..self.cursor]);
+    }
+
+    fn end(self: *Trace) void {
+        const index = self.slot orelse return;
+        trace_active = false;
+        if (self.recording) |list| {
+            trace_buffers[index].deinit(std.heap.smp_allocator);
+            trace_buffers[index] = list;
+            trace_owners[index] = self.policy;
+            self.recording = null;
+        }
+    }
+};
+
 pub fn execute(policy: run.Policy, text: types.DrawText, options: types.TextLayoutOptions, query: Query) Result {
     const glyph_bytes = std.math.mul(usize, text.glyphs.len, 32) catch @panic("text query glyph capacity");
     const text_bytes = std.math.mul(usize, text.text.len, 5) catch @panic("text query byte capacity");
@@ -125,17 +250,30 @@ fn executeInStorage(policy: run.Policy, text: types.DrawText, options: types.Tex
     var result: [1024]u8 = undefined;
     var calls: usize = 0;
     const quota = std.math.mul(usize, total, 32) catch @panic("text query continuation range");
+    var trace = Trace.begin(policy, packet, text.text);
+    defer trace.end();
     while (true) {
         calls += 1;
         if (calls > quota) @panic("text query did not finish");
-        @memset(&result, 0xa5);
-        if (policy(packet, &result) != result.len or !resultValid(packet, &result)) @panic("invalid text query continuation");
+        if (!trace.recordedResult(&result)) {
+            @memset(&result, 0xa5);
+            if (policy(packet, &result) != result.len or !resultValid(packet, &result)) @panic("invalid text query continuation");
+        }
+        trace.recordResult(&result);
         if (result[3] == 2) break;
         const action = word(&result, 80);
         const slot = word(&result, 84);
         @memcpy(packet[0..1024], &result);
         switch (action) {
-            1 => run.supplyCapability(packet, packet[512..1024], 1024, text, options),
+            1 => {
+                run.supplyCapability(packet, packet[512..1024], 1024, text, options);
+                // The capability answer is the only host input to the next
+                // step: the header's answer words, plus the advance facts and
+                // everything after them for run-advance answers.
+                const kind = word(packet, 512 + 100);
+                const advance_at = 1024 + text.glyphs.len * 32;
+                trace.answer(packet[512 + 112 .. 512 + 140], if (kind == 3 or kind == 4) packet[advance_at..total] else &.{});
+            },
             2 => {
                 @memcpy(line_header[320..376], packet[128..184]);
                 query.lines[slot] = run.readLine(&line_header);
@@ -144,6 +282,7 @@ fn executeInStorage(policy: run.Policy, text: types.DrawText, options: types.Tex
             4 => query.selections[slot] = .{ .range = .{ .start = word(packet, 320), .end = word(packet, 324) }, .rect = readRect(packet, 328) },
             else => unreachable,
         }
+        if (action != 1) trace.answer(&.{}, &.{});
         put(packet, 92, 1);
     }
     const present = word(&result, 272) != 0;

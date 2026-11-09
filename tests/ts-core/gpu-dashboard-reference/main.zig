@@ -55,9 +55,10 @@ const dashboard_chrome_prefix_commands: usize = 5;
 const expected_dashboard_command_count: usize = 70;
 const expected_dashboard_interaction_command_count: usize = 70;
 // Reference-renderer pixel signature of the dashboard scene. It pins the
-// current house registers in one number: real sans/mono outline text at
-// the bundled face's metrics; the flat 28/32/36 button ladder (one 10px
-// side inset, radius 10 stepping to 8 at sm, quiet red-wash
+// current house registers in one number: matching regular, medium and
+// bold sans outlines and mono text at their bundled face metrics; the
+// flat 28/32/36 button ladder (one 10px side inset, radius 10 stepping
+// to 8 at sm, quiet red-wash
 // destructive); the near-black/porcelain monochrome primary on
 // checked/filled states and accent chrome; the transparent unselected
 // tab trigger on its muted tabs-list container; the 4px muted-rail
@@ -70,7 +71,7 @@ const expected_dashboard_interaction_command_count: usize = 70;
 // deliberately when rendering changes, reviewing the rendered pixels
 // (reference captures or the docs previews — same emitters) first; the
 // spot pixels below still guard basic visibility.
-const expected_dashboard_reference_signature: u64 = 7222753033888946849;
+const expected_dashboard_reference_signature: u64 = 12413203823298430369;
 const expected_dashboard_widget_node_count: usize = 48;
 const expected_dashboard_snapshot_widget_count: usize = 48;
 const refresh_command = "dashboard.refresh";

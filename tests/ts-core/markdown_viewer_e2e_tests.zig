@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("markdown_viewer_core");
 const decoder = @import("markdown_viewer_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("markdown-viewer-reference/main.zig");
 const parity = @import("effects_media_parity.zig");
 const testing = std.testing;
@@ -88,7 +89,7 @@ fn viewParity(expected: *const reference.Model, actual: *const core.Model) !void
     const View = canvas.CompiledMarkupView(core.Model, core.Msg, @embedFile("app.native"));
     for (0..2) |backend| {
         var b = Ui.init(arena.allocator());
-        const new = try b.finalize(if (backend == 0) View.build(&b, actual) else decoder.build(&b, actual));
+        const new = try b.finalize(if (backend == 0) View.build(&b, actual) else CompiledView.build(&b, actual));
         core.rt.frameReset();
         try parity.equal(old.root, new.root);
         try testing.expectEqual(old.handlers.len, new.handlers.len);
@@ -349,7 +350,7 @@ test "Markdown Viewer complete appearance chrome scroll and token register match
 }
 
 fn themeView(ui: *canvas.Ui(core.Msg), model: *const core.Model) canvas.Ui(core.Msg).Node {
-    return decoder.build(ui, model);
+    return CompiledView.build(ui, model);
 }
 test "Markdown Viewer owns the complete custom register across accessibility and frame expiry" {
     const Adapter = sdk.TsUiApp(core);

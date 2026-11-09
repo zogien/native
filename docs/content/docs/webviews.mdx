@@ -8,6 +8,14 @@ This is the right model for browser chrome, dashboards, previews, auth flows, an
 
 The startup app source is the default trusted WebView named `main`. Simple apps can ignore this and keep using one page. Advanced apps can resize `main` and place isolated child WebViews beneath or above it. `main` is reserved; child WebViews cannot be created with that label.
 
+## Inspection
+
+macOS system WebViews inherit one inspection capability from their host. Debug
+app builds enable it; release builds disable it. The `-Dwebview-inspect` build
+option overrides either default for every WebView, independently of `bridge`.
+See [macOS WebView inspection](/docs/debugging#macos-webview-inspection) for the
+security implications and lower-level host configuration.
+
 ## JavaScript API
 
 Enable the built-in WebView helpers from an allowed origin:

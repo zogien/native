@@ -68,6 +68,7 @@ const max_menu_key_bytes = types.max_menu_key_bytes;
 const max_shortcuts = types.max_shortcuts;
 const max_shortcut_id_bytes = types.max_shortcut_id_bytes;
 const max_shortcut_key_bytes = types.max_shortcut_key_bytes;
+const max_global_shortcuts = types.max_global_shortcuts;
 const max_widget_accessibility_nodes = types.max_widget_accessibility_nodes;
 const max_gpu_surface_packet_json_bytes = types.max_gpu_surface_packet_json_bytes;
 const ShortcutModifiers = types.ShortcutModifiers;
@@ -325,6 +326,11 @@ pub const NullAudio = struct {
     }
 };
 
+pub const NullGlobalShortcut = struct {
+    binding: types.OwnedShortcut,
+    pressed: bool = false,
+};
+
 pub const NullAudioCapture = struct {
     active: bool = false,
     format: types.AudioCaptureFormat = .{},
@@ -426,6 +432,10 @@ pub const NullPlatform = struct {
     /// like `windows` — same seam-regression purpose as
     /// `window_resizable` (the startup create used to hardcode it).
     window_titlebar: [max_windows]WindowTitlebarStyle = [_]WindowTitlebarStyle{.standard} ** max_windows,
+    window_color_scheme: [max_windows]types.WindowColorScheme = @splat(.system),
+    /// Source-less test harnesses have an implicit primary window rather
+    /// than a createWindow entry, just like the main canvas surface.
+    main_window_color_scheme: types.WindowColorScheme = .system,
     /// Captured independently from `restore_state`: persistence opt-in does
     /// not mean a frame was actually found and restored.
     window_placement: [max_windows]WindowInitialPlacement = [_]WindowInitialPlacement{.default} ** max_windows,
@@ -499,6 +509,13 @@ pub const NullPlatform = struct {
     dock_presence_count: u32 = 0,
     launch_at_login_status: types.LaunchAtLoginStatus = .disabled,
     launch_at_login_set_count: u32 = 0,
+    /// Set false before `platform()` to model a host without keyboard input.
+    keyboard_input: bool = true,
+    /// `.denied` makes posts fail like a macOS app without the Accessibility grant.
+    keyboard_input_access: types.KeyboardInputAccess = .granted,
+    keyboard_input_prompt_count: u32 = 0,
+    keyboard_chords: [32]types.KeyChord = undefined,
+    keyboard_chord_count: usize = 0,
     /// Captured `WindowOptions.min_width`/`min_height` per created
     /// window — the content min-size floor that must survive to the
     /// create seam (macOS applies it as `contentMinSize`); same
@@ -766,6 +783,11 @@ pub const NullPlatform = struct {
     microphone_capture: bool = true,
     system_audio_capture: bool = true,
     audio_captures: [2]NullAudioCapture = [_]NullAudioCapture{.{}} ** 2,
+    /// Model a host with system-wide shortcuts; false models Linux.
+    global_shortcuts: bool = true,
+    global_shortcut_entries: [max_global_shortcuts]NullGlobalShortcut = undefined,
+    global_shortcut_count: usize = 0,
+    global_shortcut_sink: types.GlobalShortcutSink = .{},
     /// Whether this modeled host has a video decoder. On by default (the
     /// fake below stands in for AVFoundation); tests modelling a staged
     /// host (Windows/Linux today) set it false BEFORE `platform()` so
@@ -973,6 +995,7 @@ pub const NullPlatform = struct {
                 .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
+                .set_window_color_scheme_fn = setWindowColorScheme,
                 .set_window_drag_regions_fn = setWindowDragRegions,
                 .create_view_fn = createView,
                 .update_view_fn = updateView,
@@ -1004,6 +1027,8 @@ pub const NullPlatform = struct {
                 .remove_tray_fn = removeTray,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
+                .send_key_chord_fn = if (self.keyboard_input) sendKeyChord else null,
+                .keyboard_input_access_fn = if (self.keyboard_input) keyboardInputAccess else null,
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
                 .configure_security_policy_fn = configureSecurityPolicy,
@@ -1019,6 +1044,7 @@ pub const NullPlatform = struct {
                 .audio_stop_fn = if (self.audio_playback) audioStop else null,
                 .audio_seek_fn = if (self.audio_playback) audioSeek else null,
                 .audio_set_volume_fn = if (self.audio_playback) audioSetVolume else null,
+                .configure_global_shortcuts_fn = if (self.global_shortcuts) configureGlobalShortcuts else null,
                 .audio_capture_start_fn = if (self.microphone_capture or self.system_audio_capture) audioCaptureStart else null,
                 .audio_capture_stop_fn = if (self.microphone_capture or self.system_audio_capture) audioCaptureStop else null,
                 .video_load_fn = if (self.video_playback) videoLoad else null,
@@ -1088,6 +1114,8 @@ pub const NullPlatform = struct {
             .microphone_capture => self.microphone_capture,
             .system_audio_capture => self.system_audio_capture,
             .video_playback => self.video_playback,
+            .global_shortcuts => self.global_shortcuts,
+            .keyboard_input => self.keyboard_input,
         };
     }
 
@@ -1237,6 +1265,7 @@ pub const NullPlatform = struct {
         self.windows[self.window_count] = info;
         self.window_resizable[self.window_count] = options.resizable;
         self.window_titlebar[self.window_count] = options.titlebar;
+        self.window_color_scheme[self.window_count] = .system;
         self.window_placement[self.window_count] = options.initial_placement;
         self.window_restore_policy[self.window_count] = options.restore_policy;
         self.window_transparent[self.window_count] = options.transparent;
@@ -2076,6 +2105,24 @@ pub const NullPlatform = struct {
         self.revealed_path_len = (try copyInto(&self.revealed_path, path)).len;
     }
 
+    fn sendKeyChord(context: ?*anyopaque, chord: types.KeyChord) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.keyboard_input_access == .denied) return error.KeyboardInputAccessDenied;
+        if (self.keyboard_chord_count == self.keyboard_chords.len) return error.KeyboardInputFailed;
+        self.keyboard_chords[self.keyboard_chord_count] = chord;
+        self.keyboard_chord_count += 1;
+    }
+
+    fn keyboardInputAccess(context: ?*anyopaque, prompt: bool) anyerror!types.KeyboardInputAccess {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (prompt and self.keyboard_input_access == .denied) self.keyboard_input_prompt_count += 1;
+        return self.keyboard_input_access;
+    }
+
+    pub fn keyboardChords(self: *const NullPlatform) []const types.KeyChord {
+        return self.keyboard_chords[0..self.keyboard_chord_count];
+    }
+
     fn addRecentDocument(context: ?*anyopaque, path: []const u8) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.recent_document_path = undefined;
@@ -2238,6 +2285,46 @@ pub const NullPlatform = struct {
         capture.active = false;
         capture.sink = .{};
         capture.stop_count += 1;
+    }
+
+    fn configureGlobalShortcuts(context: ?*anyopaque, shortcuts: []const Shortcut, sink: types.GlobalShortcutSink, statuses: []types.GlobalShortcutStatus) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.global_shortcut_sink = sink;
+        var next: [max_global_shortcuts]NullGlobalShortcut = undefined;
+        var count: usize = 0;
+        for (shortcuts, statuses) |shortcut, *status| {
+            status.* = .registered;
+            for (next[0..count]) |*entry| {
+                if (types.sameShortcutCombination(entry.binding.shortcut(), shortcut)) status.* = .conflict;
+            }
+            if (status.* == .conflict) continue;
+            next[count] = .{ .binding = .init(shortcut) };
+            for (self.configuredGlobalShortcuts()) |*previous| next[count].pressed = next[count].pressed or (previous.pressed and previous.binding.matches(shortcut));
+            count += 1;
+        }
+        for (self.configuredGlobalShortcuts()) |*previous| {
+            if (!previous.pressed) continue;
+            for (next[0..count]) |*entry| {
+                if (entry.binding.matches(previous.binding.shortcut())) break;
+            } else sink.push(.{ .shortcut = previous.binding.shortcut(), .phase = .released });
+        }
+        @memcpy(self.global_shortcut_entries[0..count], next[0..count]);
+        self.global_shortcut_count = count;
+    }
+
+    pub fn configuredGlobalShortcuts(self: *const NullPlatform) []const NullGlobalShortcut {
+        return self.global_shortcut_entries[0..self.global_shortcut_count];
+    }
+
+    /// Simulate pressing or releasing a registered global shortcut.
+    pub fn pushGlobalShortcut(self: *NullPlatform, id: []const u8, phase: types.GlobalShortcutPhase) bool {
+        for (self.global_shortcut_entries[0..self.global_shortcut_count]) |*entry| {
+            if (!std.mem.eql(u8, entry.binding.shortcut().id, id) or entry.pressed == (phase == .pressed)) continue;
+            entry.pressed = phase == .pressed;
+            self.global_shortcut_sink.push(.{ .shortcut = entry.binding.shortcut(), .phase = phase });
+            return true;
+        }
+        return false;
     }
 
     /// Push deterministic PCM through a live fake capture.
@@ -3210,6 +3297,22 @@ pub const NullPlatform = struct {
         return self.window_show_count[index];
     }
 
+    fn setWindowColorScheme(context: ?*anyopaque, window_id: WindowId, scheme: types.WindowColorScheme) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse {
+            if (window_id != 1) return error.WindowNotFound;
+            self.main_window_color_scheme = scheme;
+            return;
+        };
+        if (!self.windows[index].open) return error.WindowNotFound;
+        self.window_color_scheme[index] = scheme;
+    }
+
+    pub fn windowColorScheme(self: *const NullPlatform, window_id: WindowId) ?types.WindowColorScheme {
+        const index = self.findWindowIndex(window_id) orelse return if (window_id == 1) self.main_window_color_scheme else null;
+        return self.window_color_scheme[index];
+    }
+
     /// Test seam: model a window leaving or returning to the glass
     /// without a minimize verb (fully covered by another app, revealed
     /// again) — the occlusion fact the real hosts' spectrum gating
@@ -3245,6 +3348,7 @@ pub const NullPlatform = struct {
             self.window_sources[cursor] = self.window_sources[cursor + 1];
             self.window_resizable[cursor] = self.window_resizable[cursor + 1];
             self.window_titlebar[cursor] = self.window_titlebar[cursor + 1];
+            self.window_color_scheme[cursor] = self.window_color_scheme[cursor + 1];
             self.window_placement[cursor] = self.window_placement[cursor + 1];
             self.window_restore_policy[cursor] = self.window_restore_policy[cursor + 1];
             self.window_transparent[cursor] = self.window_transparent[cursor + 1];
