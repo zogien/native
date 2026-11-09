@@ -2,11 +2,12 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("typography_core");
 const decoder = @import("typography_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const canvas = sdk.canvas;
 const Adapter = sdk.TsUiApp(core);
 
 fn view(ui: *canvas.Ui(core.Msg), model: *const core.Model) canvas.Ui(core.Msg).Node {
-    return decoder.build(ui, model);
+    return CompiledView.build(ui, model);
 }
 
 fn expected(model: *const core.Model) canvas.DesignTokens {
@@ -41,6 +42,12 @@ test "compiled model themes copy the complete register across frame and commit o
         reference.accessibility_policy = core.nativeWindowPolicy;
         reference.widget_routing_policy = core.nativeWindowPolicy;
         reference.widget_change_policy = core.nativeWindowPolicy;
+        reference.widget_retention_policy = core.nativeWindowPolicy;
+        reference.widget_reconcile_policy = core.nativeWindowPolicy;
+        reference.scroll_tree_policy = core.nativeWindowPolicy;
+        reference.scroll_mutation_policy = core.nativeWindowPolicy;
+        reference.widget_continuity_policy = core.nativeWindowPolicy;
+        reference.staged_rebuild_policy = core.nativeWindowPolicy;
         reference.widget_paint_policy = core.nativeWindowPolicy;
         reference.widget_presentation_policy = core.nativeWindowPolicy;
         reference.widget_paint_walk_policy = core.nativeWindowPolicy;
@@ -64,7 +71,7 @@ test "compiled rich text preserves registered face runs and alignment after deco
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var ui = canvas.Ui(core.Msg).init(arena.allocator());
-    const root = decoder.build(&ui, model);
+    const root = CompiledView.build(&ui, model);
     core.rt.frameReset();
     const tokens = expected(model);
     const tree = try ui.finalizeWithTokens(root, tokens);
@@ -108,6 +115,12 @@ fn restamp(reference: *canvas.DesignTokens, actual: canvas.DesignTokens) void {
     reference.accessibility_policy = core.nativeWindowPolicy;
     reference.widget_routing_policy = core.nativeWindowPolicy;
     reference.widget_change_policy = core.nativeWindowPolicy;
+    reference.widget_retention_policy = core.nativeWindowPolicy;
+    reference.widget_reconcile_policy = core.nativeWindowPolicy;
+    reference.scroll_tree_policy = core.nativeWindowPolicy;
+    reference.scroll_mutation_policy = core.nativeWindowPolicy;
+    reference.widget_continuity_policy = core.nativeWindowPolicy;
+    reference.staged_rebuild_policy = core.nativeWindowPolicy;
     reference.widget_paint_policy = core.nativeWindowPolicy;
     reference.widget_presentation_policy = core.nativeWindowPolicy;
     reference.widget_paint_walk_policy = core.nativeWindowPolicy;

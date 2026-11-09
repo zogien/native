@@ -192,7 +192,22 @@ const ContextMenuRecord = struct {
     enabled: bool,
     separator: bool,
 };
-const Tree = struct { format: u32, nodes: []const Record };
+/// A view-reload build (Debug) decodes the development records: each node's
+/// authored source and the markup files the view names, for `provenance`
+/// and write-back. Every other build decodes exactly the release records.
+const view_sources = @import("builtin").mode == .Debug and @hasDecl(core, "nativeDevViewPrepare");
+const SourceSite = struct { file: []const u8, start: usize, end: usize, line: usize, column: usize };
+const SourceEntry = struct { file: []const u8, start: usize, end: usize, line: usize, column: usize, chain: []const SourceSite };
+const SourceFile = struct { path: []const u8, hash: []const u8 };
+const Tree = if (view_sources) struct {
+    format: u32,
+    nodes: []const Record,
+    sources: []const i64 = &.{},
+    sourceTable: []const SourceEntry = &.{},
+    sourceFiles: []const SourceFile = &.{},
+} else struct { format: u32, nodes: []const Record };
+/// Per-record sources of the tree being decoded (view-reload builds only).
+var decoding_sources: []const ?*const sdk.canvas.ui_provenance.NodeSource = &.{};
 
 const VirtualRequest = struct {
     id: []const u8,
@@ -231,7 +246,7 @@ fn virtualView(ui: *Ui, label: []const u8, video: []const u8) !Ui.Node {
             .viewport_fallback = request.viewportFallback,
             .index_base = request.indexBase,
             .anchor = if (request.trailing) .trailing else .leading,
-            .extent_estimate = if (request.estimateHelper >= 0) core.Model.virtualExtentEstimate else null,
+            .extent_estimate = if (request.estimateHelper >= 0) core.virtualExtentEstimate else null,
             .extent_context = if (request.estimateHelper >= 0) @ptrFromInt(@as(usize, @intCast(request.estimateHelper)) + 1) else null,
         };
         target.range = ui.virtualWindow(target.options);
@@ -245,8 +260,7 @@ fn virtualView(ui: *Ui, label: []const u8, video: []const u8) !Ui.Node {
     return decodeVirtual(ui, core.nativeVirtualView(label, context, video, ui.arena), resolved);
 }
 
-/// Concrete callbacks for generated compiled-model apps; the legacy builders
-/// retain their full Model signature for independent reference fixtures.
+/// Concrete callbacks for generated compiled-model apps.
 pub fn buildRuntime(ui: *Ui, model: *const core.RuntimeModel) Ui.Node {
     _ = model;
     return buildCommitted(ui);
@@ -257,9 +271,21 @@ pub fn buildRuntimeWindow(ui: *Ui, model: *const core.RuntimeModel, label: []con
     return buildCommittedWindow(ui, label);
 }
 
-pub fn build(ui: *Ui, model: *const core.Model) Ui.Node {
-    _ = model;
-    return buildCommitted(ui);
+/// Callbacks for any host model representation. The compiled view never
+/// reads the model it is handed, so harnesses that keep another host model
+/// install the same committed tree source as generated apps.
+pub fn ViewFor(comptime HostModel: type) type {
+    return struct {
+        pub fn build(ui: *Ui, model: *const HostModel) Ui.Node {
+            _ = model;
+            return buildCommitted(ui);
+        }
+
+        pub fn buildWindow(ui: *Ui, model: *const HostModel, label: []const u8) Ui.Node {
+            _ = model;
+            return buildCommittedWindow(ui, label);
+        }
+    };
 }
 
 fn buildCommitted(ui: *Ui) Ui.Node {
@@ -267,11 +293,6 @@ fn buildCommitted(ui: *Ui) Ui.Node {
     if (comptime @hasDecl(core, "nativeVirtualRequests")) return virtualView(ui, "", videoContext(ui, &context)) catch @panic("invalid compiled virtual view data");
     const bytes = if (comptime @hasDecl(core, "nativeMediaView")) core.nativeMediaView(videoContext(ui, &context), ui.arena) else core.nativeView(ui.arena);
     return decode(ui, bytes) catch @panic("invalid compiled TypeScript view data");
-}
-
-pub fn buildWindow(ui: *Ui, model: *const core.Model, label: []const u8) Ui.Node {
-    _ = model;
-    return buildCommittedWindow(ui, label);
 }
 
 fn buildCommittedWindow(ui: *Ui, label: []const u8) Ui.Node {
@@ -297,6 +318,7 @@ fn decode(ui: *Ui, bytes: []const u8) !Ui.Node {
 
 fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) !Ui.Node {
     if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+        sdk.canvas.decision_reuse.registerPurePolicy(core.nativeWindowPolicy);
         ui.construction_policy = core.nativeWindowPolicy;
         ui.composition_policy = core.nativeWindowPolicy;
         ui.code_content_policy = core.nativeWindowPolicy;
@@ -318,10 +340,55 @@ fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) 
         seen[window] = true;
     };
     for (seen[0..virtuals.len]) |present| if (!present) return error.InvalidView;
+    if (comptime view_sources) {
+        if (ui.provenance_sink != null) decoding_sources = try stampSources(ui, tree);
+        defer decoding_sources = &.{};
+        return node(ui, tree.nodes, 0, tree.nodes.len, 0, virtuals, null);
+    }
     return node(ui, tree.nodes, 0, tree.nodes.len, 0, virtuals, null);
 }
 
-fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth: usize, virtuals: []const ResolvedVirtual, parent_kind: ?@FieldType(Record, "kind")) !Ui.Node {
+/// Resolve the development records' attribution into one source per record
+/// (in the build arena) and publish the files the view names. A view
+/// without attribution gets no sources, as builder-authored views do.
+fn stampSources(ui: *Ui, tree: Tree) ![]const ?*const sdk.canvas.ui_provenance.NodeSource {
+    const provenance = sdk.canvas.ui_provenance;
+    const reload = sdk.view_reload;
+    if (tree.sources.len != tree.nodes.len) return &.{};
+    const entries = try ui.arena.alloc(provenance.NodeSource, tree.sourceTable.len);
+    for (tree.sourceTable, entries) |entry, *out| {
+        const chain = try ui.arena.alloc(provenance.UseSite, entry.chain.len);
+        for (entry.chain, chain) |site, *use| use.* = .{ .src_path = site.file, .span = .{ .start = site.start, .end = site.end }, .line = site.line, .column = site.column };
+        out.* = .{ .src_path = entry.file, .span = .{ .start = entry.start, .end = entry.end }, .line = entry.line, .column = entry.column, .chain = chain };
+    }
+    const stamped = try ui.arena.alloc(?*const provenance.NodeSource, tree.nodes.len);
+    for (tree.sources, stamped) |index, *out| {
+        if (index < 0 or index >= entries.len) return error.InvalidView;
+        out.* = &entries[@intCast(index)];
+    }
+    reload.view_files_len = 0;
+    for (tree.sourceFiles) |file| {
+        if (reload.view_files_len == reload.max_view_files) break;
+        const hash = std.fmt.parseUnsigned(u64, file.hash, 16) catch return error.InvalidView;
+        // Paths are stamped relative to the app's src/; the root view file is stamped empty.
+        const disk = try std.fmt.allocPrint(ui.arena, "src/{s}", .{if (file.path.len == 0) "app.native" else file.path});
+        reload.view_files[reload.view_files_len] = .{ .stamped = file.path, .disk = disk, .hash = hash };
+        reload.view_files_len += 1;
+    }
+    return stamped;
+}
+
+/// One record and its subtree. View-reload builds stamp each node with its
+/// authored source; every other build decodes the records alone.
+const node = if (view_sources) nodeWithSource else nodeRecord;
+
+fn nodeWithSource(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth: usize, virtuals: []const ResolvedVirtual, parent_kind: ?@FieldType(Record, "kind")) anyerror!Ui.Node {
+    var built = try nodeRecord(ui, records, index, parent_end, depth, virtuals, parent_kind);
+    if (index < decoding_sources.len) built.source = decoding_sources[index];
+    return built;
+}
+
+fn nodeRecord(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth: usize, virtuals: []const ResolvedVirtual, parent_kind: ?@FieldType(Record, "kind")) !Ui.Node {
     if (depth > 64) return error.ViewTooDeep;
     var value = records[index];
     if (value.keyBytes != null and value.key != null or value.globalKeyBytes != null and value.globalKey != null) return error.InvalidView;
@@ -1225,6 +1292,10 @@ test "compiled code diff ordinals preserve every mask word and reject invalid tr
     }
 }
 
+/// Reference markup in these checks binds nothing, so it compiles against an
+/// empty model rather than the app's source model.
+const BindingFreeModel = struct {};
+
 // The native construction oracle supplies authored data. Compiled views also
 // attach the appearance owner to every node; compare that callback explicitly
 // instead of erasing it from the decoded tree.
@@ -1246,8 +1317,8 @@ test "compiled tooltip records match native anchored and static primitives" {
         var actual = try decode(&ui, bytes);
         @memset(bytes, 0);
         var reference_ui = Ui.init(arena.allocator());
-        const Reference = sdk.canvas.CompiledMarkupView(core.Model, core.Msg, "<stack><button>Run</button><tooltip anchor=\"above\" anchor-alignment=\"end\" anchor-offset=\"8\" tooltip-delay=\"250\">Run café</tooltip><tooltip>Static hint</tooltip></stack>");
-        const model: core.Model = undefined;
+        const Reference = sdk.canvas.CompiledMarkupView(BindingFreeModel, core.Msg, "<stack><button>Run</button><tooltip anchor=\"above\" anchor-alignment=\"end\" anchor-offset=\"8\" tooltip-delay=\"250\">Run café</tooltip><tooltip>Static hint</tooltip></stack>");
+        const model: BindingFreeModel = .{};
         const expected = withCompiledAppearance(Reference.build(&reference_ui, &model));
         // The runtime-only callback differs by frontend; every authored
         // primitive field, child, owned string and anchor must match.
@@ -1422,10 +1493,10 @@ pub fn testInlineParagraphRecords() !void {
     var actual = try decode(&ui, bytes);
     @memset(bytes, 0);
     var reference_ui = Ui.init(arena.allocator());
-    const Reference = sdk.canvas.CompiledMarkupView(core.Model, core.Msg,
+    const Reference = sdk.canvas.CompiledMarkupView(BindingFreeModel, core.Msg,
         \\<text text-alignment="end" size="display" key="readout" label="Result">Value <span weight="medium" mono="true" italic="true" underline="true" scale="1.5" foreground="accent">café</span>.</text>
     );
-    const model: core.Model = undefined;
+    const model: BindingFreeModel = .{};
     const expected = withCompiledAppearance(Reference.build(&reference_ui, &model));
     actual.widget.interaction_policy = null;
     const actual_tree = try ui.finalize(actual);

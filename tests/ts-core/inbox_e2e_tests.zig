@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("inbox_core");
 const decoder = @import("inbox_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("inbox_reference.zig");
 const canvas = sdk.canvas;
 
@@ -80,7 +81,7 @@ fn viewParity(native: *const reference.Model, model: *const core.Model) !void {
     const View = canvas.CompiledMarkupView(core.Model, core.Msg, @embedFile("app.native"));
     for (0..2) |backend| {
         var b = Ui.init(arena.allocator());
-        const root = if (backend == 0) View.build(&b, model) else decoder.build(&b, model);
+        const root = if (backend == 0) View.build(&b, model) else CompiledView.build(&b, model);
         core.rt.frameReset();
         const actual = try b.finalize(root);
         try equal(expected.root, actual.root);

@@ -10,6 +10,10 @@ import { intakeCases } from "./intake_cases.ts";
 assert.ok(process.argv[2], "run with the compiled corewire path");
 const corewire = path.resolve(process.argv[2]);
 // Mirror hashes include the reviewed stateless-runtime API addition.
+// Mirror hashes also include file-scope host facts: `has_windows` and the
+// virtual extent capability, which the model types forward. Removing that
+// block and nesting the capability back in both model types recovers the
+// previous mirror pins exactly.
 // Facade hashes include exact u32 image identities, nonreplacing file
 // results and exact-range timers. Removing the reviewed timer encoder
 // addition recovers every previous complete facade pin. The byte-key

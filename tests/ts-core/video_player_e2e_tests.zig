@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("video_player_core");
 const decoder = @import("video_player_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("video_player_reference.zig");
 const parity = @import("effects_media_parity.zig");
 const canvas = sdk.canvas;
@@ -46,7 +47,7 @@ fn viewParity(native: *const reference.Model, model: *const core.Model) !void {
         for (0..2) |backend| {
             var b = Ui.init(arena.allocator());
             b.video_state = .{ .active = state.active, .playing = state.playing, .buffering = state.buffering, .completed = state.completed, .position_ms = state.position_ms, .duration_ms = state.duration_ms, .surface = state.surface, .width = state.width, .height = state.height };
-            const actual = try b.finalize(if (backend == 0) View.build(&b, model) else decoder.build(&b, model));
+            const actual = try b.finalize(if (backend == 0) View.build(&b, model) else CompiledView.build(&b, model));
             core.rt.frameReset();
             try parity.equal(a.video_declaration, b.video_declaration);
             try parity.equal(expected.root, actual.root);
@@ -120,7 +121,7 @@ fn playerReplay(comptime compiled_view: bool) !void {
     var full_model: ?[]u8 = null;
     defer if (full_model) |bytes| testing.allocator.free(bytes);
     {
-        const state = try Adapter.create(testing.allocator, .{ .env_values = &env }, .{ .name = "video-player", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) decoder.build else View.build });
+        const state = try Adapter.create(testing.allocator, .{ .env_values = &env }, .{ .name = "video-player", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) CompiledView.build else View.build });
         const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(760, 560) });
         defer harness.destroy(testing.allocator);
         defer state.destroy();
@@ -152,7 +153,7 @@ fn playerReplay(comptime compiled_view: bool) !void {
         try testing.expect(!recorder.failed);
         try testing.expect(recorder.effect_count >= 4);
     }
-    const state = try Adapter.create(testing.allocator, .{ .env_values = &env }, .{ .name = "video-player", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) decoder.build else View.build });
+    const state = try Adapter.create(testing.allocator, .{ .env_values = &env }, .{ .name = "video-player", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) CompiledView.build else View.build });
     const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(760, 560) });
     defer harness.destroy(testing.allocator);
     defer state.destroy();

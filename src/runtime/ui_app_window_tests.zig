@@ -13,6 +13,8 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_model = @import("ui_app.zig");
 const support = @import("test_support.zig");
+const session_record = @import("session_record.zig");
+const session_replay = @import("session_replay.zig");
 
 const canvas_label = "panel-canvas";
 const settings_canvas_label = "settings-canvas";
@@ -177,6 +179,61 @@ fn widgetIdByText(layout: canvas.WidgetLayoutTree, kind: canvas.WidgetKind, text
         if (node.widget.kind == kind and std.mem.eql(u8, node.widget.text, text)) return node.widget.id;
     }
     return null;
+}
+
+fn panelThemeState(model: *const PanelModel) PanelApp.ThemeState {
+    return .{ .color_scheme = switch (model.bumps) {
+        0 => .dark,
+        1 => .light,
+        else => .system,
+    } };
+}
+
+test "window appearance reaches new hidden and reopened secondary windows" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+    fixture.app_state.options.theme_state_fn = panelThemeState;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.dark, fixture.harness.null_platform.windowColorScheme(1).?);
+    try fixture.clickSettingsButton();
+    var settings = fixture.settingsWindowInfo().?;
+    // Creation gets the theme before its own first GPU frame.
+    try std.testing.expect(!fixture.app_state.window_slots[0].installed);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.dark, fixture.harness.null_platform.windowColorScheme(settings.id).?);
+    try fixture.harness.runtime.hideWindow(settings.id);
+    try fixture.app_state.dispatch(&fixture.harness.runtime, 1, .bump);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.light, fixture.harness.null_platform.windowColorScheme(settings.id).?);
+    try std.testing.expect(fixture.settingsWindowInfo().?.hidden);
+    try fixture.harness.runtime.showWindow(settings.id);
+    try fixture.installSettingsCanvas(settings.id);
+    const light = canvas.DesignTokens.theme(.{ .color_scheme = .light });
+    const tokens = try fixture.harness.runtime.canvasWidgetDesignTokens(settings.id, settings_canvas_label);
+    try std.testing.expectEqualDeep(light.colors.background, tokens.colors.background);
+
+    // Closing and reopening reuses the declaration's label, not its old
+    // native appearance. Returning to system clears both live overrides.
+    try fixture.clickSettingsButton();
+    try fixture.app_state.dispatch(&fixture.harness.runtime, 1, .bump);
+    try fixture.clickSettingsButton();
+    settings = fixture.settingsWindowInfo().?;
+    try std.testing.expectEqual(support.platform.WindowColorScheme.system, fixture.harness.null_platform.windowColorScheme(settings.id).?);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.system, fixture.harness.null_platform.windowColorScheme(1).?);
+    try fixture.installSettingsCanvas(settings.id);
+
+    // A surviving secondary window can still change appearance after the
+    // primary canvas closes. Never call the capability on the dead window.
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .window_frame_changed = .{
+        .id = 1,
+        .label = "main",
+        .title = "Panel",
+        .frame = geometry.RectF.init(0, 0, 400, 300),
+        .scale_factor = 2,
+        .open = false,
+        .focused = false,
+    } });
+    fixture.app_state.model.bumps = 0;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.dark, fixture.harness.null_platform.windowColorScheme(settings.id).?);
 }
 
 test "a Msg declares the settings window, its canvas installs, and automation drives it by label" {
@@ -710,6 +767,7 @@ test "a padded secondary drag header keeps its layout (no double reservation)" {
 const VerbModel = struct {
     settings_open: bool = true,
     close_policy: app_manifest.WindowClosePolicy = .quit,
+    activate_settings: bool = true,
 };
 
 const VerbMsg = union(enum) {
@@ -751,6 +809,7 @@ fn verbWindows(model: *const VerbModel, scratch: *VerbApp.WindowsScratch) []cons
             .width = 320,
             .height = 240,
             .close_policy = model.close_policy,
+            .activate_on_show = model.activate_settings,
             .on_close = .settings_closed,
         };
         count += 1;
@@ -762,6 +821,80 @@ fn verbWindowView(ui: *VerbApp.Ui, model: *const VerbModel, window_label: []cons
     _ = model;
     std.debug.assert(std.mem.eql(u8, window_label, settings_window_label));
     return ui.text(.{}, "settings");
+}
+
+fn showReplayView(ui: *VerbApp.Ui, model: *const VerbModel) VerbApp.Ui.Node {
+    _ = model;
+    return ui.button(.{ .on_press = .show_settings }, "Show");
+}
+
+test "show-window replay preserves immediate focus before the native frame echo" {
+    const Sink = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        fn write(context: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try self.bytes.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+    for ([_]bool{ true, false }) |activate| {
+        var sink: Sink = .{};
+        defer sink.bytes.deinit(std.testing.allocator);
+        const recorder = try std.testing.allocator.create(session_record.SessionRecorder);
+        defer std.testing.allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(.{ .context = &sink, .write_fn = Sink.write });
+        recorder.begin(.{ .app_name = "show-replay", .platform_name = "null" });
+        var fingerprint: u64 = undefined;
+        for ([_]bool{ false, true }) |replaying| {
+            const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+            defer harness.destroy(std.testing.allocator);
+            harness.null_platform.gpu_surfaces = true;
+            const state = try VerbApp.create(std.heap.page_allocator, .{
+                .name = "show-replay",
+                .scene = panel_scene,
+                .canvas_label = canvas_label,
+                .update_fx = verbUpdate,
+                .view = showReplayView,
+                .windows_fn = verbWindows,
+                .window_view = verbWindowView,
+            });
+            defer state.destroy();
+            state.model.close_policy = .hide;
+            state.model.activate_settings = activate;
+            const app = state.app();
+            if (replaying) {
+                const report = try session_replay.replaySession(&harness.runtime, app, sink.bytes.items, .{ .require_same_platform = false });
+                try std.testing.expect(report.ok());
+                try std.testing.expect(report.checkpoints_verified > 0);
+                try std.testing.expectEqual(fingerprint, harness.runtime.sessionStateFingerprint());
+                // The replay callback restores runtime state only.
+                try std.testing.expectEqual(@as(u32, 0), harness.null_platform.showCountForWindow(2));
+                continue;
+            }
+            harness.runtime.options.session_recorder = recorder;
+            try harness.start(app);
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+                .label = canvas_label,
+                .size = geometry.SizeF.init(400, 300),
+                .scale_factor = 1,
+                .frame_index = 1,
+                .timestamp_ns = 1_000_000,
+            } });
+            const hide = harness.null_platform.userCloseWindow(2) orelse return error.TestUnexpectedResult;
+            try harness.runtime.dispatchPlatformEvent(app, hide);
+            try harness.runtime.dispatchPlatformEvent(app, .{ .window_focused = 1 });
+            const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+            const id = widgetIdByText(layout, .button, "Show") orelse return error.TestUnexpectedResult;
+            var text: [96]u8 = undefined;
+            try harness.runtime.dispatchAutomationCommand(app, try std.fmt.bufPrint(&text, "widget-click {s} {d}", .{ canvas_label, id }));
+            // Checkpoint before any delayed host echo: active show drops
+            // the main button's keyboard focus; passive show retains it.
+            try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+            fingerprint = harness.runtime.sessionStateFingerprint();
+            recorder.finish();
+            try std.testing.expect(!recorder.failed);
+            try std.testing.expectEqual(@as(u32, 1), harness.null_platform.showCountForWindow(2));
+        }
+    }
 }
 
 test "window-action effects resolve labels to live windows and drive the real verbs" {

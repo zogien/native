@@ -23,6 +23,9 @@ pub const Result = struct {
         return float(&self.bytes, 24);
     }
 };
+/// Each step is a pure function of the request bytes; children are measured
+/// again and written into the request before the next step is formed.
+const intrinsic_decisions = @import("decision_reuse.zig").Table(256, 2048, 32);
 pub const Plan = struct {
     allocator: std.mem.Allocator,
     policy: @import("surface_layout_policy.zig").Policy,
@@ -85,7 +88,7 @@ pub const Plan = struct {
     }
     pub fn run(self: Plan) Result {
         var result: Result = .{ .bytes = @splat(0xa5) };
-        if (self.policy(self.request, &result.bytes) != 32 or read(&result.bytes, 0) != 1 or read(&result.bytes, 4) > 4 or read(&result.bytes, 28) != 0) @panic("invalid intrinsic measurement result");
+        if (intrinsic_decisions.decide(self.policy, self.request, &result.bytes) != 32 or read(&result.bytes, 0) != 1 or read(&result.bytes, 4) > 4 or read(&result.bytes, 28) != 0) @panic("invalid intrinsic measurement result");
         const action = result.action();
         const index = result.index();
         if (action == .child or action == .wrapped) {

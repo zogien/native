@@ -77,8 +77,10 @@ const persist_store = @import("persist_store.zig");
 const record_store = @import("record_store.zig");
 const relational_store = @import("relational_store.zig");
 const credentials_store = @import("credentials_store.zig");
+const keyboard_input = @import("keyboard_input.zig");
 const file_access = @import("file_access.zig");
 const pty_transport = @import("pty.zig");
+const global_shortcuts_mod = @import("global_shortcuts.zig");
 const update_engine = @import("../updater/engine.zig");
 
 /// Maximum in-flight effects (spawn slots / worker threads).
@@ -374,6 +376,9 @@ pub const WindowActionBinding = struct {
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     hide_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     show_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    /// Replay the synchronous show bookkeeping without an OS call. The
+    /// later native frame event must not delay keyboard-focus loss.
+    replay_show_fn: ?*const fn (context: *anyopaque, window_label: []const u8) void = null,
     dock_presence_fn: *const fn (context: *anyopaque, visible: bool) bool,
     quit_fn: *const fn (context: *anyopaque) bool,
 };
@@ -398,6 +403,7 @@ pub const SystemServiceBinding = struct {
     /// Restore only runtime window bookkeeping from a journaled successful
     /// capability, without invoking native window focus or close services.
     replay_window_result_fn: ?*const fn (context: *anyopaque, label: []const u8, closed: bool) void = null,
+    keyboard_input: ?keyboard_input.Binding = null,
 };
 
 /// How an asynchronous desktop capability hands its reply back to the
@@ -1306,6 +1312,9 @@ pub const EffectAudioCaptureEvent = struct {
 
 const audio_capture_packet_header_bytes: usize = 24;
 const audio_capture_packet_magic = "AC01";
+
+pub const EffectGlobalShortcutEventKind = global_shortcuts_mod.EffectGlobalShortcutEventKind;
+pub const EffectGlobalShortcutEvent = global_shortcuts_mod.EffectGlobalShortcutEvent;
 
 /// Convert the channel envelope used internally by capture into its public
 /// typed event. Also useful to native integrations that intentionally route
@@ -2999,6 +3008,15 @@ pub fn Effects(comptime Msg: type) type {
             }.make;
         }
 
+        /// Msg constructor for `setGlobalShortcuts` reports.
+        pub fn globalShortcutMsg(comptime tag: std.meta.Tag(Msg)) ChannelMsgFn {
+            return struct {
+                fn make(event: EffectChannelEvent) Msg {
+                    return @unionInit(Msg, @tagName(tag), global_shortcuts_mod.decodeChannelEvent(event));
+                }
+            }.make;
+        }
+
         /// Comptime Msg constructor for `on_event` of pty effects:
         /// `ptyMsg(.shell)` builds `Msg{ .shell = event }` — the
         /// variant's payload type must be `native_sdk.EffectPtyEvent`.
@@ -3485,6 +3503,12 @@ pub fn Effects(comptime Msg: type) type {
             /// Use `Effects.audioCaptureMsg(.tag)` for a typed payload.
             on_event: ChannelMsgFn,
             max_pending: u32 = max_effect_channel_pending,
+        };
+
+        pub const SetGlobalShortcutsOptions = struct {
+            key: u64,
+            shortcuts: []const platform.Shortcut,
+            on_event: ChannelMsgFn,
         };
 
         pub const PtySpawnOptions = struct {
@@ -5094,6 +5118,7 @@ pub fn Effects(comptime Msg: type) type {
         /// channel table; this tiny loop-side mirror exists to quiesce native
         /// audio callbacks before closing/reusing their channel occupancy.
         audio_capture_slots: [2]AudioCaptureSlot = [_]AudioCaptureSlot{.{}} ** 2,
+        global_shortcuts: global_shortcuts_mod.Session = .{},
         /// Monotonic post-order stamp shared by every channel's staging
         /// FIFO and the close markers: the cross-channel delivery order
         /// and the drain boundary's causality cut (posts stamped at or
@@ -5341,6 +5366,10 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 capture.* = .{};
             }
+            if (self.global_shortcuts.platform_configured) {
+                if (self.services) |services| services.configureGlobalShortcuts(&.{}, .{}, &.{}) catch {};
+            }
+            self.global_shortcuts = .{};
             // Silence the platform audio player (best effort) and clear
             // the channel.
             if (self.audio.active and !self.audio.fake) {
@@ -7970,6 +7999,80 @@ pub fn Effects(comptime Msg: type) type {
             if (result != .accepted) return error.EffectQueueFull;
         }
 
+        /// Register or replace the app's global shortcut set.
+        pub fn setGlobalShortcuts(self: *Self, options: SetGlobalShortcutsOptions) void {
+            const session = &self.global_shortcuts;
+            if (session.active and session.key != options.key) {
+                self.rejectChannel(options.key, options.on_event, true);
+                return;
+            }
+            if (!session.active) {
+                if (self.keyOccupiedUntilDelivery(options.key)) {
+                    self.rejectChannel(options.key, options.on_event, true);
+                    return;
+                }
+                _ = self.openChannel(.{ .key = options.key, .on_event = options.on_event });
+                if (self.findChannelSlot(options.key) == null) return;
+                session.* = .{ .active = true, .key = options.key };
+            }
+            const handle = self.channelHandle(options.key) orelse return;
+            if (!handle.live()) return;
+
+            var accepted: [platform.max_global_shortcuts]platform.Shortcut = undefined;
+            var accepted_count: usize = 0;
+            for (options.shortcuts) |shortcut| {
+                if (global_shortcuts_mod.admissible(shortcut, accepted[0..accepted_count])) {
+                    accepted[accepted_count] = shortcut;
+                    accepted_count += 1;
+                } else {
+                    postGlobalShortcutReport(handle, .rejected, shortcut);
+                }
+            }
+
+            var statuses: [platform.max_global_shortcuts]platform.GlobalShortcutStatus = undefined;
+            var unsupported = false;
+            if (self.executor == .fake) {
+                for (accepted[0..accepted_count], 0..) |shortcut, index| {
+                    statuses[index] = .registered;
+                    for (accepted[0..index]) |earlier| {
+                        if (platform.sameShortcutCombination(earlier, shortcut)) statuses[index] = .conflict;
+                    }
+                }
+            } else if (self.services) |services| {
+                services.configureGlobalShortcuts(accepted[0..accepted_count], globalShortcutSink(handle), statuses[0..accepted_count]) catch {
+                    unsupported = true;
+                };
+                session.platform_configured = session.platform_configured or !unsupported;
+            } else {
+                unsupported = true;
+            }
+
+            var next: [platform.max_global_shortcuts]global_shortcuts_mod.Binding = undefined;
+            for (accepted[0..accepted_count], 0..) |shortcut, index| {
+                const kind: EffectGlobalShortcutEventKind = if (unsupported) .unsupported else switch (statuses[index]) {
+                    inline else => |status| @field(EffectGlobalShortcutEventKind, @tagName(status)),
+                };
+                const unchanged = if (session.find(shortcut.id)) |previous| previous.shortcut.matches(shortcut) and previous.kind == .registered else false;
+                if (!unchanged or kind != .registered) postGlobalShortcutReport(handle, kind, shortcut);
+                next[index] = .{ .shortcut = .init(shortcut), .kind = kind };
+            }
+            @memcpy(session.bindings[0..accepted_count], next[0..accepted_count]);
+            session.count = accepted_count;
+        }
+
+        /// Unregister the set; reports end with `stopped`.
+        pub fn clearGlobalShortcuts(self: *Self, key: u64) void {
+            if (!self.global_shortcuts.active or self.global_shortcuts.key != key) return;
+            self.closeChannel(key);
+        }
+
+        fn releaseGlobalShortcuts(self: *Self) void {
+            if (self.global_shortcuts.platform_configured) {
+                if (self.services) |services| services.configureGlobalShortcuts(&.{}, globalShortcutSink(self.channelHandle(self.global_shortcuts.key) orelse .{}), &.{}) catch {};
+            }
+            self.global_shortcuts = .{};
+        }
+
         /// Close the open channel with `key`: posts stop landing
         /// immediately (the handle answers `.closed`), the staged
         /// backlog flushes in post order, and exactly one terminal
@@ -7979,6 +8082,7 @@ pub fn Effects(comptime Msg: type) type {
         /// is NOT a channel's close (channels end the way audio does:
         /// through their own verb).
         pub fn closeChannel(self: *Self, key: u64) void {
+            if (self.global_shortcuts.active and self.global_shortcuts.key == key) self.releaseGlobalShortcuts();
             if (self.findAudioCaptureByKey(key)) |capture| {
                 if (capture.platform_started) {
                     if (self.services) |services| services.audioCaptureStop(capture.source) catch {};
@@ -9510,6 +9614,40 @@ pub fn Effects(comptime Msg: type) type {
             self.startHostRequest(options, max_effect_host_payload_bytes, max_effect_host_result_bytes, null, null, null);
         }
 
+        pub const KeyChordOptions = struct {
+            key: u64,
+            chord: platform.KeyChord,
+            on_result: ?HostMsgFn = null,
+        };
+
+        pub const KeyboardAccessOptions = struct {
+            key: u64,
+            prompt: bool = false,
+            on_result: ?HostMsgFn = null,
+        };
+
+        /// Post a key chord to the focused app; requires the `keyboard_input` permission.
+        pub fn sendKeyChord(self: *Self, options: KeyChordOptions) void {
+            var payload: [keyboard_input.max_chord_payload_bytes]u8 = undefined;
+            self.hostRequest(.{
+                .key = options.key,
+                .name = keyboard_input.send_chord_name,
+                .payload = keyboard_input.encodeChord(&payload, options.chord),
+                .on_result = options.on_result,
+            });
+        }
+
+        /// Ask for the OS grant; the ok bytes are `granted`, `denied`, or `not_required`.
+        pub fn keyboardAccessStatus(self: *Self, options: KeyboardAccessOptions) void {
+            const payload = [_]u8{@intFromBool(options.prompt)};
+            self.hostRequest(.{
+                .key = options.key,
+                .name = keyboard_input.access_status_name,
+                .payload = &payload,
+                .on_result = options.on_result,
+            });
+        }
+
         fn startHostRequest(
             self: *Self,
             options: HostRequestOptions,
@@ -9697,6 +9835,7 @@ pub fn Effects(comptime Msg: type) type {
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
                 std.mem.eql(u8, name, "native-sdk.time.formatLocal") or
+                keyboard_input.isRequestName(name) or
                 std.mem.startsWith(u8, name, update_engine.request_prefix);
         }
 
@@ -9880,6 +10019,13 @@ pub fn Effects(comptime Msg: type) type {
             }
             if (std.mem.eql(u8, name, "native-sdk.time.formatLocal")) {
                 self.performBoundSystemRequest(name, key, payload);
+                return;
+            }
+            if (keyboard_input.isRequestName(name)) {
+                const binding = (self.system_services orelse return self.feedUnsupportedNativeRequest(key)).keyboard_input orelse
+                    return self.feedUnsupportedNativeRequest(key);
+                const result = keyboard_input.execute(binding, name, payload);
+                self.feedHostResult(key, result.ok, result.bytes) catch {};
                 return;
             }
             if (std.mem.startsWith(u8, name, update_engine.request_prefix)) {
@@ -10753,12 +10899,19 @@ pub fn Effects(comptime Msg: type) type {
         /// a `close_policy = .hide` hide and also brings back a minimized
         /// or merely backgrounded window. Fire-and-forget, same contract
         /// as `closeWindow`: no event echoes beyond the window's own
-        /// frame event, an unknown label is a no-op, and the fake
-        /// executor only records the request in the mirror.
+        /// frame event, an unknown label is a no-op, and ordinary fake
+        /// execution only records the request in the mirror. Replay also
+        /// restores the synchronous visibility/focus transition before
+        /// any checkpoint, without entering the native show service.
         pub fn showWindow(self: *Self, window_label: []const u8) void {
             self.window_action_state.show_count += 1;
             self.window_action_state.record(window_label);
-            if (self.executor == .fake) return;
+            if (self.executor == .fake) {
+                if (self.replay) if (self.window_actions) |binding| {
+                    if (binding.replay_show_fn) |restore| restore(binding.context, window_label);
+                };
+                return;
+            }
             const binding = self.window_actions orelse return;
             _ = binding.show_fn(binding.context, window_label);
         }
@@ -12178,6 +12331,7 @@ pub fn Effects(comptime Msg: type) type {
                             if (entry.retire_slot) |slot_index| {
                                 const parked = &self.channel_slots[slot_index];
                                 if (parked.state != .idle and parked.generation == entry.retire_generation) {
+                                    if (self.global_shortcuts.active and self.global_shortcuts.key == parked.key) self.global_shortcuts = .{};
                                     retireChannelSlot(parked);
                                 }
                             }
@@ -14205,6 +14359,20 @@ pub fn Effects(comptime Msg: type) type {
                 if (capture.active and capture.key == key) return capture;
             }
             return null;
+        }
+
+        fn postGlobalShortcutReport(handle: ChannelHandle, kind: EffectGlobalShortcutEventKind, shortcut: platform.Shortcut) void {
+            var packet: [global_shortcuts_mod.max_packet_bytes]u8 = undefined;
+            _ = handle.post(global_shortcuts_mod.encodePacket(&packet, kind, shortcut));
+        }
+
+        fn globalShortcutSink(handle: ChannelHandle) platform.GlobalShortcutSink {
+            return .{ .context = handle.shared, .generation = handle.generation, .push_fn = pushGlobalShortcutEvent };
+        }
+
+        fn pushGlobalShortcutEvent(context: ?*anyopaque, generation: u64, event: platform.GlobalShortcutEvent) void {
+            const handle: ChannelHandle = .{ .shared = @ptrCast(@alignCast(context orelse return)), .generation = generation };
+            postGlobalShortcutReport(handle, if (event.phase == .pressed) .pressed else .released, event.shortcut);
         }
 
         fn pushAudioCaptureEvent(context: ?*anyopaque, generation: u64, event: platform.AudioCaptureEvent) platform.AudioCapturePushResult {

@@ -34,6 +34,8 @@ const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 
+const menu_policy = @import("context_menu_policy.zig");
+
 const context_menu_log = std.log.scoped(.zero_context_menu);
 
 const CanvasWidgetContextMenuTextScratch = struct {
@@ -190,6 +192,50 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 return;
             }
 
+            if (self.context_menu_policy) |policy| {
+                var facts = menu_policy.Facts{ .flags = if (has_presenter) 16 else 0 };
+                facts.selected = self.views[index].canvas_widget_selected_text_id;
+                if (pointer_event.target) |target| {
+                    const node_index = self.views[index].canvasWidgetNodeIndexById(target.id) orelse return;
+                    const widget = self.views[index].widget_layout_nodes[node_index].widget;
+                    facts.target = target.id;
+                    facts.flags |= 1 | (if (canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind)) @as(u32, 2) else 0) |
+                        (if (widget.state.disabled) @as(u32, 4) else 0) | (if (widget.kind == .terminal) @as(u32, 8) else 0);
+                    const clipboard = canvas.widgetTextClipboardState(widget);
+                    facts.flags |= (if (clipboard.selection != null) @as(u32, 32) else 0) | (if (clipboard.select_all) @as(u32, 64) else 0);
+                    if (widget.terminal.grid) |grid| facts.flags |= (if (grid.selection_active) @as(u32, 128) else 0) |
+                        (if (widget.terminal.pty != 0 and grid.running) @as(u32, 256) else 0);
+                    if (self.views[index].canvasWidgetNodeIndexById(facts.selected)) |selected| {
+                        facts.flags |= 1024;
+                        facts.selected_group = self.views[index].widget_layout_nodes[selected].widget.static_text_group_id;
+                        facts.target_group = widget.static_text_group_id;
+                    }
+                }
+                const plan = menu_policy.presentation(policy, facts);
+                switch (plan.kind) {
+                    .none => return,
+                    .hold => try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{
+                        .window_id = input_event.window_id,
+                        .view_label = self.views[index].label,
+                        .press_target = pointer_event.press_target,
+                    } }),
+                    .edit_text, .terminal, .static_copy => {
+                        if (plan.kind != .static_copy) try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event);
+                        _ = try showMenu(self, app, index, .{
+                            .window_id = input_event.window_id,
+                            .target_id = facts.target,
+                            .kind = switch (plan.kind) {
+                                .edit_text => .edit_text,
+                                .terminal => .terminal,
+                                .static_copy => .static_copy,
+                                else => unreachable,
+                            },
+                        }, point, plan.items[0..plan.count]);
+                    },
+                }
+                return;
+            }
+
             // 2/3. Editable text and terminal targets: standard menus
             // wired to the existing clipboard and committed-input
             // paths. Focus the target first so paste lands where the
@@ -275,6 +321,17 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// dispatch is fallible, and the runtime's bookkeeping must
         /// already match the menu the platform accepted.
         pub fn notifySupersededPending(self: *Runtime, app: runtime_api.App(Runtime), superseded: ?PendingCanvasWidgetContextMenu) anyerror!void {
+            if (self.context_menu_policy) |policy| {
+                if (menu_policy.notice(policy, if (superseded) |old| policyKind(old.kind) else null)) {
+                    const pending = superseded.?;
+                    try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
+                        .window_id = pending.window_id,
+                        .view_label = pending.viewLabel(),
+                        .token = pending.token,
+                    } });
+                }
+                return;
+            }
             const pending = superseded orelse return;
             if (pending.kind != .app) return;
             try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
@@ -342,6 +399,20 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             const superseded = self.canvas_widget_context_menu_pending;
             self.canvas_widget_context_menu_pending = pending;
             try notifySupersededPending(self, app, superseded);
+            if (self.context_menu_policy) |policy| {
+                const current = if (self.canvas_widget_context_menu_pending) |value| value.token else null;
+                // A successor must be admitted before asking about the view:
+                // dismissal callbacks may replace requests and compact views.
+                if (menu_policy.continuation(policy, pending.token, current, true) == .superseded) return .superseded;
+                switch (menu_policy.continuation(policy, pending.token, current, runtimeFindViewIndex(self, pending.window_id, pending.viewLabel()) != null)) {
+                    .superseded => return .superseded,
+                    .view_closed => {
+                        self.canvas_widget_context_menu_pending = null;
+                        return .view_closed;
+                    },
+                    .shown => return .{ .shown = pending },
+                }
+            }
             const still_armed = if (self.canvas_widget_context_menu_pending) |current| current.token == pending.token else false;
             if (!still_armed) return .superseded;
             // Still armed, but the notice may have closed the view the
@@ -359,6 +430,29 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// table); the default menus perform the clipboard action
         /// directly through the same paths the keyboard shortcuts use.
         pub fn dispatchContextMenuAction(self: *Runtime, app: runtime_api.App(Runtime), event: platform.ContextMenuActionEvent) anyerror!void {
+            if (self.context_menu_policy) |policy| {
+                const maybe = self.canvas_widget_context_menu_pending;
+                const admission = menu_policy.admission(policy, if (maybe) |v| policyKind(v.kind) else null, if (maybe) |v| v.window_id else 0, if (maybe) |v| v.token else 0, event);
+                if (admission == .ignore) return;
+                const pending = maybe.?;
+                self.canvas_widget_context_menu_pending = null;
+                switch (admission) {
+                    .ignore => unreachable,
+                    .clear => return,
+                    .dismiss => {
+                        try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
+                            .window_id = event.window_id,
+                            .view_label = event.view_label,
+                            .token = pending.token,
+                        } });
+                        return;
+                    },
+                    .lookup => {},
+                }
+                const index = runtimeFindViewIndex(self, event.window_id, event.view_label) orelse return;
+                try executeAction(self, app, index, pending, event, menu_policy.action(policy, policyKind(pending.kind), event.item_id));
+                return;
+            }
             const pending = self.canvas_widget_context_menu_pending orelse return;
             // Token gate BEFORE the clear: an event carrying a stale
             // token belongs to a superseded request (its deferred
@@ -414,6 +508,10 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// Mint the next per-request correlation token. Never zero, so a
         /// zero-token event can never match an armed request.
         pub fn nextContextMenuToken(self: *Runtime) u64 {
+            if (self.context_menu_policy) |policy| {
+                self.canvas_widget_context_menu_token = menu_policy.nextToken(policy, self.canvas_widget_context_menu_token);
+                return self.canvas_widget_context_menu_token;
+            }
             self.canvas_widget_context_menu_token +%= 1;
             if (self.canvas_widget_context_menu_token == 0) self.canvas_widget_context_menu_token = 1;
             return self.canvas_widget_context_menu_token;
@@ -507,6 +605,86 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             }
         }
 
+        fn policyKind(kind: PendingCanvasWidgetContextMenu.Kind) menu_policy.Kind {
+            return switch (kind) {
+                .app => .app,
+                .edit_text => .edit_text,
+                .terminal => .terminal,
+                .static_copy => .static_copy,
+            };
+        }
+
+        fn executeAction(self: *Runtime, app: runtime_api.App(Runtime), index: usize, pending: PendingCanvasWidgetContextMenu, event: platform.ContextMenuActionEvent, action: menu_policy.Action) anyerror!void {
+            switch (action) {
+                .none => {},
+                .app => try self.dispatchEvent(app, .{ .canvas_widget_context_menu = .{
+                    .window_id = event.window_id,
+                    .view_label = self.views[index].label,
+                    .target_id = pending.target_id,
+                    .item_index = event.item_id - 1,
+                    .token = pending.token,
+                } }),
+                .copy => {
+                    const text = editableSelectionText(self, index, pending.target_id) orelse return;
+                    self.writeClipboard(text) catch return;
+                },
+                .cut => {
+                    var keyboard = editKeyboardEvent(self, index, pending.target_id) orelse return;
+                    const text = editableSelectionText(self, index, pending.target_id) orelse return;
+                    self.writeClipboard(text) catch return;
+                    keyboard.keyboard.edit = .{ .insert_text = "" };
+                    try applyEditKeyboardEvent(self, app, keyboard);
+                },
+                .paste => {
+                    var keyboard = editKeyboardEvent(self, index, pending.target_id) orelse return;
+                    const node = self.views[index].canvasWidgetNodeIndexById(pending.target_id) orelse return;
+                    const widget = self.views[index].widget_layout_nodes[node].widget;
+                    if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return;
+                    var buffer: [platform.max_clipboard_data_bytes]u8 = undefined;
+                    const text = self.readClipboard(&buffer) catch return;
+                    if (text.len == 0) return;
+                    const clamp = canvas_widget_runtime.clampCanvasWidgetPasteText(widget, self.views[index].widget_text_len, text);
+                    keyboard.keyboard.edit_truncated = clamp.truncated;
+                    if (clamp.text.len == 0) return;
+                    keyboard.keyboard.edit = .{ .insert_text = clamp.text };
+                    try applyEditKeyboardEvent(self, app, keyboard);
+                },
+                .select_all => {
+                    var keyboard = editKeyboardEvent(self, index, pending.target_id) orelse return;
+                    keyboard.keyboard.key = "a";
+                    keyboard.keyboard.modifiers = .{ .super = true };
+                    try applyEditKeyboardEvent(self, app, keyboard);
+                },
+                .terminal_copy, .terminal_paste => {
+                    const node = self.views[index].canvasWidgetNodeIndexById(pending.target_id) orelse return;
+                    const widget = self.views[index].widget_layout_nodes[node].widget;
+                    if (widget.kind != .terminal or widget.state.disabled) return;
+                    const grid = widget.terminal.grid orelse return;
+                    if (action == .terminal_copy) {
+                        if (!grid.selection_active) return;
+                        self.writeClipboard(grid.selection_text) catch return;
+                    } else {
+                        if (widget.terminal.pty == 0 or !grid.running) return;
+                        var buffer: [platform.max_clipboard_data_bytes]u8 = undefined;
+                        const text = self.readClipboard(&buffer) catch return;
+                        if (text.len == 0) return;
+                        try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
+                            .window_id = self.views[index].window_id,
+                            .view_label = self.views[index].label,
+                            .keyboard = .{ .phase = .text_input, .focused_id = pending.target_id, .text = text, .edit = .{ .insert_text = text } },
+                            .terminal_paste = true,
+                            .standalone = true,
+                        } });
+                    }
+                },
+                .static_copy => {
+                    const buffer = &canvas_widget_context_menu_text_scratch.get().group_buffer;
+                    const text = self.views[index].canvasWidgetCopyText(buffer) orelse return;
+                    self.writeClipboard(text) catch return;
+                },
+            }
+        }
+
         /// A synthesized key-down keyboard event addressed at the editable
         /// widget, shaped like the routed events the clipboard shortcuts
         /// stamp their edits onto.
@@ -543,6 +721,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// The deepest node on the pointer route carrying an app-declared
         /// context menu.
         fn deepestContextMenuRouteNode(self: *const Runtime, view_index: usize, route: []const canvas.WidgetEventRouteEntry) ?usize {
+            if (self.context_menu_policy) |policy| return menu_policy.route(policy, self.views[view_index].widget_layout_nodes[0..self.views[view_index].widget_layout_node_count], route);
             var result: ?usize = null;
             var result_depth: usize = 0;
             for (route) |entry| {

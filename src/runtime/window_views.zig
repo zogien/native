@@ -208,7 +208,18 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         /// back on platform failure. A window that was never hidden
         /// just comes to the front.
         pub fn showWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
-            if (self.window_lifecycle_policy) |policy| return Self.executeWindowCapability(self, policy, .show, window_id);
+            return Self.showWindowWithNative(self, window_id, true);
+        }
+
+        /// Apply the same immediate show transition during replay. Native
+        /// window notifications still arrive from the journal afterward.
+        pub fn restoreWindowShow(self: *Runtime, label: []const u8) void {
+            const index = Self.findWindowIndexByLabel(self, label) orelse return;
+            Self.showWindowWithNative(self, self.windows[index].info.id, false) catch return;
+        }
+
+        fn showWindowWithNative(self: *Runtime, window_id: platform.WindowId, execute_native: bool) anyerror!void {
+            if (self.window_lifecycle_policy) |policy| return Self.executeWindowCapabilityWithNative(self, policy, .show, window_id, execute_native);
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
             // A closed window keeps its table slot (the id and label
             // release lazily, at the next create), so resolving the id
@@ -221,7 +232,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             if (!self.windows[index].info.open) return error.WindowNotFound;
             const was_hidden = self.windows[index].info.hidden;
             self.windows[index].info.hidden = false;
-            self.options.platform.services.showWindow(window_id) catch |err| {
+            if (execute_native) self.options.platform.services.showWindow(window_id) catch |err| {
                 self.windows[index].info.hidden = was_hidden;
                 return err;
             };
@@ -239,6 +250,10 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         /// Outcome classification crosses the policy boundary; rollback fields,
         /// replay exceptions and follow-up focus stay in the compiled program.
         pub fn executeWindowCapability(self: *Runtime, policy: lifecycle.Policy, verb: lifecycle.Verb, window_id: platform.WindowId) anyerror!void {
+            return Self.executeWindowCapabilityWithNative(self, policy, verb, window_id, true);
+        }
+
+        fn executeWindowCapabilityWithNative(self: *Runtime, policy: lifecycle.Policy, verb: lifecycle.Verb, window_id: platform.WindowId, execute_native: bool) anyerror!void {
             const begin = lifecycle.plan(policy, self, .begin, .{ .id = window_id, .variant = @intFromEnum(verb) });
             try begin.admitted();
             const index = begin.selected.?;
@@ -246,7 +261,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             begin.apply(&self.windows[index].info);
             if (begin.has(16)) try Self.showWindow(self, window_id);
             var failure: ?anyerror = null;
-            switch (verb) {
+            if (execute_native) switch (verb) {
                 .close => self.options.platform.services.closeWindow(window_id) catch |err| {
                     failure = err;
                 },
@@ -260,7 +275,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                     failure = err;
                 },
                 .minimize => return self.options.platform.services.minimizeWindow(window_id),
-            }
+            };
             const finish = lifecycle.plan(policy, self, .finish, .{ .cursor = index, .variant = @intFromEnum(verb), .saved = saved, .value = self.replay_window_chrome_active, .outcome = if (failure) |err| (if (err == error.WindowNotFound) .window_not_found else .failed) else .success });
             finish.apply(&self.windows[index].info);
             if (finish.has(8)) return failure.?;

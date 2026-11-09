@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("notes_core");
 const decoder = @import("notes_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("notes_reference.zig");
 const native_model = @import("notes_model_reference.zig");
 const parity = @import("effects_media_parity.zig");
@@ -92,7 +93,7 @@ fn viewParity(expected: *const reference.Model, actual: *const core.Model) !void
     const View = canvas.CompiledMarkupView(core.Model, core.Msg, @embedFile("app.native"));
     for (0..2) |backend| {
         var b = Ui.init(arena.allocator());
-        const new = try b.finalize(if (backend == 0) View.build(&b, actual) else decoder.build(&b, actual));
+        const new = try b.finalize(if (backend == 0) View.build(&b, actual) else CompiledView.build(&b, actual));
         core.rt.frameReset();
         try parity.equal(old.root, new.root);
         try testing.expectEqual(old.handlers.len, new.handlers.len);
@@ -295,7 +296,7 @@ fn notesReplay(comptime compiled_view: bool) !void {
     var full_model: ?[]u8 = null;
     defer if (full_model) |bytes| testing.allocator.free(bytes);
     {
-        const state = try Adapter.create(testing.allocator, .{}, .{ .name = "notes", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) decoder.build else View.build, .on_command = notesCommand });
+        const state = try Adapter.create(testing.allocator, .{}, .{ .name = "notes", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) CompiledView.build else View.build, .on_command = notesCommand });
         defer state.destroy();
         state.effects.executor = .fake;
         const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(1180, 760) });
@@ -329,7 +330,7 @@ fn notesReplay(comptime compiled_view: bool) !void {
         try testing.expect(!recorder.failed);
         try testing.expect(recorder.effect_count >= 4);
     }
-    const state = try Adapter.create(testing.allocator, .{}, .{ .name = "notes", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) decoder.build else View.build, .on_command = notesCommand });
+    const state = try Adapter.create(testing.allocator, .{}, .{ .name = "notes", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled_view) CompiledView.build else View.build, .on_command = notesCommand });
     defer state.destroy();
     const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(1180, 760) });
     defer harness.destroy(testing.allocator);
@@ -378,7 +379,7 @@ test "Notes compiled view owns every byte text field" {
 
 test "Notes complete theme tokens match both native palettes" {
     const Adapter = sdk.TsUiApp(core);
-    const state = try Adapter.create(testing.allocator, .{}, .{ .name = "notes", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = decoder.build });
+    const state = try Adapter.create(testing.allocator, .{}, .{ .name = "notes", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = CompiledView.build });
     defer state.destroy();
     for ([_]canvas.ColorScheme{ .light, .dark }) |scheme| {
         Host.dispatch(&state.effects, .{ .system_scheme = .{ .colorScheme = switch (scheme) {

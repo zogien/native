@@ -440,6 +440,7 @@ pub fn Ui(comptime Msg: type) type {
         chart_content_policy: ?canvas.ChartContentPolicy.Policy = null,
         markdown_content_policy: ?canvas.MarkdownContentPolicy.Policy = null,
         construction_policy: ?construction.Policy = null,
+        expression_policy: ?@import("ui_markup_expr.zig").Policy = null,
         /// Window source for `virtualWindow` (see `VirtualWindowSourceFn`):
         /// null outside an app loop, where builds fall back to each
         /// request's `viewport_fallback` at offset 0.

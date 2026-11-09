@@ -445,6 +445,7 @@ pub fn App(comptime Runtime: type) type {
         /// Portable command routing and status-item selection. Native retains
         /// registry bytes, exact handles and OS capability execution.
         command_policy: ?*const fn ([]const u8, []u8) usize = null,
+        context_menu_policy: ?*const fn ([]const u8, []u8) usize = null,
         text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
         render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
         render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,

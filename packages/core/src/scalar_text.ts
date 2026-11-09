@@ -60,8 +60,6 @@ function nscvScalarText(request: Uint8Array): Uint8Array {
     w.setFloat32(32, nscvScalarTextMonoWidth(text, 0, length, size, mode === 2), true);
     return out;
   }
-  const font = w.getUint32(20, true) === 0 ? w.getUint32(16, true) : 0;
-  const factor = Math.fround(font === 3 ? 1.02 : font === 4 || font === 6 ? 1.04 : 1);
   let count = w.getUint32(36, true);
   if (phase === 0) {
     count = 0; let first = 0;
@@ -77,7 +75,7 @@ function nscvScalarText(request: Uint8Array): Uint8Array {
   }
   let width = 0;
   for (let i = 0; i < count; i++) {
-    const advance = Math.fround(Math.fround(size * w.getFloat32(64 + i * 8 + 4, true)) * factor);
+    const advance = Math.fround(size * w.getFloat32(64 + i * 8 + 4, true));
     width = mode === 2 ? advance : Math.fround(width + advance);
   }
   out[3] = 2; w.setUint32(56, 0, true); w.setFloat32(32, width, true); return out;

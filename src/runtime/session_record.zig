@@ -482,6 +482,13 @@ pub const SessionRecorder = struct {
         return if (self.failed) count else count + 1;
     }
 
+    /// Stop recording because the session can no longer replay
+    /// faithfully (for example, its view changed mid-session). Same
+    /// loud, once-only failure as an internal recording failure.
+    pub fn abandon(self: *SessionRecorder, reason: []const u8) void {
+        self.fail(reason);
+    }
+
     /// Flip into the failed state, loudly, once. Recording failures
     /// degrade — the app keeps running; only the journal dies.
     fn fail(self: *SessionRecorder, reason: []const u8) void {

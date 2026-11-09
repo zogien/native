@@ -131,7 +131,7 @@ test "root TypeScript markup discovery classification and resolver budgets" {
 
 test "generated TypeScript runners install the compiled root markup view" {
     const desktop = @embedFile("src/app_runner/ts_core_main.zig");
-    try std.testing.expect(std.mem.indexOf(u8, desktop, "TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled, .compiled_model = ts_view.enabled })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled, .compiled_model = ts_view.enabled, .view_reload = view_reload_enabled })") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, "if (dev) void else @import(\"app_markup_root\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, "CompiledMarkupImports(core.Model, core.Msg, \"app.native\", &app_markup_sources)") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, ".view = CompiledAppView.build") != null);
@@ -168,7 +168,7 @@ test "native check preserves the app markup root for component files" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         source,
-        "checkFiles(allocator, io, markup_files.items, .{\n            .import_root_for_file = markup_cli.importRootForFile,\n        })",
+        "checkFiles(allocator, io, markup_files.items, .{\n            .import_root_for_file = markup_cli.importRootForFile,\n",
     ) != null);
 }
 
@@ -180,6 +180,7 @@ pub fn build(b: *std.Build) void {
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
     _ = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
     _ = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
+    const webview_inspection = b.option(bool, "webview-inspect", "Enable macOS system WebView inspection (default: Debug builds only)");
     _ = b.option(bool, "webview", "Deprecated compatibility flag; native surfaces are always enabled") orelse true;
     const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
@@ -309,6 +310,11 @@ pub fn build(b: *std.Build) void {
     app_runner_options.addOption(bool, "debug_overlay", false);
     app_runner_options.addOption(bool, "automation", false);
     app_runner_options.addOption(bool, "web_layer", false);
+    // Omit an unspecified setting to also exercise older custom build options.
+    if (webview_inspection) |enabled| {
+        app_runner_options.addOption(?bool, "webview_inspection", enabled);
+    }
+    app_runner_options.addOption(bool, "webview_inspection_expected", webview_inspection orelse (optimize == .Debug));
     const app_runner_mod = module(b, target, optimize, "src/app_runner/root.zig");
     app_runner_mod.addImport("native_sdk", desktop_mod);
     app_runner_mod.addImport("build_options", app_runner_options.createModule());
@@ -722,6 +728,7 @@ pub fn build(b: *std.Build) void {
             .{ .file = "widget_focus_test.m", .step = "test-macos-widget-focus", .description = "Verify native accessibility publication preserves keyboard focus without assistive feedback" },
             .{ .file = "scroll_driver_test.m", .step = "test-macos-scroll-drivers", .description = "Verify native scroll resize reports settle after driver reconciliation" },
             .{ .file = "pointer_motion_test.m", .step = "test-macos-pointer-motion", .description = "Verify coalesced native pointer drags preserve geometry deltas" },
+            .{ .file = "webview_inspection_test.m", .step = "test-macos-webview-inspection", .description = "Verify inspection capability for primary, lazy, secondary and child WebViews" },
             .{ .file = "text_keyboard_test.m", .step = "test-macos-text-keyboard", .description = "Verify native Enter modifiers survive AppKit text interpretation" },
         }) |probe| {
             const probe_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc" });
@@ -1282,6 +1289,13 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/widget_audits.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/widget_routing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/widget_changes.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_retention.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_reconcile.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/scroll_tree.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_continuity.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/staged_rebuild.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/virtual_windows.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/context_menus.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/widget_paint.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/widget_presentation.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/widget_paint_walk.test.ts"));
@@ -1323,6 +1337,12 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/text_span_queries.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_check.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_evaluator.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_reload.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/editor_declarations.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/declarations.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_provenance.test.ts"));
         native_api_tests.has_side_effects = true;
         _ = native_api_tests.captureStdOut(.{});
         _ = native_api_tests.captureStdErr(.{});
@@ -1366,6 +1386,14 @@ pub fn build(b: *std.Build) void {
         composition_step.dependOn(&composition_app_run.step);
         ts_core_e2e_step.dependOn(&composition_app_run.step);
         test_step.dependOn(&composition_app_run.step);
+        const view_reload_run = b.addRunArtifact(ts_core_artifacts.view_reload);
+        b.step("test-ts-view-reload", "Reload compiled TypeScript views from markup edits while the model and widget state persist").dependOn(&view_reload_run.step);
+        const view_provenance_run = b.addRunArtifact(ts_core_artifacts.view_provenance);
+        b.step("test-ts-view-provenance", "Compare compiled view provenance and write-back spans with the native markup interpreter").dependOn(&view_provenance_run.step);
+        ts_core_e2e_step.dependOn(&view_provenance_run.step);
+        test_step.dependOn(&view_provenance_run.step);
+        ts_core_e2e_step.dependOn(&view_reload_run.step);
+        test_step.dependOn(&view_reload_run.step);
         ts_core_e2e_step.dependOn(&composition_view_run.step);
         test_step.dependOn(&composition_view_run.step);
         b.step("test-ts-widget-motion", "Compare compiled widget motion with native runtime behavior").dependOn(&b.addRunArtifact(ts_core_artifacts.motion).step);
@@ -1395,10 +1423,18 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-audio-exact", "Compare exact compiled audio capabilities, ownership and effect replay").dependOn(&audio_exact_run.step);
         ts_core_e2e_step.dependOn(&audio_exact_run.step);
         test_step.dependOn(&audio_exact_run.step);
+        const global_shortcut_run = b.addRunArtifact(ts_core_artifacts.global_shortcut);
+        b.step("test-ts-global-shortcut", "Drive a compiled global shortcut through the effects engine and the null platform host").dependOn(&global_shortcut_run.step);
+        ts_core_e2e_step.dependOn(&global_shortcut_run.step);
+        test_step.dependOn(&global_shortcut_run.step);
         const spawn_exact_run = b.addRunArtifact(ts_core_artifacts.spawn_exact);
         b.step("test-ts-spawn-exact", "Compare exact compiled subprocess routing, ownership and effect replay").dependOn(&spawn_exact_run.step);
         ts_core_e2e_step.dependOn(&spawn_exact_run.step);
         test_step.dependOn(&spawn_exact_run.step);
+        const keyboard_input_run = b.addRunArtifact(ts_core_artifacts.keyboard_input);
+        b.step("test-ts-keyboard-input-e2e", "Run compiled keyboard input commands through the runtime and null platform").dependOn(&keyboard_input_run.step);
+        ts_core_e2e_step.dependOn(&keyboard_input_run.step);
+        test_step.dependOn(&keyboard_input_run.step);
         const boot_images_run = b.addRunArtifact(ts_core_artifacts.boot_images);
         b.step("test-ts-boot-images", "Compare synchronous compiled image startup, complete results and native pixel ownership").dependOn(&boot_images_run.step);
         ts_core_e2e_step.dependOn(&boot_images_run.step);
@@ -1518,7 +1554,11 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&typography_run.step);
         test_step.dependOn(&typography_run.step);
         const surface_layout_run = b.addRunArtifact(ts_core_artifacts.surface_layout);
-        b.step("test-ts-surface-layout-e2e", "Compare compiled floating-surface placement with native layout and ABI ownership").dependOn(&surface_layout_run.step);
+        const surface_layout_step = b.step("test-ts-surface-layout-e2e", "Compare compiled floating-surface placement with native layout and ABI ownership");
+        surface_layout_step.dependOn(&surface_layout_run.step);
+        const virtual_fixed_run = b.addRunArtifact(ts_core_artifacts.virtual_fixed);
+        surface_layout_step.dependOn(&virtual_fixed_run.step);
+        b.step("test-ts-virtual-fixed", "Build and exercise fixed-only virtual view mirror capabilities").dependOn(&virtual_fixed_run.step);
         b.step("test-ts-accessibility-publication", "Compare complete compiled accessibility projection and runtime publication").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-accessibility-publication-tests", &.{"compiled accessibility"})).step);
         b.step("test-ts-command-coordination", "Compare complete compiled command routing and native registry ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-command-coordination-tests", &.{"compiled command"})).step);
         b.step("test-ts-vector-derivation", "Compare compiled vector and effect derivation without runtime frame setup").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-vector-derivation-tests", &.{ "compiled vector resources preserve", "vector resource copied transport" })).step);
@@ -1536,6 +1576,44 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-shell-admission", "Compare complete compiled scene hierarchy and runtime descriptor admission").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-shell-admission-tests", &.{"compiled shell admission"})).step);
         b.step("test-ts-authorization", "Compare compiled authorization and complete bridge responses against native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-authorization-tests", &.{"compiled authorization"})).step);
         b.step("test-ts-builtin-coordination", "Compare complete builtin bridge coordination against native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-builtin-coordination-tests", &.{"compiled builtin coordination"})).step);
+        b.step("test-ts-widget-retention", "Compare complete retained widget collections and autofocus with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-widget-retention-tests", &.{"compiled widget retention"})).step);
+        b.step("test-ts-context-menus", "Compare compiled context menus with complete native request and action races").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-context-menu-tests", &.{ "compiled context menus", "compiled automation interactions preserve context-menu" })).step);
+        b.step("test-ts-web-panes", "Compare complete compiled embedded WebView pane coordination with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-web-pane-tests", &.{"compiled web panes"})).step);
+        b.step("test-ts-extent-program", "Compare compiled retained-table programs with complete native state and callback order").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-extent-program-tests", &.{ "compiled extent", "compiled estimate", "compiled variable" })).step);
+        b.step("test-ts-markup-expressions", "Compare complete compiled markup expression programs with native values and failures").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-expression-tests", &.{ "compiled markup expressions", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-text", "Compare compiled markup text/calendar bytes, ownership and allocation failures with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-text-tests", &.{ "compiled markup text", "compiled markup expressions", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-display", "Compare compiled interpolation and numeric display assembly with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-display-tests", &.{ "compiled markup display", "compiled markup expressions", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-scalars", "Compare compiled exact scalar expression semantics with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-scalar-tests", &.{ "compiled markup scalars", "compiled markup expressions", "compiled markup display", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-parser", "Compare compiled runtime expression trees, diagnostics and borrowed ownership with native parsing").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-parser-tests", &.{ "compiled markup parser", "compiled markup expressions", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-document", "Compare compiled runtime markup documents, failure order and borrowed source ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-document-tests", &.{ "compiled markup document", "compiled markup parser", "compiled markup development", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-imports", "Compare compiled import closures, exact loader order and arena failures").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-import-tests", &.{ "compiled markup imports", "compiled markup document", "compiled markup development", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-canonical", "Compare complete compiled typed documents, borrowed aliases and allocation failures").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-canonical-tests", &.{ "compiled markup canonicalization", "compiled markup imports", "compiled markup document", "compiled markup parser", "compiled markup development", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-construction", "Compare complete runtime construction, lexical scope, callback order and arena failures").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-construction-tests", &.{ "compiled markup construction", "compiled markup canonicalization", "compiled markup development", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-elements", "Compare complete runtime elements, attributes, handlers and native failure order").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-element-tests", &.{ "compiled markup elements", "compiled markup construction", "compiled markup canonicalization", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-specialized", "Compare complete runtime elements, attributes, handlers and native failure order").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-specialized-tests", &.{ "compiled markup specialized", "compiled markup elements", "compiled markup construction", "compiled markup canonicalization", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-shapes", "Compare compiled shared shape and text diagnostics with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-shapes-tests", &.{ "compiled markup shapes", "compiled markup specialized", "compiled markup elements" })).step);
+        b.step("test-ts-markup-options", "Compare compiled option admission, exact scale conversion and complete builder failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-option-tests", &.{ "compiled markup options", "compiled markup metadata", "compiled markup values", "compiled markup specialized", "compiled markup elements" })).step);
+        b.step("test-ts-markup-numeric", "Compare exact numeric options and virtual-window defaults, ranges and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-numeric-tests", &.{ "compiled markup numeric", "compiled markup specialized", "compiled markup options" })).step);
+        b.step("test-ts-static-markup-values", "Compare static markup dynamic values, exact payloads, keys and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-value-tests", &.{ "static markup values", "compiled markup values" })).step);
+        b.step("test-ts-static-markup-collections", "Compare static virtual windows, row consumption, exact keys, stepper indices and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-collection-tests", &.{ "static markup collections", "compiled markup numeric", "compiled markup specialized" })).step);
+        b.step("test-ts-static-markup-expansion", "Compare static branches, item sequencing, lexical captures, exact inherited keys and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-expansion-tests", &.{ "static markup expansion", "static markup collections" })).step);
+        b.step("test-ts-static-markup-specialized", "Compare static specialized metadata, forwarded handlers, tab triggers and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-specialized-tests", &.{ "static markup", "compiled markup values", "compiled markup metadata", "compiled markup options", "compiled markup postprocessing", "compiled markup numeric", "compiled markup admission", "compiled markup literals" })).step);
+        b.step("test-ts-static-markup-typography", "Compare static spans, interpolation, callback order and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-typography-tests", &.{ "static markup", "compiled markup specialized", "compiled markup runtime" })).step);
+        b.step("test-ts-static-markup-builders", "Compare static forms, timelines, charts, video and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-builder-tests", &.{ "static markup builders", "compiled markup specialized" })).step);
+        b.step("test-ts-static-markup-content", "Compare static markdown, code and stepper construction and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-content-tests", &.{ "static markup content builders", "compiled markup specialized" })).step);
+        b.step("test-ts-markup-postprocessing", "Compare forwarded handlers, provenance, tabs and borrowed binding paths").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-postprocessing-tests", &.{ "compiled markup postprocessing", "compiled markup literals", "compiled markup admission", "compiled markup construction" })).step);
+        b.step("test-ts-markup-literals", "Compare exact literal inference, template defaults and lexical capture ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-literal-tests", &.{ "compiled markup literals", "compiled markup admission", "compiled markup construction" })).step);
+        b.step("test-ts-markup-admission", "Compare specialized attribute forms, raw flags and complete eager failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-admission-tests", &.{ "compiled markup admission", "compiled markup specialized", "compiled markup options", "compiled markup metadata" })).step);
+        b.step("test-ts-markup-metadata", "Compare compiled icon and code metadata with native grammar, storage and builder effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-metadata-tests", &.{ "compiled markup metadata", "compiled markup values", "compiled markup specialized", "compiled markup elements" })).step);
+        b.step("test-ts-markup-classification", "Compare runtime classification, cached ownership and complete builder parity").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-classification-tests", &.{ "compiled markup classification", "compiled markup canonicalization", "compiled markup runtime", "compiled markup specialized", "compiled markup elements", "compiled markup values" })).step);
+        b.step("test-ts-markup-runtime", "Compare runtime interpolation, collections, exact keys and callback ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-runtime-tests", &.{ "compiled markup runtime", "compiled markup values", "compiled markup specialized", "compiled markup elements", "compiled markup construction", "compiled markup canonicalization", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-values", "Compare exact runtime values, typed callbacks, lexical bindings and native failure order").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-values-tests", &.{ "compiled markup values", "compiled markup specialized", "compiled markup elements", "compiled markup construction", "compiled markup canonicalization", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-scroll-mutation", "Compare complete compiled scroll mutation programs with native state and effect ordering").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-scroll-mutation-tests", &.{ "compiled scroll mutation", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-virtual-windows", "Compare complete compiled virtual window coordination and fixed-only views").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-virtual-window-tests", &.{"compiled virtual window"})).step);
+        b.step("test-ts-staged-rebuild", "Compare complete compiled staged split and anchor rebuild programs").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-staged-rebuild-tests", &.{"compiled staged rebuild"})).step);
+        b.step("test-ts-widget-continuity", "Compare complete compiled rebuild semantics and fling continuity").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-widget-continuity-tests", &.{"compiled widget continuity"})).step);
+        b.step("test-ts-scroll-tree", "Compare complete compiled retained scroll geometry and tab reveal traversal").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-scroll-tree-tests", &.{"compiled scroll tree"})).step);
+        b.step("test-ts-widget-reconcile", "Compare complete retained control and text reconciliation with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-widget-reconcile-tests", &.{"compiled widget reconciliation"})).step);
         b.step("test-ts-host-flow", "Compare complete host event scheduling and runtime coordination with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-host-flow-tests", &.{"compiled host flow"})).step);
         b.step("test-ts-terminal-paint", "Compare complete terminal paint programs and builder ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-terminal-paint-tests", &.{"compiled terminal paint"})).step);
         b.step("test-ts-markup-development", "Compare complete markup reload and provenance with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-development-tests", &.{"compiled markup development"})).step);
@@ -4343,6 +4421,71 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     });
 }
 
+/// A copy of `source` with `suffix` appended, read when the step runs.
+/// Test fixtures use this instead of `@embedFile`, which runs whenever
+/// build.zig compiles and so needs the file in every checkout of this
+/// package, including the published one that leaves `tests/` out.
+fn sourceWithSuffix(b: *std.Build, source: std.Build.LazyPath, suffix: []const u8, basename: []const u8) std.Build.LazyPath {
+    const file = b.allocator.create(SourceWithSuffix) catch @panic("OOM");
+    file.* = .{
+        .step = std.Build.Step.init(.{
+            .id = .custom,
+            .name = b.fmt("append to {s}", .{basename}),
+            .owner = b,
+            .makeFn = SourceWithSuffix.make,
+        }),
+        .source = source.dupe(b),
+        .suffix = b.dupe(suffix),
+        .basename = b.dupePath(basename),
+        .generated = undefined,
+    };
+    file.generated = .{ .step = &file.step };
+    source.addStepDependencies(&file.step);
+    return .{ .generated = .{ .file = &file.generated } };
+}
+
+const SourceWithSuffix = struct {
+    step: std.Build.Step,
+    source: std.Build.LazyPath,
+    suffix: []const u8,
+    basename: []const u8,
+    generated: std.Build.GeneratedFile,
+
+    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
+        _ = options;
+        const self: *SourceWithSuffix = @fieldParentPtr("step", step);
+        const b = step.owner;
+        const io = b.graph.io;
+        const arena = b.allocator;
+        try step.singleUnchangingWatchInput(self.source);
+        const source_path = self.source.getPath3(b, step);
+        const source = source_path.root_dir.handle.readFileAlloc(io, source_path.sub_path, arena, .limited(16 * 1024 * 1024)) catch |err|
+            return step.fail("cannot read {f}: {t}", .{ source_path, err });
+        const bytes = try std.mem.concat(arena, u8, &.{ source, self.suffix });
+
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        const output_dir = b.pathJoin(&.{ "o", "native-suffixed", &hex });
+        const output_path = b.pathJoin(&.{ output_dir, self.basename });
+        self.generated.path = try b.cache_root.join(arena, &.{output_path});
+
+        if (b.cache_root.handle.access(io, output_path, .{})) |_| {
+            step.result_cached = true;
+            return;
+        } else |_| {}
+        b.cache_root.handle.createDirPath(io, output_dir) catch |err|
+            return step.fail("cannot create the output directory for {s}: {t}", .{ self.basename, err });
+        var atomic = b.cache_root.handle.createFileAtomic(io, output_path, .{ .replace = true }) catch |err|
+            return step.fail("cannot stage {s}: {t}", .{ self.basename, err });
+        defer atomic.deinit(io);
+        atomic.file.writeStreamingAll(io, bytes) catch |err|
+            return step.fail("cannot write {s}: {t}", .{ self.basename, err });
+        atomic.replace(io) catch |err|
+            return step.fail("cannot publish {s}: {t}", .{ self.basename, err });
+    }
+};
+
 /// The framework module's `terminal_vt` import for THIS repository's own
 /// builds: always the stub. The emulator (libghostty-vt) is pinned by
 /// the APPS that want live `<terminal>` sessions, never by this package
@@ -4389,6 +4532,8 @@ const TsCoreE2eArtifacts = struct {
     composition: *std.Build.Step.Compile,
     composition_view: *std.Build.Step.Compile,
     composition_app: *std.Build.Step.Compile,
+    view_reload: *std.Build.Step.Compile,
+    view_provenance: *std.Build.Step.Compile,
     code_app: *std.Build.Step.Compile,
     code_view: *std.Build.Step.Compile,
     chart_app: *std.Build.Step.Compile,
@@ -4409,7 +4554,9 @@ const TsCoreE2eArtifacts = struct {
     gpu_dashboard: *std.Build.Step.Compile,
     canvas_layers: *std.Build.Step.Compile,
     audio_exact: *std.Build.Step.Compile,
+    global_shortcut: *std.Build.Step.Compile,
     spawn_exact: *std.Build.Step.Compile,
+    keyboard_input: *std.Build.Step.Compile,
     boot_images: *std.Build.Step.Compile,
     deck: *std.Build.Step.Compile,
     markdown_viewer: *std.Build.Step.Compile,
@@ -4432,6 +4579,7 @@ const TsCoreE2eArtifacts = struct {
     journal_codecs: *std.Build.Step.Compile,
     shell_layout: *std.Build.Step.Compile,
     surface_layout: *std.Build.Step.Compile,
+    virtual_fixed: *std.Build.Step.Compile,
     typography: *std.Build.Step.Compile,
     /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
     /// service executable driven through the out-of-process carrier.
@@ -4580,6 +4728,42 @@ fn tsCoreE2eArtifact(
     composition_app_decoder.addImport("native_sdk", desktop_mod);
     composition_app_decoder.addImport("core.zig", composition_fixture.module);
     composition_app_mod.addImport("composition_decoder", composition_app_decoder);
+    const view_reload_src = b.addWriteFiles();
+    _ = view_reload_src.addCopyFile(b.path("tests/ts-core/view_reload/core.ts"), "core.ts");
+    const view_reload_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/view_reload/core.ts",
+        .src_dir = view_reload_src.getDirectory(),
+        .name = "view_reload_fixture_core",
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/view_reload/app.native",
+        .view_reload = true,
+    });
+    // The updates a markup watcher writes for this fixture's edits.
+    const view_reload_updates = b.addSystemCommand(&.{node});
+    view_reload_updates.addFileArg(b.path("tests/ts-core/view_reload_updates.ts"));
+    view_reload_updates.addArg("--contract");
+    view_reload_updates.addFileArg(view_reload_fixture.contract);
+    view_reload_updates.addArg("--markup");
+    view_reload_updates.addDirectoryArg(b.path("tests/ts-core/view_reload"));
+    for ([_][]const u8{ "app.native", "edited.native", "broken.native" }) |name| view_reload_updates.addFileInput(b.path(b.fmt("tests/ts-core/view_reload/{s}", .{name})));
+    @import("build/app.zig").addViewFrontendInputs(b, b, view_reload_updates);
+    @import("build/app.zig").addViewReloadInputs(b, view_reload_updates);
+    view_reload_updates.addArg("--out");
+    const view_reload_updates_dir = view_reload_updates.addOutputDirectoryArg("view-reload-updates");
+    const view_reload_options = b.addOptions();
+    view_reload_options.addOptionPath("updates_dir", view_reload_updates_dir);
+    const view_reload_mod = module(b, target, optimize, "tests/ts-core/view_reload_e2e_tests.zig");
+    view_reload_mod.addImport("native_sdk", desktop_mod);
+    view_reload_mod.addImport("view_reload_core", view_reload_fixture.module);
+    view_reload_mod.addImport("view_reload_updates", view_reload_options.createModule());
+    const view_reload_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    view_reload_decoder.addImport("native_sdk", desktop_mod);
+    view_reload_decoder.addImport("core.zig", view_reload_fixture.module);
+    view_reload_mod.addImport("view_reload_decoder", view_reload_decoder);
+    const view_provenance_mod = module(b, target, optimize, "tests/ts-core/view_provenance_e2e_tests.zig");
+    view_provenance_mod.addImport("native_sdk", desktop_mod);
+    view_provenance_mod.addImport("view_reload_core", view_reload_fixture.module);
+    view_provenance_mod.addImport("view_reload_decoder", view_reload_decoder);
     const code_src = b.addWriteFiles();
     _ = code_src.addCopyFile(b.path("tests/ts-core/code_fixture.ts"), "code_fixture.ts");
     const code_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
@@ -4779,6 +4963,15 @@ fn tsCoreE2eArtifact(
     audio_exact_mod.addImport("native_sdk", desktop_mod);
     audio_exact_mod.addImport("audio_exact_core", audio_exact_fixture.module);
 
+    const global_shortcut_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/global-shortcut/core.ts",
+        .src_dir = b.path("tests/ts-core/global-shortcut"),
+        .name = "global_shortcut_core",
+    });
+    const global_shortcut_mod = module(b, target, optimize, "tests/ts-core/global_shortcut_e2e_tests.zig");
+    global_shortcut_mod.addImport("native_sdk", desktop_mod);
+    global_shortcut_mod.addImport("global_shortcut_core", global_shortcut_fixture.module);
+
     const spawn_exact_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
         .entry = "tests/ts-core/spawn-exact/core.ts",
         .src_dir = b.path("tests/ts-core/spawn-exact"),
@@ -4787,6 +4980,16 @@ fn tsCoreE2eArtifact(
     const spawn_exact_mod = module(b, target, optimize, "tests/ts-core/spawn_exact_effect_tests.zig");
     spawn_exact_mod.addImport("native_sdk", desktop_mod);
     spawn_exact_mod.addImport("spawn_exact_core", spawn_exact_fixture.module);
+
+    const keyboard_input_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/keyboard-input/core.ts",
+        .src_dir = b.path("tests/ts-core/keyboard-input"),
+        .name = "keyboard_input_core",
+        .keyboard_input_permission = true,
+    });
+    const keyboard_input_mod = module(b, target, optimize, "tests/ts-core/keyboard_input_e2e_tests.zig");
+    keyboard_input_mod.addImport("native_sdk", desktop_mod);
+    keyboard_input_mod.addImport("keyboard_input_core", keyboard_input_fixture.module);
 
     const boot_images_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
         .entry = "tests/ts-core/boot-images/core.ts",
@@ -4832,8 +5035,12 @@ fn tsCoreE2eArtifact(
     const gpu_dashboard_stage = b.addWriteFiles();
     const gpu_dashboard_root = gpu_dashboard_stage.addCopyFile(b.path("tests/ts-core/gpu_dashboard_e2e_tests.zig"), "gpu_dashboard_e2e_tests.zig");
     // Test-only access to the unchanged reference's private capability hooks.
-    _ = gpu_dashboard_stage.add("gpu_dashboard_reference_access.zig", @embedFile("tests/ts-core/gpu-dashboard-reference/main.zig") ++
-        "\npub const migrationScene = shell_scene;\npub const migrationOptions = dashboardOptions;\n");
+    _ = gpu_dashboard_stage.addCopyFile(sourceWithSuffix(
+        b,
+        b.path("tests/ts-core/gpu-dashboard-reference/main.zig"),
+        "\npub const migrationScene = shell_scene;\npub const migrationOptions = dashboardOptions;\n",
+        "gpu_dashboard_reference_access.zig",
+    ), "gpu_dashboard_reference_access.zig");
     _ = gpu_dashboard_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
     _ = gpu_dashboard_stage.addCopyFile(b.path("examples/gpu-dashboard/src/app.native"), "app.native");
     const gpu_dashboard_mod = b.createModule(.{ .root_source_file = gpu_dashboard_root, .target = target, .optimize = optimize });
@@ -5123,6 +5330,19 @@ fn tsCoreE2eArtifact(
     typography_decoder_mod.addImport("native_sdk", desktop_mod);
     typography_decoder_mod.addImport("core.zig", typography_fixture.module);
     typography_mod.addImport("typography_decoder", typography_decoder_mod);
+    const virtual_fixed_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/virtual-fixed/core.ts",
+        .src_dir = b.path("tests/ts-core/virtual-fixed"),
+        .name = "virtual_fixed_core",
+        .typescript_view = true,
+    });
+    const virtual_fixed_mod = module(b, target, optimize, "tests/ts-core/virtual_fixed_e2e_tests.zig");
+    virtual_fixed_mod.addImport("native_sdk", desktop_mod);
+    virtual_fixed_mod.addImport("virtual_fixed_core", virtual_fixed_fixture.module);
+    const virtual_fixed_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    virtual_fixed_decoder.addImport("native_sdk", desktop_mod);
+    virtual_fixed_decoder.addImport("core.zig", virtual_fixed_fixture.module);
+    virtual_fixed_mod.addImport("virtual_fixed_decoder", virtual_fixed_decoder);
     const surface_layout_mod = module(b, target, optimize, "tests/ts-core/surface_layout_e2e_tests.zig");
     surface_layout_mod.addImport("native_sdk", desktop_mod);
     surface_layout_mod.addImport("surface_fixture_core", feed_reader_fixture.module);
@@ -5397,6 +5617,8 @@ fn tsCoreE2eArtifact(
         .construction = filteredTestArtifact(b, persist_mod, "ts-construction-e2e-tests", &.{"compiled construction"}),
         .composition_view = filteredTestArtifact(b, composition_decoder_mod, "ts-composition-view-tests", &.{"compiled grouped input"}),
         .composition_app = filteredTestArtifact(b, composition_app_mod, "ts-composition-app-tests", &.{"compiled app composition"}),
+        .view_reload = filteredTestArtifact(b, view_reload_mod, "ts-view-reload-tests", &.{}),
+        .view_provenance = filteredTestArtifact(b, view_provenance_mod, "ts-view-provenance-tests", &.{}),
         .chart_app = filteredTestArtifact(b, chart_app_mod, "ts-chart-app-tests", &.{"compiled app chart"}),
         .chart_view = filteredTestArtifact(b, chart_decoder, "ts-chart-view-tests", &.{"compiled app chart"}),
         .code_app = filteredTestArtifact(b, code_app_mod, "ts-code-app-tests", &.{"compiled app code"}),
@@ -5412,7 +5634,9 @@ fn tsCoreE2eArtifact(
         .split_collapse = filteredTestArtifact(b, split_mod, "ts-split-collapse-e2e-tests", &.{}),
         .canvas_layers = filteredTestArtifact(b, canvas_layers_mod, "ts-canvas-layers-e2e-tests", &.{}),
         .audio_exact = filteredTestArtifact(b, audio_exact_mod, "ts-audio-exact-effect-tests", &.{}),
+        .global_shortcut = filteredTestArtifact(b, global_shortcut_mod, "ts-global-shortcut-e2e-tests", &.{}),
         .spawn_exact = filteredTestArtifact(b, spawn_exact_mod, "ts-spawn-exact-effect-tests", &.{}),
+        .keyboard_input = filteredTestArtifact(b, keyboard_input_mod, "ts-keyboard-input-e2e-tests", &.{}),
         .boot_images = filteredTestArtifact(b, boot_images_mod, "ts-boot-images-tests", &.{}),
         .deck = filteredTestArtifact(b, deck_mod, "ts-deck-e2e-tests", &.{}),
         .gpu_dashboard = filteredTestArtifact(b, gpu_dashboard_mod, "ts-gpu-dashboard-e2e-tests", &.{}),
@@ -5435,6 +5659,7 @@ fn tsCoreE2eArtifact(
         .feed_reader = filteredTestArtifact(b, feed_reader_mod, "ts-feed-reader-e2e-tests", &.{}),
         .shell_layout = filteredTestArtifact(b, shell_layout_mod, "ts-shell-layout-e2e-tests", &.{}),
         .typography = filteredTestArtifact(b, typography_mod, "ts-typography-e2e-tests", &.{}),
+        .virtual_fixed = filteredTestArtifact(b, virtual_fixed_mod, "ts-virtual-fixed-tests", &.{}),
         .surface_layout = filteredTestArtifact(b, surface_layout_mod, "ts-surface-layout-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
         .services_pool = if (services_pool_mod) |pool_mod| filteredTestArtifact(b, pool_mod, "ts-services-pool-e2e-tests", &.{}) else null,
@@ -5685,6 +5910,7 @@ const ExternalCoreFixtureSpec = struct {
     /// The fixture stands in for an app whose manifest declares the Tier-4
     /// build capability and its matching core-effect permission.
     credentials_capability: bool = false,
+    keyboard_input_permission: bool = false,
     /// Attested integer slots the compiled projection carries as f64
     /// (values that reach the f64-exact boundary have no honest i64
     /// declaration on that side) — corewire's --f64-slot demotions,
@@ -5695,6 +5921,9 @@ const ExternalCoreFixtureSpec = struct {
     typescript_view: bool = false,
     view_markup: ?[]const u8 = null,
     window_views: []const []const u8 = &.{},
+    /// Stage the development view evaluator and its exports, as a
+    /// `-Dview-reload` app build does.
+    view_reload: bool = false,
 };
 
 /// Compile one TS fixture core through the external core compiler at
@@ -5747,6 +5976,7 @@ fn externalCoreFixtureModule(
     if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
     if (spec.relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
     if (spec.credentials_capability) check.addArgs(&.{ "--capability", "credentials", "--permission", "credentials" });
+    if (spec.keyboard_input_permission) check.addArgs(&.{ "--permission", "keyboard_input" });
     if (std.mem.eql(u8, spec.entry, "tests/ts-core/fixture.ts")) check.addArgs(&.{ "--permission", "filesystem" });
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
@@ -5804,6 +6034,10 @@ fn externalCoreFixtureModule(
         stage_run.addFileArg(b.path(spec.view_markup orelse b.fmt("{s}/app.native", .{std.fs.path.dirname(spec.entry).?})));
         stage_run.addArg("--view-contract");
         stage_run.addFileArg(contract);
+        if (spec.view_reload) {
+            stage_run.addArg("--view-reload");
+            app_build.addViewReloadInputs(b, stage_run);
+        }
     }
     tsCoreAddCoreDirInputs(b, stage_run, std.fs.path.dirname(spec.entry) orelse ".", spec.typescript_view);
     app_build.addStagedCoreSdkInputs(b, b, stage_run);

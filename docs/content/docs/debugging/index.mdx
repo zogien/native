@@ -4,6 +4,31 @@ title: "Debugging"
 
 The Native SDK provides structured tracing, persistent logging, panic capture, and diagnostic tools for debugging desktop apps.
 
+## macOS WebView inspection
+
+For the macOS system WebView backend, Debug app builds enable Safari inspection,
+developer extras, and the default **Toggle Web Inspector** menu item. ReleaseFast,
+ReleaseSafe, and ReleaseSmall builds disable them, including the separate release
+binary produced by `zig build package` in an expanded build. This applies to
+primary WebViews, secondary windows, and child WebViews, including ones created
+later by a native-rendered app.
+
+Override the default with a build option:
+
+```bash
+native dev -Dwebview-inspect=false
+native build -Dwebview-inspect=true
+```
+
+Apps that own their build can pass the same option to `zig build` or
+`zig build package`. Enabling inspection in a release build allows an attached
+Safari console to execute JavaScript in the page's origin, including its allowed
+native bridge commands. Keep it disabled for normal distribution.
+
+Lower-level hosts initialized directly through `AppInfo` default to inspection
+disabled; set `webview_inspection = true` explicitly for debugging. This setting
+covers WKWebView on macOS and does not configure Chromium or other platforms.
+
 ## Trace modes
 
 The runtime emits structured trace records. Control verbosity with `TraceMode`:

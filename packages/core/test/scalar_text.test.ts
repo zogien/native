@@ -21,6 +21,14 @@ test("scalar font facts are copied and covered advances override fallback classe
   w.setFloat32(68,0.72,true);const out=checked(first),r=new DataView(out.buffer);let expected=0;for(const em of [Math.fround(0.72),1,1])expected=Math.fround(expected+Math.fround(Math.fround(13.25)*em));assert.equal(r.getFloat32(32,true),expected);
   first.fill(255);assert.deepEqual(out.subarray(64+text.length*8),text);
 });
+test("scalar styled font facts already contain the selected face's advances",()=>{
+  for(const font of [1,3,4,5,6]){
+    const first=checked(packet(1,new TextEncoder().encode("HH"),font)),w=new DataView(first.buffer);
+    w.setFloat32(68,0.73,true);w.setFloat32(76,0.73,true);
+    const out=checked(first),advance=Math.fround(13.25*Math.fround(0.73));
+    assert.equal(new DataView(out.buffer).getFloat32(32,true),Math.fround(advance+advance));
+  }
+});
 test("scalar UTF8 rejects controls overlong surrogates invalid continuations and truncated clusters",()=>{
   for(const text of [new Uint8Array([0]),new Uint8Array([127]),new Uint8Array([255]),new Uint8Array([0xc0,0x80]),new Uint8Array([0xed,0xa0,0x80]),new Uint8Array([0xf4,0x90,0x80,0x80]),new Uint8Array([0xe2,0x80]),new Uint8Array([0xc2,65])]){ const out=checked(packet(2,text)),w=new DataView(out.buffer);assert.equal(w.getUint32(36,true),1);assert.equal(w.getUint32(64,true),0xffffffff);assert.equal(w.getFloat32(68,true),Math.fround(0.6)); }
 });

@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("workbench_core");
 const decoder = @import("workbench_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("workbench_reference.zig");
 const parity = @import("effects_media_parity.zig");
 const Host = sdk.TsCoreHost(core);
@@ -61,7 +62,7 @@ fn viewParity(native: *const reference.Model, model: *const core.Model) !void {
     for (0..2) |backend| {
         var b = canvas.Ui(core.Msg).init(arena.allocator());
         b.pty_key_resolver = referenceKey;
-        const actual = try b.finalize(if (backend == 0) View.build(&b, model) else decoder.build(&b, model));
+        const actual = try b.finalize(if (backend == 0) View.build(&b, model) else CompiledView.build(&b, model));
         core.rt.frameReset();
         try parity.equal(expected.root, actual.root);
         try testing.expectEqual(expected.handlers.len, actual.handlers.len);
@@ -196,7 +197,7 @@ fn replay(comptime compiled: bool) !void {
     defer if (full) |bytes| testing.allocator.free(bytes);
     var fingerprint: u64 = 0;
     {
-        const app = try Adapter.create(testing.allocator, .{ .env_values = &env }, .{ .name = "workbench", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled) decoder.build else View.build });
+        const app = try Adapter.create(testing.allocator, .{ .env_values = &env }, .{ .name = "workbench", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled) CompiledView.build else View.build });
         defer app.destroy();
         const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(1280, 800) });
         defer harness.destroy(testing.allocator);
@@ -221,7 +222,7 @@ fn replay(comptime compiled: bool) !void {
         recorder.finish();
         try testing.expect(!recorder.failed);
     }
-    const app = try Adapter.create(testing.allocator, .{ .env_values = &env }, .{ .name = "workbench", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled) decoder.build else View.build });
+    const app = try Adapter.create(testing.allocator, .{ .env_values = &env }, .{ .name = "workbench", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled) CompiledView.build else View.build });
     defer app.destroy();
     const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(1280, 800) });
     defer harness.destroy(testing.allocator);

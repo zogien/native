@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("gpu_dashboard_core");
 const decoder = @import("gpu_dashboard_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("gpu_dashboard_reference_access.zig");
 const manifest = @import("gpu_dashboard_manifest");
 const parity = @import("effects_media_parity.zig");
@@ -17,7 +18,7 @@ test "GPU Dashboard shipping shell preserves the complete native scene" {
 }
 
 fn options() Adapter.Options {
-    return Adapter.mobileOptions(.{}, .{ .name = "gpu-dashboard", .scene = reference.migrationScene, .canvas_label = "dashboard-canvas", .view = decoder.build });
+    return Adapter.mobileOptions(.{}, .{ .name = "gpu-dashboard", .scene = reference.migrationScene, .canvas_label = "dashboard-canvas", .view = CompiledView.build });
 }
 fn compare(native: *const reference.Model, model: *const core.Model) !void {
     inline for (@typeInfo(reference.Model).@"struct".fields) |field| {
@@ -50,7 +51,7 @@ fn viewParity(native: *const reference.Model, model: *const core.Model) !void {
     const expected = try a.finalize(reference.view(&a, native));
     for (0..2) |backend| {
         var b = Ui.init(arena.allocator());
-        const actual = try b.finalize(if (backend == 0) View.build(&b, model) else decoder.build(&b, model));
+        const actual = try b.finalize(if (backend == 0) View.build(&b, model) else CompiledView.build(&b, model));
         core.rt.frameReset();
         try parity.equal(expected.root, actual.root);
         try testing.expectEqual(expected.handlers.len, actual.handlers.len);
@@ -137,7 +138,7 @@ test "GPU Dashboard chrome and animation declarations match the independent nati
         var a = reference.DashboardUi.init(arena.allocator());
         var b = Adapter.Ui.init(arena.allocator());
         const left = try a.finalize(reference.view(&a, &native));
-        const right = try b.finalize(decoder.build(&b, Host.model()));
+        const right = try b.finalize(CompiledView.build(&b, Host.model()));
         for ([_]bool{ false, true }) |armed| {
             try apply(&native, &fx, if (armed) .perf_animation else .perf_animation_stop, if (armed) .perf_animation else .perf_animation_stop);
             var expected: [16]canvas.CanvasRenderAnimation = undefined;
@@ -197,7 +198,7 @@ fn dashboardReplay(comptime compiled_view: bool) !void {
     var persistence: ?[]u8 = null;
     defer if (snapshot) |bytes| testing.allocator.free(bytes);
     defer if (persistence) |bytes| testing.allocator.free(bytes);
-    const config: Adapter.Options = .{ .name = "gpu-dashboard", .scene = reference.migrationScene, .canvas_label = "dashboard-canvas", .view = if (compiled_view) decoder.build else View.build };
+    const config: Adapter.Options = .{ .name = "gpu-dashboard", .scene = reference.migrationScene, .canvas_label = "dashboard-canvas", .view = if (compiled_view) CompiledView.build else View.build };
     {
         const state = try Adapter.create(testing.allocator, .{}, config);
         defer state.destroy();

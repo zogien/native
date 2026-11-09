@@ -259,6 +259,7 @@ test "TypeScript app adapter supplies placement through every theme path" {
         try std.testing.expect(app.app().window_lifecycle_policy == core.nativeWindowPolicy);
         try std.testing.expect(app.app().image_registry_policy == core.nativeWindowPolicy);
         try std.testing.expect(app.app().font_registry_policy == core.nativeWindowPolicy);
+        try std.testing.expect(app.options.expression_policy == core.nativeWindowPolicy);
         const tokens = app.effectiveTokens().withOverrides(.{});
         try std.testing.expect(tokens.surface_layout_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.grid_layout_policy == core.nativeWindowPolicy);
@@ -267,6 +268,8 @@ test "TypeScript app adapter supplies placement through every theme path" {
         try std.testing.expect(tokens.measurement_coordination_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.flow_measurement_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.layout_coordination_policy == core.nativeWindowPolicy);
+        try std.testing.expect(tokens.scroll_tree_policy == core.nativeWindowPolicy);
+        try std.testing.expect(tokens.scroll_mutation_policy == core.nativeWindowPolicy);
     }
 }
 
@@ -296,6 +299,7 @@ test "app token paths retain adapter placement and consume supplied frames" {
         try std.testing.expect(app.app().render_plan_policy == null);
         try std.testing.expect(app.app().render_override_policy == null);
         try std.testing.expect(app.app().render_damage_policy == null);
+        try std.testing.expect(app.options.expression_policy == null);
         const tokens = app.effectiveTokens().withOverrides(.{});
         try std.testing.expect(tokens.surface_layout_policy == Factory.policy);
         try std.testing.expect(tokens.intrinsic_layout_policy == core.nativeWindowPolicy);
@@ -967,4 +971,49 @@ test {
     _ = @import("canvas_presentation_lifecycle_e2e_tests.zig");
     _ = @import("gpu_packet_preparation_e2e_tests.zig");
     _ = @import("vector_raster_e2e_tests.zig");
+}
+
+test {
+    _ = @import("widget_retention_e2e_tests.zig");
+    _ = @import("widget_reconcile_e2e_tests.zig");
+    _ = @import("scroll_tree_e2e_tests.zig");
+    _ = @import("scroll_mutation_e2e_tests.zig");
+    _ = @import("widget_continuity_e2e_tests.zig");
+    _ = @import("staged_rebuild_e2e_tests.zig");
+    _ = @import("virtual_windows_e2e_tests.zig");
+    _ = @import("context_menus_e2e_tests.zig");
+    _ = @import("web_panes_e2e_tests.zig");
+}
+
+test {
+    _ = @import("markup_expressions_e2e_tests.zig");
+    _ = @import("markup_text_e2e_tests.zig");
+    _ = @import("markup_display_e2e_tests.zig");
+    _ = @import("markup_scalars_e2e_tests.zig");
+    _ = @import("markup_parser_e2e_tests.zig");
+    _ = @import("markup_document_e2e_tests.zig");
+    _ = @import("markup_imports_e2e_tests.zig");
+    _ = @import("markup_canonical_e2e_tests.zig");
+    _ = @import("markup_construction_e2e_tests.zig");
+    _ = @import("markup_elements_e2e_tests.zig");
+    _ = @import("markup_specialized_e2e_tests.zig");
+    _ = @import("markup_values_e2e_tests.zig");
+    _ = @import("markup_runtime_e2e_tests.zig");
+    _ = @import("markup_shapes_e2e_tests.zig");
+    _ = @import("markup_classification_e2e_tests.zig");
+    _ = @import("markup_metadata_e2e_tests.zig");
+    _ = @import("markup_options_e2e_tests.zig");
+    _ = @import("markup_numeric_e2e_tests.zig");
+    _ = @import("markup_admission_e2e_tests.zig");
+    _ = @import("markup_literals_e2e_tests.zig");
+    _ = @import("static_markup_values_e2e_tests.zig");
+}
+
+test {
+    _ = @import("static_markup_collections_e2e_tests.zig");
+    _ = @import("static_markup_expansion_e2e_tests.zig");
+    _ = @import("static_markup_specialized_e2e_tests.zig");
+    _ = @import("static_markup_typography_e2e_tests.zig");
+    _ = @import("static_markup_builders_e2e_tests.zig");
+    _ = @import("static_markup_content_e2e_tests.zig");
 }

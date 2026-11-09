@@ -108,10 +108,9 @@ pub const mediaSurfacePlaceholderColor = @import("widget_render.zig").mediaSurfa
 pub const default_sans_font_id: FontId = 1;
 pub const default_mono_font_id: FontId = 2;
 // Reserved sans variant ids for inline span styling. The deterministic
-// estimator applies per-variant width factors; hosts that have not mapped
-// these ids to real faces fall back to the regular sans face, and because
-// the measurement seam carries the same id, measured text always matches
-// drawn text.
+// estimator and software renderer use matching bundled regular, medium
+// and bold faces. Italic ids preserve weight with upright outlines in
+// software; platform text providers may resolve real italic faces.
 pub const default_sans_medium_font_id: FontId = 3;
 pub const default_sans_bold_font_id: FontId = 4;
 pub const default_sans_italic_font_id: FontId = 5;
@@ -581,6 +580,7 @@ pub const lazy_tls = @import("lazy_tls.zig");
 // `ui_markup_compiled.zig` (comptime parse: the release engine, no parser in
 // the binary).
 pub const ui_markup = @import("ui_markup.zig");
+pub const ui_markup_shapes = @import("ui_markup_shapes.zig");
 /// Structural event shapes shared by markup backends and native consumers.
 pub const ui_markup_reflect = @import("ui_markup_reflect.zig");
 /// Widget provenance (write-back's read half): structural id -> authored
@@ -959,6 +959,7 @@ pub const binary_packet_load_action_patch = serialization.binary_packet_load_act
 
 test {
     _ = @import("tests.zig");
+    _ = @import("decision_reuse.zig");
 }
 
 /// Copied portable leaf command and geometry plans.
@@ -968,6 +969,8 @@ pub const indicator_plan_policy = @import("indicator_plan_policy.zig");
 pub const effect_plan_policy = @import("effect_plan_policy.zig");
 
 pub const text_scalar_policy = @import("text_scalar_policy.zig");
+/// Exact reuse of decisions from policies that answer from their request bytes alone.
+pub const decision_reuse = @import("decision_reuse.zig");
 pub const registered_font_policy = @import("registered_font_policy.zig");
 
 pub const GpuPlanningPolicy = @import("gpu_planning_policy.zig");

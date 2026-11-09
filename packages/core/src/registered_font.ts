@@ -29,9 +29,8 @@ class NscRegisteredFont {
   float(at: number, value: number): void { this.wire.setFloat32(at, value, true); }
   action(value: number): Uint8Array { this.put(72, value); this.bytes[3] = value === 0 ? 2 : 1; return this.bytes; }
   cell(em: number): Uint8Array {
-    const registered = this.bytes[4] === 1, font = this.u(16) === 0 ? this.u(12) : 0;
-    const factor = registered ? 1 : Math.fround(font === 3 ? 1.02 : font === 4 || font === 6 ? 1.04 : 1);
-    const value = Math.fround(Math.fround(this.f(20) * em) * factor);
+    const registered = this.bytes[4] === 1;
+    const value = Math.fround(this.f(20) * em);
     // A registered cluster is itself a one-cluster width sum starting at
     // +0. Built-in advance estimators return their product directly.
     this.float(76, registered ? Math.fround(0 + value) : value);

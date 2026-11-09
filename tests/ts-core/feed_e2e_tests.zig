@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("feed_core");
 const decoder = @import("feed_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("feed_reference.zig");
 const parity = @import("effects_media_parity.zig");
 const canvas = sdk.canvas;
@@ -40,7 +41,7 @@ fn views(native: *const reference.Model, model: *const core.Model, offset: f32, 
         var right = canvas.Ui(core.Msg).init(alloc);
         right.virtual_window_context = &source;
         right.virtual_window_source = Pinned.resolve;
-        const actual = try right.finalize(if (backend == 0) View.build(&right, model) else if (backend == 1) decoder.build(&right, model) else blk: {
+        const actual = try right.finalize(if (backend == 0) View.build(&right, model) else if (backend == 1) CompiledView.build(&right, model) else blk: {
             var interpreted = try canvas.MarkupView(core.Model, core.Msg).init(alloc, @embedFile("app.native"));
             break :blk try interpreted.build(&right, model);
         });
@@ -159,7 +160,7 @@ test "Feed compiled row queries preserve deterministic corpus text counters and 
         try testing.expectEqual(@as(i64, post.boosts), rows[0].boosts);
         try testing.expectEqual(@as(i64, post.replies), rows[0].replies);
         try testing.expectEqualStrings(try std.fmt.allocPrint(alloc, "Post {d} by {s}", .{ index, post.author }), rows[0].label);
-        try testing.expectEqual(reference.postExtentEstimate(null, index), core.Model.virtualExtentEstimate(@ptrFromInt(2), index));
+        try testing.expectEqual(reference.postExtentEstimate(null, index), core.virtualExtentEstimate(@ptrFromInt(2), index));
         core.rt.frameReset();
     }
 }
@@ -179,7 +180,7 @@ fn replay(comptime compiled: bool) !void {
     defer if (full) |bytes| testing.allocator.free(bytes);
     var fingerprint: u64 = 0;
     {
-        const app = try Adapter.create(testing.allocator, .{}, .{ .name = "feed", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled) decoder.build else View.build });
+        const app = try Adapter.create(testing.allocator, .{}, .{ .name = "feed", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled) CompiledView.build else View.build });
         defer app.destroy();
         const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(520, 760) });
         defer harness.destroy(testing.allocator);
@@ -198,7 +199,7 @@ fn replay(comptime compiled: bool) !void {
         recorder.finish();
         try testing.expect(!recorder.failed);
     }
-    const app = try Adapter.create(testing.allocator, .{}, .{ .name = "feed", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled) decoder.build else View.build });
+    const app = try Adapter.create(testing.allocator, .{}, .{ .name = "feed", .scene = reference.shell_scene, .canvas_label = reference.canvas_label, .view = if (compiled) CompiledView.build else View.build });
     defer app.destroy();
     const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(520, 760) });
     defer harness.destroy(testing.allocator);

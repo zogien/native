@@ -228,6 +228,13 @@ pub const Parser = struct {
         return .{ .arena = arena, .source = source };
     }
 
+    /// Use the installed runtime grammar while retaining the native parser
+    /// for compile-time/tooling consumers and independent reference tests.
+    pub fn parseWithPolicy(self: *Parser, owner: ?expr.Policy) ParseError!MarkupDocument {
+        if (owner) |callback| return @import("ui_markup_document.zig").parse(callback, self);
+        return self.parse();
+    }
+
     /// Parse a document: comments and whitespace around zero or more
     /// top-level `<import>` nodes, then zero or more `<template>`
     /// definitions, then at most one root element. A file that is all
@@ -765,6 +772,13 @@ pub fn parseAttrExpression(value: []const u8) ?Expression {
     return .{ .expression = inner };
 }
 
+/// Runtime raw classification shares the compiled canonical grammar. The
+/// original parser remains comptime-callable and is the native reference.
+pub fn parseAttrExpressionWithPolicy(owner: ?expr.Policy, value: []const u8) ?Expression {
+    if (owner) |callback| return @import("ui_markup_canonical.zig").expression(callback, value);
+    return parseAttrExpression(value);
+}
+
 /// Structural check of an attribute expression, shared by the validator
 /// (what `native markup check` runs, with no model in hand): syntax,
 /// bounds, function names and arity, and the type discipline over the
@@ -900,32 +914,46 @@ pub fn attrTyped(attribute: MarkupAttr) TypedAttrValue {
     return classifyAttrValue(attribute.name, attribute.value);
 }
 
+/// Cached typed values keep their original payload and tree identity;
+/// uncached runtime attributes use the compiled canonical classifier.
+pub fn attrTypedWithPolicy(owner: ?expr.Policy, attribute: MarkupAttr) TypedAttrValue {
+    if (owner) |callback| return @import("ui_markup_canonical.zig").typedAttribute(callback, attribute);
+    return attrTyped(attribute);
+}
+
 /// Canonicalize a parsed (and, for imports, resolved) document: every
 /// attribute value and interpolating text run parses once into its typed
 /// form. Nodes are copied; the input document stays valid.
 pub fn canonicalize(arena: std.mem.Allocator, document: MarkupDocument) error{OutOfMemory}!MarkupDocument {
+    return canonicalizeWithPolicy(null, arena, document);
+}
+
+/// Runtime canonicalization uses compiled typed-tree coordination and
+/// expression grammar; native retains allocation and borrowed source storage.
+pub fn canonicalizeWithPolicy(owner: ?expr.Policy, arena: std.mem.Allocator, document: MarkupDocument) error{OutOfMemory}!MarkupDocument {
+    if (owner) |callback| return @import("ui_markup_canonical.zig").canonicalize(callback, arena, document);
     var out = document;
     if (document.templates.len > 0) {
         const templates = try arena.alloc(MarkupNode, document.templates.len);
         for (document.templates, 0..) |template_node, index| {
-            templates[index] = try canonicalizeNode(arena, template_node);
+            templates[index] = try canonicalizeNode(owner, arena, template_node);
         }
         out.templates = templates;
     }
     if (document.root) |root| {
-        out.root = try canonicalizeNode(arena, root);
+        out.root = try canonicalizeNode(owner, arena, root);
     }
     return out;
 }
 
-fn canonicalizeNode(arena: std.mem.Allocator, node: MarkupNode) error{OutOfMemory}!MarkupNode {
+fn canonicalizeNode(owner: ?expr.Policy, arena: std.mem.Allocator, node: MarkupNode) error{OutOfMemory}!MarkupNode {
     var out = node;
     if (node.attrs.len > 0) {
         const attrs = try arena.alloc(MarkupAttr, node.attrs.len);
         for (node.attrs, 0..) |attribute, index| {
             attrs[index] = attribute;
             const slot = try arena.create(TypedAttrValue);
-            slot.* = typedValueOf(arena, attribute) catch |err| switch (err) {
+            slot.* = typedValueOf(owner, arena, attribute) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
             };
             attrs[index].typed = slot;
@@ -933,40 +961,40 @@ fn canonicalizeNode(arena: std.mem.Allocator, node: MarkupNode) error{OutOfMemor
         out.attrs = attrs;
     }
     if (node.kind == .text and std.mem.indexOfScalar(u8, node.text, '{') != null) {
-        out.typed_text = try typedTextSegments(arena, node.text);
+        out.typed_text = try typedTextSegments(owner, arena, node.text);
     }
     if (node.children.len > 0) {
         const children = try arena.alloc(MarkupNode, node.children.len);
         for (node.children, 0..) |child, index| {
-            children[index] = try canonicalizeNode(arena, child);
+            children[index] = try canonicalizeNode(owner, arena, child);
         }
         out.children = children;
     }
     return out;
 }
 
-fn typedValueOf(arena: std.mem.Allocator, attribute: MarkupAttr) error{OutOfMemory}!TypedAttrValue {
+fn typedValueOf(owner: ?expr.Policy, arena: std.mem.Allocator, attribute: MarkupAttr) error{OutOfMemory}!TypedAttrValue {
     var typed = classifyAttrValue(attribute.name, attribute.value);
     if (typed == .expression) {
-        typed.expression.tree = try parsedTree(arena, typed.expression.inner);
+        typed.expression.tree = try parsedTree(owner, arena, typed.expression.inner);
     }
     return typed;
 }
 
 /// Parse one expression's tree into the arena; null when it does not
 /// parse (the engines re-derive the diagnostic at the use site).
-fn parsedTree(arena: std.mem.Allocator, inner: []const u8) error{OutOfMemory}!?*const expr.ExprTree {
+fn parsedTree(owner: ?expr.Policy, arena: std.mem.Allocator, inner: []const u8) error{OutOfMemory}!?*const expr.ExprTree {
     const tree = try arena.create(expr.ExprTree);
     tree.* = .{};
     var diagnostic: expr.Diagnostic = .{};
-    if (!expr.parse(inner, tree, &diagnostic)) return null;
+    if (!expr.parseWithPolicy(owner, inner, tree, &diagnostic)) return null;
     return tree;
 }
 
 /// Split an interpolating text run into typed segments, mirroring the
 /// engines' scan byte for byte: literal chunks between braces, `{path}`
 /// bindings, full expressions, and the unterminated tail case.
-fn typedTextSegments(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]const TypedTextSegment {
+fn typedTextSegments(owner: ?expr.Policy, arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]const TypedTextSegment {
     var segments: std.ArrayListUnmanaged(TypedTextSegment) = .empty;
     var rest = text;
     while (std.mem.indexOfScalar(u8, rest, '{')) |open| {
@@ -979,7 +1007,7 @@ fn typedTextSegments(arena: std.mem.Allocator, text: []const u8) error{OutOfMemo
         if (isBindingPath(inner)) {
             try segments.append(arena, .{ .binding = inner });
         } else {
-            try segments.append(arena, .{ .expression = .{ .inner = inner, .tree = try parsedTree(arena, inner) } });
+            try segments.append(arena, .{ .expression = .{ .inner = inner, .tree = try parsedTree(owner, arena, inner) } });
         }
         rest = rest[close + 1 ..];
     }
@@ -3987,7 +4015,19 @@ pub fn resolveImports(
     loader: ImportLoader,
     diagnostic: *MarkupErrorInfo,
 ) ResolveError!MarkupDocument {
-    return resolveImportsFromRoot(arena, dirnamePath(root_name), root_name, root_source, loader, diagnostic);
+    return resolveImportsWithPolicy(null, arena, root_name, root_source, loader, diagnostic);
+}
+
+/// Runtime parser ownership is propagated through every imported document.
+pub fn resolveImportsWithPolicy(
+    owner: ?expr.Policy,
+    arena: std.mem.Allocator,
+    root_name: []const u8,
+    root_source: []const u8,
+    loader: ImportLoader,
+    diagnostic: *MarkupErrorInfo,
+) ResolveError!MarkupDocument {
+    return resolveImportsFromRootWithPolicy(owner, arena, dirnamePath(root_name), root_name, root_source, loader, diagnostic);
 }
 
 /// Resolve an import closure against an explicit markup root. App-wide
@@ -4004,7 +4044,21 @@ pub fn resolveImportsFromRoot(
     loader: ImportLoader,
     diagnostic: *MarkupErrorInfo,
 ) ResolveError!MarkupDocument {
+    return resolveImportsFromRootWithPolicy(null, arena, root_dir, root_name, root_source, loader, diagnostic);
+}
+
+pub fn resolveImportsFromRootWithPolicy(
+    owner: ?expr.Policy,
+    arena: std.mem.Allocator,
+    root_dir: []const u8,
+    root_name: []const u8,
+    root_source: []const u8,
+    loader: ImportLoader,
+    diagnostic: *MarkupErrorInfo,
+) ResolveError!MarkupDocument {
+    if (owner) |callback| return @import("ui_markup_imports.zig").resolve(callback, arena, root_dir, root_name, root_source, loader, diagnostic, stampSourcePath);
     var resolver = ImportResolver{
+        .parser_policy = owner,
         .arena = arena,
         .root_dir = root_dir,
         .loader = loader,
@@ -4015,6 +4069,7 @@ pub fn resolveImportsFromRoot(
 }
 
 const ImportResolver = struct {
+    parser_policy: ?expr.Policy = null,
     arena: std.mem.Allocator,
     root_dir: []const u8,
     loader: ImportLoader,
@@ -4038,7 +4093,7 @@ const ImportResolver = struct {
         self.chain[depth] = path;
         self.source_bytes += source.len;
         var parser = Parser.init(self.arena, source);
-        const document = parser.parse() catch |err| {
+        const document = parser.parseWithPolicy(self.parser_policy) catch |err| {
             if (err == error.MarkupSyntax) {
                 self.diagnostic.* = parser.diagnostic;
                 self.diagnostic.path = path;

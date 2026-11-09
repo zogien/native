@@ -3,6 +3,7 @@ const geometry = @import("geometry");
 const canvas = @import("canvas");
 const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
+const scroll_mutation = @import("scroll_mutation_runtime.zig");
 
 const unionRects = canvas_frame_helpers.unionRects;
 const CanvasWidgetScrollKeyboardTarget = canvas_widget_runtime.CanvasWidgetScrollKeyboardTarget;
@@ -211,6 +212,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         }
 
         pub fn applyCanvasWidgetScrollAxis(self: *RuntimeView, scroll_index: usize, comptime axis: canvas.ScrollAxis, delta: f32, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!?geometry.RectF {
+            if (self.widget_tokens.scroll_mutation_policy) |policy| return (try scroll_mutation.run(self, policy, .axis, scroll_index, axis, @intFromEnum(source), delta, 0, 0, allow_rubberband)).dirty;
             if (scroll_index >= self.widget_layout_node_count) return null;
             const scroll_node = self.widget_layout_nodes[scroll_index];
             if (!canvasWidgetScrollableKind(scroll_node.widget.kind)) return null;
@@ -280,6 +282,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         }
 
         fn applyCanvasWidgetTextareaScrollAxis(self: *RuntimeView, scroll_index: usize, comptime axis: canvas.ScrollAxis, delta: f32, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
+            if (self.widget_tokens.scroll_mutation_policy) |policy| return (try scroll_mutation.run(self, policy, .textarea, scroll_index, axis, @intFromEnum(source), delta, 0, 0, false)).dirty;
             if (scroll_index >= self.widget_layout_node_count) return null;
             const widget = self.widget_layout_nodes[scroll_index].widget;
             if (widget.kind != .textarea) return null;
@@ -323,6 +326,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         /// values pass through so the bounce is visible), the engine just
         /// follows. Engine velocity is zeroed; the driver owns physics.
         pub fn applyCanvasWidgetScrollDriverOffset(self: *RuntimeView, scroll_index: usize, offset_x: f32, offset_y: f32) anyerror!?geometry.RectF {
+            if (self.widget_tokens.scroll_mutation_policy) |policy| return (try scroll_mutation.run(self, policy, .driver, scroll_index, .vertical, 0, 0, offset_x, offset_y, false)).dirty;
             if (scroll_index >= self.widget_layout_node_count) return null;
             const scroll_node = self.widget_layout_nodes[scroll_index];
             if (scroll_node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(scroll_node.widget)) return null;
@@ -358,6 +362,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         }
 
         pub fn applyCanvasWidgetScrollKeyboardTarget(self: *RuntimeView, scroll_index: usize, target: CanvasWidgetScrollKeyboardTarget) anyerror!?geometry.RectF {
+            if (self.widget_tokens.scroll_mutation_policy) |policy| return (try scroll_mutation.run(self, policy, .keyboard, scroll_index, .vertical, if (target == .start) 0 else 1, 0, 0, 0, false)).dirty;
             if (scroll_index >= self.widget_layout_node_count) return null;
             const scroll_node = self.widget_layout_nodes[scroll_index];
             if (scroll_node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(scroll_node.widget)) return null;
@@ -534,6 +539,19 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         }
 
         pub fn stepCanvasWidgetKineticScroll(self: *RuntimeView, dt_ms: f32) anyerror!?geometry.RectF {
+            if (self.widget_tokens.scroll_mutation_policy) |policy| {
+                var dirty: ?geometry.RectF = null;
+                var changed = false;
+                const selection = @import("scroll_mutation_policy.zig").kineticSelection(policy, self.widget_layout_nodes[0..self.widget_layout_node_count]);
+                for (0..self.widget_layout_node_count) |index| {
+                    if (!selection.include[index]) continue;
+                    const result = try scroll_mutation.run(self, policy, .kinetic, index, .vertical, 0, dt_ms, 0, 0, false);
+                    dirty = unionOptionalRects(dirty, result.dirty);
+                    changed = changed or result.changed;
+                }
+                try scroll_mutation.finish(self, policy, changed);
+                return dirty;
+            }
             var dirty: ?geometry.RectF = null;
             var changed = false;
 
@@ -608,11 +626,12 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (scroll_index < self.widget_layout_node_count and self.widget_layout_nodes[scroll_index].widget.layout.virtualized) {
                 return @max(viewport.height, canvas.virtualWidgetScrollContentExtentWithTokens(self.widget_layout_nodes[scroll_index].widget, viewport.height, self.widget_tokens));
             }
-            return canvas_widget_runtime.canvasWidgetLayoutScrollContentExtent(
+            return canvas_widget_runtime.canvasWidgetLayoutScrollExtentsWithPolicy(
+                self.widget_tokens.scroll_tree_policy,
                 self.widget_layout_nodes[0..self.widget_layout_node_count],
                 scroll_index,
                 viewport,
-            );
+            ).dy;
         }
 
         /// The horizontal content extent: how far the region's mounted
@@ -633,11 +652,12 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 }
                 if (widget.layout.virtualized) return viewport.width;
             }
-            return canvas_widget_runtime.canvasWidgetLayoutScrollContentExtentX(
+            return canvas_widget_runtime.canvasWidgetLayoutScrollExtentsWithPolicy(
+                self.widget_tokens.scroll_tree_policy,
                 self.widget_layout_nodes[0..self.widget_layout_node_count],
                 scroll_index,
                 viewport,
-            );
+            ).dx;
         }
 
         /// Scrolled content carries its descendants — INCLUDING floating
@@ -647,23 +667,12 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         /// its anchor base is the region's own frame, which never moves
         /// when the content under it does.
         pub fn translateCanvasWidgetScrollDescendants(self: *RuntimeView, scroll_index: usize, offset: geometry.OffsetF) void {
-            const scroll_depth = self.widget_layout_nodes[scroll_index].depth;
-            var index = scroll_index + 1;
-            while (index < self.widget_layout_node_count and self.widget_layout_nodes[index].depth > scroll_depth) {
-                const node = self.widget_layout_nodes[index];
-                if (canvas.widgetIsRootRelativeModal(node.widget) or
-                    node.widget.layout.anchor != null and node.parent_index == scroll_index)
-                {
-                    const subtree_depth = node.depth;
-                    index += 1;
-                    while (index < self.widget_layout_node_count and self.widget_layout_nodes[index].depth > subtree_depth) : (index += 1) {}
-                    continue;
-                }
-                const translated = node.frame.translate(offset);
-                self.widget_layout_nodes[index].frame = translated;
-                self.widget_layout_nodes[index].widget.frame = translated;
-                index += 1;
-            }
+            canvas_widget_runtime.translateCanvasWidgetLayoutScrollDescendantsWithPolicy(
+                self.widget_tokens.scroll_tree_policy,
+                self.widget_layout_nodes[0..self.widget_layout_node_count],
+                scroll_index,
+                offset,
+            );
         }
 
         /// Keep the editable field's caret inside its visible span after

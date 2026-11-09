@@ -3,6 +3,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("chart_core");
 const decoder = @import("chart_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const exact = @import("component_construction_e2e_tests.zig").exact;
 const canvas = sdk.canvas;
 const Ui = canvas.Ui(core.Msg);
@@ -20,7 +21,7 @@ test "compiled app chart preserves complete trees geometry raw words dispatch ef
         var before_root = View.build(&reference, &model);
         stampReference(&before_root);
         const expected = try reference.finalize(before_root);
-        const root = decoder.build(&compiled, &model);
+        const root = CompiledView.build(&compiled, &model);
         core.rt.frameReset();
         const actual = try compiled.finalize(root);
         try exact(expected.root, actual.root);

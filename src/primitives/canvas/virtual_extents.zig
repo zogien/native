@@ -369,42 +369,58 @@ pub const VirtualExtentTable = struct {
     }
 
     fn syncCompiled(self: *VirtualExtentTable, policy: compiled.Policy, args: VirtualExtentSyncArgs) VirtualExtentSyncInfo {
-        // Refresh estimate capabilities before reading the previous total,
-        // matching the native reference's cached/full-partial-chunk behavior.
-        self.estimate_context = args.estimate_context;
-        self.estimate_fn = args.estimate_fn;
-        self.uniform_estimate = args.uniform_estimate;
-        const old_total = if (self.id == args.id and self.id != 0) self.totalExtent() else 0;
-        const plan = compiled.sync(policy, self, args, old_total);
-        if (plan.mode == 1) {
-            self.reset();
-            self.estimate_context = args.estimate_context;
-            self.estimate_fn = args.estimate_fn;
-            self.uniform_estimate = args.uniform_estimate;
-            self.id = args.id;
-            self.chunk_prefix[0] = 0;
+        const program = compiled.syncProgram(policy, self, args);
+        var old_total: f32 = 0;
+        var shift: f32 = 0;
+        for (0..program.count) |i| {
+            const action = program.instruction(i);
+            switch (action.kind) {
+                0 => self.reset(),
+                1 => {
+                    self.estimate_context = args.estimate_context;
+                    self.estimate_fn = args.estimate_fn;
+                    self.uniform_estimate = args.uniform_estimate;
+                },
+                2 => old_total = self.totalExtent(),
+                3 => {
+                    self.id = args.id;
+                    self.chunk_prefix[0] = 0;
+                },
+                4 => self.gap = program.gap,
+                5 => shift = self.offsetAtPhysical(action.argument),
+                6 => {
+                    self.index_base = args.index_base;
+                    self.item_count = args.item_count;
+                },
+                7 => compiled.corrections(policy, self, 4, self.anchor_physical, null, &.{}, 0, 0),
+                8 => self.rebuildChunkPrefixFrom(action.argument),
+                9 => compiled.corrections(policy, self, 5, self.anchor_physical, null, &.{}, 0, 0),
+                10 => self.pending_offset_delta = compiled.shift(policy, self.pending_offset_delta, shift, false),
+                11 => self.pending_offset_delta = compiled.shift(policy, self.pending_offset_delta, shift, true),
+                else => unreachable,
+            }
         }
-        self.gap = plan.gap;
-        // Head truncation uses the refreshed callback and NEW sanitized gap
-        // with the OLD count/base/cache, exactly as the reference does.
-        const removed_with_gap = if (plan.mode == 3) self.offsetAtPhysical(plan.shift) else 0;
-        if (plan.mode != 0) {
-            self.index_base = args.index_base;
-            self.item_count = args.item_count;
-            if (plan.mode == 2 or plan.mode == 3 or plan.mode == 5) compiled.corrections(policy, self, 4, self.anchor_physical, null, &.{}, 0, 0);
-            self.rebuildChunkPrefixFrom(plan.first_chunk);
+        return .{ .fresh = program.flags & 1 != 0, .appended = program.flags & 2 != 0, .prepended = program.flags & 4 != 0, .old_total_extent = old_total };
+    }
+
+    fn correctCompiled(self: *VirtualExtentTable, policy: compiled.Policy, mode: u8, anchor: usize, rendered_offset: ?f32, rows: []const VirtualExtentMeasurement) void {
+        const program = compiled.correctionProgram(policy, mode);
+        var facts = compiled.Query{ .prefix = 0, .gap = 0, .offset = 0 };
+        for (0..program.count) |i| {
+            const action = program.instruction(i);
+            switch (action.kind) {
+                12 => facts = compiled.query(policy, self, anchor, 0),
+                13 => compiled.corrections(policy, self, @intCast(action.argument), anchor, rendered_offset, rows, facts.prefix, facts.gap),
+                else => unreachable,
+            }
         }
-        if (self.measured_prefix_dirty) compiled.corrections(policy, self, 5, self.anchor_physical, null, &.{}, 0, 0);
-        if (plan.mode == 2 or plan.mode == 3) self.pending_offset_delta = compiled.shift(policy, self.pending_offset_delta, if (plan.mode == 2) self.offsetAtPhysical(plan.shift) else removed_with_gap, plan.mode == 3);
-        return .{ .fresh = plan.flags & 1 != 0, .appended = plan.flags & 2 != 0, .prepended = plan.flags & 4 != 0, .old_total_extent = plan.old_total };
     }
 
     /// One ordered measurement transfer per mounted window. Single-record
     /// methods remain available with the same native/compiled ownership.
     pub fn applyMeasurements(self: *VirtualExtentTable, anchor: usize, rendered_offset: ?f32, rows: []const VirtualExtentMeasurement) void {
         if (self.policy) |policy| {
-            const facts = compiled.query(policy, self, anchor, 0);
-            compiled.corrections(policy, self, 3, anchor, rendered_offset, rows, facts.prefix, facts.gap);
+            self.correctCompiled(policy, 3, anchor, rendered_offset, rows);
             return;
         }
         self.beginCorrections(anchor, rendered_offset);
@@ -442,8 +458,7 @@ pub const VirtualExtentTable = struct {
     pub fn beginCorrections(self: *VirtualExtentTable, anchor_physical: usize, rendered_offset: ?f32) void {
         std.debug.assert(!self.measured_prefix_dirty);
         if (self.policy) |policy| {
-            const facts = compiled.query(policy, self, anchor_physical, 0);
-            compiled.corrections(policy, self, 0, anchor_physical, rendered_offset, &.{}, facts.prefix, facts.gap);
+            self.correctCompiled(policy, 0, anchor_physical, rendered_offset, &.{});
             return;
         }
         self.anchor_physical = @min(anchor_physical, self.item_count);
@@ -458,7 +473,7 @@ pub const VirtualExtentTable = struct {
     pub fn recordMeasured(self: *VirtualExtentTable, physical: usize, extent: f32) void {
         if (physical >= self.item_count) return;
         if (self.policy) |policy| {
-            compiled.corrections(policy, self, 1, self.anchor_physical, null, &.{.{ .physical = physical, .extent = extent }}, 0, 0);
+            self.correctCompiled(policy, 1, self.anchor_physical, null, &.{.{ .physical = physical, .extent = extent }});
             return;
         }
         const logical = self.index_base + @as(u64, physical);
@@ -510,8 +525,7 @@ pub const VirtualExtentTable = struct {
     /// where the user sees it.
     pub fn endCorrections(self: *VirtualExtentTable) void {
         if (self.policy) |policy| {
-            const facts = compiled.query(policy, self, self.anchor_physical, 0);
-            compiled.corrections(policy, self, 2, self.anchor_physical, null, &.{}, facts.prefix, facts.gap);
+            self.correctCompiled(policy, 2, self.anchor_physical, null, &.{});
             return;
         }
         if (self.measured_prefix_dirty) self.rebuildMeasuredPrefix();

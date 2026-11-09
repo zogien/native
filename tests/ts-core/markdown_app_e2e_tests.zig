@@ -3,6 +3,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("markdown_core");
 const decoder = @import("markdown_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const wire = @import("corewire_rt");
 const parity = @import("effects_media_parity.zig");
 const canvas = sdk.canvas;
@@ -59,7 +60,7 @@ test "compiled app Markdown preserves complete generated trees geometry handlers
         var before_ui = Ui.init(arena.allocator());
         var after_ui = Ui.init(arena.allocator());
         const expected = try before_ui.finalize(reference(&before_ui, model));
-        const root = decoder.build(&after_ui, &model);
+        const root = CompiledView.build(&after_ui, &model);
         core.rt.frameReset();
         const actual = try after_ui.finalize(root);
         try parity.equal(expected, actual);

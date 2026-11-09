@@ -48,6 +48,10 @@ test("nested unions in helper arguments retain their decoder type imports", () =
 // Exact diagnostics and complete generated-file hashes captured from the
 // independent native implementation before replacing its admission rules.
 // Mirror hashes include the reviewed stateless-runtime API addition.
+// Mirror hashes also include file-scope host facts: `has_windows` and the
+// virtual extent capability, which the model types forward. Removing that
+// block and nesting the capability back in both model types recovers the
+// previous mirror pins exactly.
 // Facade hashes include exact u32 image identities, nonreplacing file
 // results and exact-range timers. Removing the reviewed timer encoder
 // addition recovers every previous complete facade pin. The byte-key
@@ -110,13 +114,15 @@ test("parameterized arena helpers and retained integer estimators keep the attes
     assert.match(mirror, /pub fn snapshotModel/);
     assert.match(mirror, /decoded_model = null/);
     assert.match(mirror, /const args_tuple = \.\{ p0, p1 \}/);
-    assert.match(mirror, /pub fn virtualExtentHelper/);
-    assert.match(mirror, /pub fn virtualExtentEstimate/);
+    assert.match(mirror, /\npub fn virtualExtentHelper\(name: \[\]const u8\) \?u32 \{/);
+    assert.match(mirror, /\npub fn virtualExtentEstimate\(context: \?\*const anyopaque, index: u64\) f32 \{/);
+    assert.equal(mirror.split("    pub const virtualExtentEstimate = shim_root.virtualExtentEstimate;").length, 3, "both model types forward the capability");
+    assert.match(mirror, /\npub const has_windows: bool = false;/);
     assert.match(mirror, /callHelper\(\[\]const Range, 0, args, arena\)/);
     assert.match(mirror, /@bitCast\(@as\(u64, @intCast\(index\)\)\)/);
     assert.match(facade, /rows\(nscfCommitted,/);
     assert.match(facade, /estimate\(nscfCommitted,/);
-    for (const name of ["virtualExtentHelper", "virtualExtentEstimate", "RuntimeModel", "RuntimeResult", "decoded_model", "restoreCommittedModel"]) {
+    for (const name of ["virtualExtentHelper", "virtualExtentEstimate", "shim_root", "has_windows", "RuntimeModel", "RuntimeResult", "decoded_model", "restoreCommittedModel"]) {
       const conflicting = structuredClone(contract);
       conflicting.model_helpers[1].name = name;
       conflicting.integer_slots.find(slot => slot.slot === "helpers.estimate.params[0]")!.slot = `helpers.${name}.params[0]`;
@@ -134,6 +140,22 @@ test("parameterized arena helpers and retained integer estimators keep the attes
       assert.ifError(fieldRefused.error); assert.equal(fieldRefused.status, 1, fieldRefused.stderr);
       assert.match(fieldRefused.stderr, /model field .*collides with a declaration the generated shim/);
       assert.equal(fs.readFileSync(path.join(dir, "mirror"), "utf8"), "retain");
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the windows helper fact is published at file scope", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-windows-fact-"));
+  try {
+    for (const declared of [false, true]) {
+      const contract = baseContract();
+      if (declared) contract.model_helpers.push({ name: "windows", params: [], returns: { kind: "f64" }, arena: false });
+      fs.writeFileSync(path.join(dir, "input.json"), JSON.stringify(contract, (key, value) => (key === "origin" || key === "member") && value === null ? undefined : value));
+      const result = spawnSync(corewire, ["--sidecar", "input.json", "--out", "mirror"], { cwd: dir, encoding: "utf8" });
+      assert.ifError(result.error); assert.equal(result.status, 0, result.stderr);
+      const mirror = fs.readFileSync(path.join(dir, "mirror"), "utf8");
+      assert.equal(mirror.split("\npub const has_windows: bool = " + declared + ";\n").length, 2);
+      assert.doesNotMatch(mirror, /shim_root/, "no virtual extent capability without numeric helpers or virtual views");
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

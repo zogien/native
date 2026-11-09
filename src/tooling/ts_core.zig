@@ -519,10 +519,15 @@ pub const ServicePackage = struct {
     content_hash: []const u8,
 };
 
+/// Where `native check` keeps the core contract it checks markup against.
+pub const check_contract_path = ".native/cache/check/core.contract.json";
+
 /// Run the TypeScript frontend in check-only mode on src/core.ts — and,
 /// through it, the core's whole import graph under src/ — and surface its NS
 /// diagnostics verbatim. Manifest-owned routes ride into the same typed Msg
-/// contract the watched dev host invokes on each of its own restarts.
+/// contract the watched dev host invokes on each of its own restarts. The
+/// core contract lands at `check_contract_path`, the same document the
+/// build compiles the views against.
 pub fn checkCore(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -547,6 +552,8 @@ pub fn checkCore(
     var persist_version_arg: ?[]u8 = null;
     defer if (persist_version_arg) |value| allocator.free(value);
     try argv.appendSlice(allocator, &.{ "node", runner_path, cli_path, "src/core.ts" });
+    try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(check_contract_path).?);
+    try argv.appendSlice(allocator, &.{ "--contract", check_contract_path, "--contract-entry", "src/core.ts" });
     for (capabilities) |capability| try argv.appendSlice(allocator, &.{ "--capability", capability });
     for (permissions) |permission| try argv.appendSlice(allocator, &.{ "--permission", permission });
     var service_package_args: std.ArrayList([]u8) = .empty;
@@ -602,6 +609,75 @@ pub fn checkCore(
     // failing pass without burying them.
     std.debug.print("native check: src/core.ts failed the @native-sdk/core checker (diagnostics above)\n", .{});
     return error.CoreCheckFailed;
+}
+
+/// Where `native dev` and the running app exchange markup reloads: the
+/// app's session announcement and the watcher's view updates. Local to one
+/// dev session; never staged, built from, or packaged.
+pub const view_reload_dir = ".native/dev";
+
+/// Start the markup watcher for a `native dev` run of a view-reload build
+/// (packages/core/src/view_reload_watch.ts). It snapshots the markup now,
+/// before the build reads it, and exits when its stdin closes. Clears any
+/// exchange left by an earlier session first.
+pub fn startViewReloadWatch(allocator: std.mem.Allocator, io: std.Io, base_env: *std.process.Environ.Map, framework_root: []const u8) !std.process.Child {
+    const watch_path = try transpilerPath(allocator, io, framework_root, "src/view_reload_watch.ts");
+    defer allocator.free(watch_path);
+    const runner_path = try tsRunnerPath(allocator, io, framework_root);
+    defer allocator.free(runner_path);
+    std.Io.Dir.cwd().deleteTree(io, view_reload_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, view_reload_dir);
+    return std.process.spawn(io, .{
+        .argv = &.{ "node", runner_path, watch_path, "--src", "src", "--dir", view_reload_dir },
+        .stdin = .pipe,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .environ_map = base_env,
+    }) catch return nodeMissing();
+}
+
+pub const ViewCheck = struct {
+    errors: usize = 0,
+    warnings: usize = 0,
+};
+
+/// Compile the app's markup against the contract `checkCore` wrote, with
+/// the same TypeScript view compiler and source closure the build uses,
+/// and report model state and Msg kinds no view uses. The checker prints
+/// its own diagnostics; the returned counts feed the summary and
+/// `--strict`.
+pub fn checkViews(allocator: std.mem.Allocator, io: std.Io, base_env: *std.process.Environ.Map, framework_root: []const u8) !ViewCheck {
+    const check_path = try transpilerPath(allocator, io, framework_root, "src/view_check.ts");
+    defer allocator.free(check_path);
+    const runner_path = try tsRunnerPath(allocator, io, framework_root);
+    defer allocator.free(runner_path);
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "node", runner_path, check_path, "--contract", check_contract_path, "--src", "src" },
+        .stdout_limit = .limited(4096),
+        .environ_map = base_env,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return nodeMissing(),
+        else => return err,
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    std.debug.print("{s}", .{result.stderr});
+    const exited_cleanly = switch (result.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (exited_cleanly) {
+        if (parseViewCheck(allocator, result.stdout)) |counts| return counts else |_| {}
+    }
+    std.debug.print("native check: the TypeScript view checker did not report a verdict (output above)\n", .{});
+    return error.ViewCheckFailed;
+}
+
+fn parseViewCheck(allocator: std.mem.Allocator, stdout: []const u8) !ViewCheck {
+    const line = std.mem.trim(u8, stdout, " \r\n");
+    const parsed = try std.json.parseFromSlice(ViewCheck, allocator, line, .{});
+    defer parsed.deinit();
+    return parsed.value;
 }
 
 /// The compiler-truth pass `checkCore` chains after the frontend: the
@@ -962,6 +1038,13 @@ pub fn selfHealEditorPackage(allocator: std.mem.Allocator, io: std.Io, framework
     if (outcome == .materialized) {
         std.debug.print("refreshed node_modules/@native-sdk/core (editor types for stock tsc; builds never read it)\n", .{});
     }
+}
+
+test "the view checker verdict parses from its one stdout line" {
+    const counts = try parseViewCheck(std.testing.allocator, "{\"errors\":0,\"warnings\":3}\n");
+    try std.testing.expectEqual(@as(usize, 0), counts.errors);
+    try std.testing.expectEqual(@as(usize, 3), counts.warnings);
+    try std.testing.expectError(error.UnexpectedEndOfInput, parseViewCheck(std.testing.allocator, ""));
 }
 
 test "core tree detection reads the tree, not config" {

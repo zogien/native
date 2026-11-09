@@ -5,6 +5,7 @@ const wire = @import("shim_rt.zig");
 const ref = @import("deck_reference_access.zig");
 const reference = ref.model;
 const decoder = @import("deck_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const parity = @import("effects_media_parity.zig");
 const Host = sdk.TsCoreHost(core);
 
@@ -329,7 +330,7 @@ fn viewParity(native: *const reference.Model, model: *const core.Model, playlist
     var a = ref.view.Ui.init(alloc);
     const expected = try a.finalize(if (playlist) ref.view.playlistView(&a, native) else ref.view.rootView(&a, native));
     var b = sdk.canvas.Ui(core.Msg).init(alloc);
-    const actual = try b.finalize(if (playlist) decoder.buildWindow(&b, model, "playlist") else decoder.build(&b, model));
+    const actual = try b.finalize(if (playlist) CompiledView.buildWindow(&b, model, "playlist") else CompiledView.build(&b, model));
     core.rt.frameReset();
     try parity.equal(expected.root, actual.root);
     try std.testing.expectEqual(expected.handlers.len, actual.handlers.len);
@@ -463,8 +464,8 @@ fn wholeOptions(comptime Bridge: type) Bridge.Options {
         .name = "deck", .scene = comptime sdk.app_manifest.shellConfigFrom(@import("deck_manifest")),
         .canvas_label = "deck-canvas", .fonts = &ref.main.app_fonts,
         .on_command = core.commandMsg,
-        .view = if (Bridge.Model == core.RuntimeModel) decoder.buildRuntime else decoder.build,
-        .window_view = if (Bridge.Model == core.RuntimeModel) decoder.buildRuntimeWindow else decoder.buildWindow,
+        .view = if (Bridge.Model == core.RuntimeModel) decoder.buildRuntime else CompiledView.build,
+        .window_view = if (Bridge.Model == core.RuntimeModel) decoder.buildRuntimeWindow else CompiledView.buildWindow,
     };
 }
 fn wholeImages(comptime Bridge: type) [8]Bridge.BootImage {

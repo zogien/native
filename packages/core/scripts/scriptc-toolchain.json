@@ -1,51 +1,51 @@
 {
   "schemaVersion": 1,
   "installationFormat": 2,
-  "version": "0.3.0",
+  "version": "0.3.2",
   "repository": "vercel-labs/scriptc",
   "releases": {
     "darwin-arm64": {
-      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.0/scriptc-0.3.0-darwin-arm64.tar.gz",
-      "bytes": 57604554,
-      "sha256": "3ef7a237e630422f2f2a8a161f39be7c7ab3a324adc4d9bb2c9a4623325e5033"
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-darwin-arm64.tar.gz",
+      "bytes": 61103733,
+      "sha256": "a915c1d5e1236b9b871e6b9f3eda4006486b147566af9a52b59aeeed09e2512f"
     },
     "darwin-x64": {
-      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.0/scriptc-0.3.0-darwin-x64.tar.gz",
-      "bytes": 60128591,
-      "sha256": "45183d459d77f04e22e856d7627f79bf5a72744c1bf071e2306c910795a0a2f5"
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-darwin-x64.tar.gz",
+      "bytes": 63256126,
+      "sha256": "dad6ff96e80473fdd612f5648c7697300860623cebdabb7a0ab02898f6c293b8"
     },
     "linux-arm64-gnu": {
-      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.0/scriptc-0.3.0-linux-arm64-gnu.tar.gz",
-      "bytes": 68560441,
-      "sha256": "6e323ab6a66f85775bd70cad3b3371af94e2da073228b6e89dc5fbb765a6b97a"
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-linux-arm64-gnu.tar.gz",
+      "bytes": 72765037,
+      "sha256": "33e380e0c7cff941eda57966b18c1be9f22da4fb5c6770f49f50af1b66868df4"
     },
     "linux-arm64-musl": {
-      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.0/scriptc-0.3.0-linux-arm64-musl.tar.gz",
-      "bytes": 60848580,
-      "sha256": "1f68720c9364ad921abb7f7ffb3c8470602bec9ea06d22dffcc00048ef5f8224"
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-linux-arm64-musl.tar.gz",
+      "bytes": 63971343,
+      "sha256": "9fc6e33cdd54962c7c3f53f009a13a9ac2c67ae139b1ae306d5e647cfe3911ad"
     },
     "linux-x64-gnu": {
-      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.0/scriptc-0.3.0-linux-x64-gnu.tar.gz",
-      "bytes": 71728344,
-      "sha256": "04db19777253792f68f1d4849de80cfb78033632c05fe2208500ba5dda2c3c94"
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-linux-x64-gnu.tar.gz",
+      "bytes": 75664254,
+      "sha256": "b6255ab2456b7afaee384cfca54f94b1d9aa5e7d8d5e343be6c558a9dcf4c13b"
     },
     "linux-x64-musl": {
-      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.0/scriptc-0.3.0-linux-x64-musl.tar.gz",
-      "bytes": 63968258,
-      "sha256": "560d7433ac36aa1d39284d1b9b0f1a5cb6859e9256288ad62d46b8352acdb75c"
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-linux-x64-musl.tar.gz",
+      "bytes": 66837074,
+      "sha256": "33790ceac5227eb3f5bae6f04e17baba3e2f95db5ddc05bdb39b310d4180bbc2"
     },
     "win32-x64-msvc": {
-      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.0/scriptc-0.3.0-win32-x64-msvc.tar.gz",
-      "bytes": 70137460,
-      "sha256": "f7b436755f33900bc97334f9cf701d4f5895f561ecc1b7d604541abcefaa5aac"
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-win32-x64-msvc.tar.gz",
+      "bytes": 74275594,
+      "sha256": "20af007e7b894ddcf22471c5f7b3a3e1a87f1c08e4e3d99baea3b7dd6e29285e"
     }
   },
   "packages": {
     "compiler": {
       "name": "@scriptc/compiler",
-      "version": "0.3.0",
-      "url": "https://registry.npmjs.org/@scriptc/compiler/-/compiler-0.3.0.tgz",
-      "integrity": "sha512-UUYcUF70jEFwv9p4c4mo/UiXXednss7w/sJpGk97j4iGvTmwOiPb/cxU517Vxumc080QVYxzp7uFoTbvQyyzhA=="
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/compiler/-/compiler-0.3.2.tgz",
+      "integrity": "sha512-mSBaJdJVRu1DvFAV/N06lilhwf8I0xiaW6+rRsvBn1ezG9uNXygVkyBD+WBVW2VGx7D6zd6KezzLiWI6QfHqEQ=="
     },
     "typescript": {
       "name": "typescript",
@@ -61,41 +61,41 @@
     },
     "runtime-ios-arm64": {
       "name": "@scriptc/runtime-ios-arm64",
-      "version": "0.3.0",
-      "url": "https://registry.npmjs.org/@scriptc/runtime-ios-arm64/-/runtime-ios-arm64-0.3.0.tgz",
-      "integrity": "sha512-bB3Mas5Jek+gy6jYy5k0iCh+f98V9JSofTYkyOT5pqFjHHjBmvAaOnaiW4AzGbepJAuGHooxbjRIq7fi5q4OIQ=="
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-ios-arm64/-/runtime-ios-arm64-0.3.2.tgz",
+      "integrity": "sha512-rRqnQLoGzi0uUmJXe7nPyTxRt0vBzauoPQJPixQKK+LWKJPk2YsU0GMYcbLfCXHkZ8uVMeVoP9qD1Wzhvn+2qQ=="
     },
     "runtime-ios-simulator-arm64": {
       "name": "@scriptc/runtime-ios-simulator-arm64",
-      "version": "0.3.0",
-      "url": "https://registry.npmjs.org/@scriptc/runtime-ios-simulator-arm64/-/runtime-ios-simulator-arm64-0.3.0.tgz",
-      "integrity": "sha512-gIF4+nH8vdMIXxP05vF2YJ171Z4dRomsSzE8twAMvdxv7fuLaf1Gb9ceErz0HAwAyCcgp6KXQcygbfOiHSN67A=="
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-ios-simulator-arm64/-/runtime-ios-simulator-arm64-0.3.2.tgz",
+      "integrity": "sha512-+mTut4yurH/gxU4aMEaxUU6IfDAj9WTf6mqSdDudqs/kPhZ7bhg3hqSQe05Mwg4fB5KHPpYX5E7Rbj5nBp27GQ=="
     },
     "runtime-android-arm64": {
       "name": "@scriptc/runtime-android-arm64",
-      "version": "0.3.0",
-      "url": "https://registry.npmjs.org/@scriptc/runtime-android-arm64/-/runtime-android-arm64-0.3.0.tgz",
-      "integrity": "sha512-4zXYJmGCoVR0munB87ab6rVnj8xjBcYMYGcPIOiFmNGdWGZarQbcT+ESc8mqNInzbewiBMIoQ1ZJCd1WaetYmw=="
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-android-arm64/-/runtime-android-arm64-0.3.2.tgz",
+      "integrity": "sha512-x2bKlP3Qiy3A93MVWpqdUlX+klIjWIZYUt5Ucys7SxXQuWWIkt9qRYojn0Ni9XtstJ8n/ZCMQVi5Mol5Q1A7+w=="
     },
     "runtime-wasm32-wasi": {
       "name": "@scriptc/runtime-wasm32-wasi",
-      "version": "0.3.0",
-      "url": "https://registry.npmjs.org/@scriptc/runtime-wasm32-wasi/-/runtime-wasm32-wasi-0.3.0.tgz",
-      "integrity": "sha512-e+LrqAu5Xtr+SvypXQb+rGRlRBbhun66fhFnK12QLJZi0Zex4gLsuyEJOBPTfycNa25MYBX5hvkUshs9UV/Rjg=="
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-wasm32-wasi/-/runtime-wasm32-wasi-0.3.2.tgz",
+      "integrity": "sha512-J4tqKQYWS8pbqZ1YhydCmcf6/4rRoi9TMUMV6xJE3k5gJk0/nsKx4pashMZowXBOQ4CZsoVchlzwyB1kTxdsDg=="
     },
     "types": {
       "name": "@scriptc/types",
-      "version": "0.3.0",
-      "url": "https://registry.npmjs.org/@scriptc/types/-/types-0.3.0.tgz",
-      "integrity": "sha512-mSQy5aATLy/Qz51xsL+7ORnq0EXKmpnMiXvlLoYGYhYxBCGh/Je4Ky96ejJE1z+v6jERagkKRlyWxK7zFyyuiQ=="
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/types/-/types-0.3.2.tgz",
+      "integrity": "sha512-cHoAZJOpJxfYDWcYsTIZvJGCtpQWbMqqO0Z+BBqk+dbkRtMrcRXiepPzN0vSsV9PMdAyBvYIdAIzdJ5X8jSLqA=="
     },
     "threads": {
       "name": "@scriptc/threads",
-      "version": "0.3.0",
-      "url": "https://registry.npmjs.org/@scriptc/threads/-/threads-0.3.0.tgz",
-      "integrity": "sha512-ls6cN03DlXNz5sY3OCGj7R1I2O/6U0Tg1Jwt33hk+0BfyGnNKi5xE69Ylkk/8x0kcTrIILP3YiPJWuFyF+IaAQ=="
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/threads/-/threads-0.3.2.tgz",
+      "integrity": "sha512-CE3cvQ7LfgxX+9F9elf27ThGD2rArCI9C2ticx6WvqPsBsHWUYH9e4xNQ+Ci0dTFdJgwp0lplE2TdlkiqdPIKQ=="
     }
   },
-  "runtimeAbi": 14,
+  "runtimeAbi": 20,
   "typescriptNativeVersion": "7.0.2"
 }

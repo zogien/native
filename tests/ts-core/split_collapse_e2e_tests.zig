@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("native_sdk");
 const core = @import("split_core");
 const decoder = @import("split_decoder");
+const CompiledView = decoder.ViewFor(core.Model);
 const reference = @import("split-collapse-reference/main.zig");
 const parity = @import("effects_media_parity.zig");
 const testing = std.testing;
@@ -112,7 +113,7 @@ fn viewParity(expected: *const reference.Model, markup: bool) !void {
     const before = try before_ui.finalize(if (markup) reference.CompiledSplitView.build(&before_ui, expected) else reference.rootView(&before_ui, expected));
     const Ui = canvas.Ui(core.Msg);
     var after_ui = Ui.init(arena.allocator());
-    const after = try after_ui.finalize(decoder.build(&after_ui, Host.model()));
+    const after = try after_ui.finalize(CompiledView.build(&after_ui, Host.model()));
     core.rt.frameReset();
     try parity.equal(before.root, after.root);
     try testing.expectEqual(before.handlers.len, after.handlers.len);
