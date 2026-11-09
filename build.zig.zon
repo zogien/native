@@ -20,7 +20,6 @@
         "assets",
         "build",
         "build.zig",
-        "build.package.zig",
         "build.zig.zon",
         "docs",
         "examples",

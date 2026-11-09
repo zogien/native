@@ -4,7 +4,8 @@
 // packing (npm prepack). The published @zogien/native-sdk carries everything
 // an app build graph needs from its `native_sdk` path dependency: src/
 // (the SDK modules), build/ + build.zig + build.zig.zon (the dependency's
-// consumer build entry, isolated from repository tests), app.zon, assets/ (files the
+// build script that `addApp` lives in), app.zon (the SDK's own manifest,
+// which its build script reads at configure time), assets/ (files the
 // build graph resolves from the dependency, e.g. the Windows application
 // manifest build/app.zig wires via dep.path), third_party/webview2/ and
 // third_party/sqlite/ (the vendored platform/storage sources build/app.zig
@@ -62,8 +63,10 @@ for (const dir of ['src', 'build', 'assets', 'skills', 'skill-data']) {
   }
 }
 
-// Production tools: corewire compiles TypeScript cores, and native-sdk builds
-// the native artifact used by a downstream app's packaging step.
+// corewire (tools/corewire): the contract-sidecar mirror/facade/profile
+// generator every TypeScript-core build compiles from the dependency.
+// native-sdk (tools/native-sdk): the CLI source of the `native` artifact a
+// downstream app's `zig build package` step builds from the dependency.
 {
   rmSync(join(projectRoot, 'tools'), { recursive: true, force: true });
   for (const dir of ['corewire', 'native-sdk']) {
@@ -90,11 +93,7 @@ for (const dir of ['src', 'build', 'assets', 'skills', 'skill-data']) {
   }
 }
 
-// The installed package has no repository tests or examples. Give it the
-// consumer entry instead of copying the repository's development build graph.
-copyFileSync(join(repoRoot, 'build.package.zig'), join(projectRoot, 'build.zig'));
-
-for (const file of ['build.zig.zon', 'app.zon', 'LICENSE']) {
+for (const file of ['build.zig', 'build.zig.zon', 'app.zon', 'LICENSE']) {
   const source = join(repoRoot, file);
   const target = join(projectRoot, file);
   rmSync(target, { force: true });

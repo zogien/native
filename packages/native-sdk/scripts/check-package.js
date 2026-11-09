@@ -78,7 +78,6 @@ try {
     '    inline for (.{"AppOptions", "addApp", "AppArtifacts", "addAppArtifacts", "MobileLibOptions", "addMobileLib"}) |name| {',
     '        if (!@hasDecl(sdk, name)) @compileError("Missing SDK build API: " ++ name);',
     '    }',
-    '    if (dep.builder.top_level_steps.contains("test")) @panic("Repository tests leaked into the consumer build");',
     '}',
     '',
   ].join('\n'));
