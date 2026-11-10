@@ -8,7 +8,6 @@ This fork is maintained for personal needs, including fixes and features. Curren
 
 ## Fork changes
 
-- Separate installed SDK builds from repository tests and examples.
 - Include the CLI sources and resolve platform packages under the `@zogien` scope.
 - Support TypeScript core staging when installed inside `node_modules`.
 

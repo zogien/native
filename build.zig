@@ -1,5 +1,4 @@
 const std = @import("std");
-const cli_build = @import("build/cli.zig");
 const web_engine_tool = @import("src/tooling/web_engine.zig");
 const test_shards = @import("build/test_shards.zig");
 
@@ -227,14 +226,13 @@ pub fn build(b: *std.Build) void {
         @panic("-Dweb-engine=chromium currently requires -Dplatform=macos");
     }
 
-    const cli_modules = cli_build.createModules(b, target, optimize);
-    const geometry_mod = cli_modules.geometry;
-    const assets_mod = cli_modules.assets;
-    const app_dirs_mod = cli_modules.app_dirs;
-    const trace_mod = cli_modules.trace;
-    const app_manifest_mod = cli_modules.app_manifest;
-    const diagnostics_mod = cli_modules.diagnostics;
-    const platform_info_mod = cli_modules.platform_info;
+    const geometry_mod = module(b, target, optimize, "src/primitives/geometry/root.zig");
+    const assets_mod = module(b, target, optimize, "src/primitives/assets/root.zig");
+    const app_dirs_mod = module(b, target, optimize, "src/primitives/app_dirs/root.zig");
+    const trace_mod = module(b, target, optimize, "src/primitives/trace/root.zig");
+    const app_manifest_mod = module(b, target, optimize, "src/primitives/app_manifest/root.zig");
+    const diagnostics_mod = module(b, target, optimize, "src/primitives/diagnostics/root.zig");
+    const platform_info_mod = module(b, target, optimize, "src/primitives/platform_info/root.zig");
     const json_mod = module(b, target, optimize, "src/primitives/json/root.zig");
     const app_runner_assets_mod = module(b, target, optimize, "src/app_runner/app_assets.zig");
     const windows_install_mod = module(b, target, optimize, "src/windows_install/tests.zig");
@@ -250,6 +248,9 @@ pub fn build(b: *std.Build) void {
         canvas_mod.linkFramework("CoreText", .{});
         canvas_mod.linkSystemLibrary("c", .{});
     }
+    const debug_mod = module(b, target, optimize, "src/debug/root.zig");
+    debug_mod.addImport("app_dirs", app_dirs_mod);
+    debug_mod.addImport("trace", trace_mod);
 
     const geometry_tests = testArtifact(b, geometry_mod);
     const assets_tests = testArtifact(b, assets_mod);
@@ -398,9 +399,47 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(embed_lib);
 
-    const automation_protocol_mod = cli_modules.automation_protocol;
+    const automation_protocol_mod = module(b, target, optimize, "src/automation/protocol.zig");
     const automation_protocol_tests = testArtifact(b, automation_protocol_mod);
-    const tooling_mod = cli_modules.tooling;
+    // The app-icon pipeline as a standalone module: tooling needs only
+    // the vector core + PNG codec slice of canvas, not the full canvas
+    // module (which links platform frameworks on macOS and would weigh
+    // down the cross-compiled CLI).
+    const app_icon_mod = module(b, target, optimize, "src/primitives/canvas/app_icon.zig");
+    app_icon_mod.addImport("geometry", geometry_mod);
+    // The iOS and Android host sources as embedded bytes: the tooling
+    // module writes and compiles them for `native dev|package --target
+    // ios|android`.
+    const ios_host_mod = module(b, target, optimize, "src/platform/ios/files.zig");
+    const android_host_mod = module(b, target, optimize, "src/platform/android/files.zig");
+    const tooling_mod = module(b, target, optimize, "src/tooling/root.zig");
+    const update_feed_mod = module(b, target, optimize, "src/updater/feed.zig");
+    tooling_mod.addImport("assets", assets_mod);
+    tooling_mod.addImport("app_dirs", app_dirs_mod);
+    tooling_mod.addImport("app_manifest", app_manifest_mod);
+    tooling_mod.addImport("diagnostics", diagnostics_mod);
+    tooling_mod.addImport("debug", debug_mod);
+    tooling_mod.addImport("platform_info", platform_info_mod);
+    tooling_mod.addImport("trace", trace_mod);
+    tooling_mod.addImport("app_icon", app_icon_mod);
+    tooling_mod.addImport("ios_host", ios_host_mod);
+    tooling_mod.addImport("android_host", android_host_mod);
+    tooling_mod.addImport("sqlite_engine", module(b, target, optimize, "src/runtime/sqlite_engine.zig"));
+    tooling_mod.addImport("update_feed", update_feed_mod);
+    const windows_launcher_x86_64 = windowsLauncher(b, .x86_64).getEmittedBin();
+    const windows_launcher_aarch64 = windowsLauncher(b, .aarch64).getEmittedBin();
+    tooling_mod.addImport("windows_install_config", module(b, target, optimize, "src/windows_install/config.zig"));
+    tooling_mod.addImport("windows_install_payload", module(b, target, optimize, "src/windows_install/payload.zig"));
+    // `native package --installer` writes the Windows setup program and
+    // launcher from these prebuilt copies, so packaging needs no compiler.
+    tooling_mod.addAnonymousImport("windows_launcher_x86_64", .{ .root_source_file = windows_launcher_x86_64 });
+    tooling_mod.addAnonymousImport("windows_launcher_aarch64", .{ .root_source_file = windows_launcher_aarch64 });
+    tooling_mod.addIncludePath(b.path("third_party/sqlite"));
+    tooling_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    tooling_mod.link_libc = true;
     const tooling_tests = testArtifact(b, tooling_mod);
 
     // Ejected-component identity proofs: a separate test module because
@@ -428,8 +467,9 @@ pub fn build(b: *std.Build) void {
     // core-ABI module).
     const ts_core_e2e_tests = tsCoreE2eArtifact(b, target, optimize, desktop_mod, tooling_mod);
 
-    const ui_markup_mod = cli_modules.ui_markup;
-    const markup_lsp_mod = cli_modules.markup_lsp;
+    const ui_markup_mod = module(b, target, optimize, "src/primitives/canvas/ui_markup.zig");
+    const markup_lsp_mod = module(b, target, optimize, "tools/native-sdk/markup_lsp.zig");
+    markup_lsp_mod.addImport("ui_markup", ui_markup_mod);
     const markup_lsp_tests = testArtifact(b, markup_lsp_mod);
 
     const automation_cli_mod = module(b, target, optimize, "tools/native-sdk/automation.zig");
@@ -464,8 +504,19 @@ pub fn build(b: *std.Build) void {
     // `native version` names the commit the binary was built from, so
     // binary/framework skew ("your native binary may be stale") is a
     // one-command check. Falls back to "unknown" outside a git checkout.
-    const build_commit = cli_build.buildCommit(b);
-    const cli_exe = cli_build.addExecutable(b, target, optimize, cli_modules, build_commit);
+    const cli_build_info = b.addOptions();
+    cli_build_info.addOption([]const u8, "build_commit", cliBuildCommit(b));
+
+    const cli_mod = module(b, target, optimize, "tools/native-sdk/main.zig");
+    cli_mod.addImport("tooling", tooling_mod);
+    cli_mod.addImport("automation_protocol", automation_protocol_mod);
+    cli_mod.addImport("ui_markup", ui_markup_mod);
+    cli_mod.addImport("markup_lsp", markup_lsp_mod);
+    cli_mod.addOptions("cli_build_info", cli_build_info);
+    const cli_exe = b.addExecutable(.{
+        .name = "native",
+        .root_module = cli_mod,
+    });
     b.installArtifact(cli_exe);
 
     // `zig build cli` builds and installs ONLY the CLI executable. The
@@ -476,15 +527,58 @@ pub fn build(b: *std.Build) void {
     const cli_step = b.step("cli", "Build only the native CLI executable (cross-compile friendly)");
     cli_step.dependOn(&b.addInstallArtifact(cli_exe, .{}).step);
 
-    const host_cli_modules = cli_build.createModules(b, host_target, optimize);
-    const host_assets_mod = host_cli_modules.assets;
-    const host_app_dirs_mod = host_cli_modules.app_dirs;
-    const host_app_manifest_mod = host_cli_modules.app_manifest;
-    const host_diagnostics_mod = host_cli_modules.diagnostics;
-    const host_platform_info_mod = host_cli_modules.platform_info;
-    const host_trace_mod = host_cli_modules.trace;
-    const host_geometry_mod = host_cli_modules.geometry;
-    const host_cli_exe = cli_build.addExecutable(b, host_target, optimize, host_cli_modules, build_commit);
+    const host_assets_mod = module(b, host_target, optimize, "src/primitives/assets/root.zig");
+    const host_app_dirs_mod = module(b, host_target, optimize, "src/primitives/app_dirs/root.zig");
+    const host_app_manifest_mod = module(b, host_target, optimize, "src/primitives/app_manifest/root.zig");
+    const host_diagnostics_mod = module(b, host_target, optimize, "src/primitives/diagnostics/root.zig");
+    const host_platform_info_mod = module(b, host_target, optimize, "src/primitives/platform_info/root.zig");
+    const host_trace_mod = module(b, host_target, optimize, "src/primitives/trace/root.zig");
+    const host_debug_mod = module(b, host_target, optimize, "src/debug/root.zig");
+    host_debug_mod.addImport("app_dirs", host_app_dirs_mod);
+    host_debug_mod.addImport("trace", host_trace_mod);
+    const host_automation_protocol_mod = module(b, host_target, optimize, "src/automation/protocol.zig");
+    const host_geometry_mod = module(b, host_target, optimize, "src/primitives/geometry/root.zig");
+    const host_app_icon_mod = module(b, host_target, optimize, "src/primitives/canvas/app_icon.zig");
+    host_app_icon_mod.addImport("geometry", host_geometry_mod);
+    const host_ios_host_mod = module(b, host_target, optimize, "src/platform/ios/files.zig");
+    const host_android_host_mod = module(b, host_target, optimize, "src/platform/android/files.zig");
+    const host_tooling_mod = module(b, host_target, optimize, "src/tooling/root.zig");
+    const host_update_feed_mod = module(b, host_target, optimize, "src/updater/feed.zig");
+    host_tooling_mod.addImport("assets", host_assets_mod);
+    host_tooling_mod.addImport("app_dirs", host_app_dirs_mod);
+    host_tooling_mod.addImport("app_manifest", host_app_manifest_mod);
+    host_tooling_mod.addImport("diagnostics", host_diagnostics_mod);
+    host_tooling_mod.addImport("debug", host_debug_mod);
+    host_tooling_mod.addImport("platform_info", host_platform_info_mod);
+    host_tooling_mod.addImport("trace", host_trace_mod);
+    host_tooling_mod.addImport("app_icon", host_app_icon_mod);
+    host_tooling_mod.addImport("ios_host", host_ios_host_mod);
+    host_tooling_mod.addImport("android_host", host_android_host_mod);
+    host_tooling_mod.addImport("sqlite_engine", module(b, host_target, optimize, "src/runtime/sqlite_engine.zig"));
+    host_tooling_mod.addImport("update_feed", host_update_feed_mod);
+    host_tooling_mod.addImport("windows_install_config", module(b, host_target, optimize, "src/windows_install/config.zig"));
+    host_tooling_mod.addImport("windows_install_payload", module(b, host_target, optimize, "src/windows_install/payload.zig"));
+    host_tooling_mod.addAnonymousImport("windows_launcher_x86_64", .{ .root_source_file = windows_launcher_x86_64 });
+    host_tooling_mod.addAnonymousImport("windows_launcher_aarch64", .{ .root_source_file = windows_launcher_aarch64 });
+    host_tooling_mod.addIncludePath(b.path("third_party/sqlite"));
+    host_tooling_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    host_tooling_mod.link_libc = true;
+    const host_ui_markup_mod = module(b, host_target, optimize, "src/primitives/canvas/ui_markup.zig");
+    const host_markup_lsp_mod = module(b, host_target, optimize, "tools/native-sdk/markup_lsp.zig");
+    host_markup_lsp_mod.addImport("ui_markup", host_ui_markup_mod);
+    const host_cli_mod = module(b, host_target, optimize, "tools/native-sdk/main.zig");
+    host_cli_mod.addImport("tooling", host_tooling_mod);
+    host_cli_mod.addImport("automation_protocol", host_automation_protocol_mod);
+    host_cli_mod.addImport("ui_markup", host_ui_markup_mod);
+    host_cli_mod.addImport("markup_lsp", host_markup_lsp_mod);
+    host_cli_mod.addOptions("cli_build_info", cli_build_info);
+    const host_cli_exe = b.addExecutable(.{
+        .name = "native",
+        .root_module = host_cli_mod,
+    });
     // Docs component-preview generator: renders the built-in component
     // catalog offscreen through the deterministic reference renderer and
     // writes theme-aware webp pairs plus the markup vocabulary JSON into
@@ -4411,7 +4505,18 @@ pub fn build(b: *std.Build) void {
     test_shards.partition(test_step, &core_test_shards);
 }
 
-const sqliteCompileFlags = cli_build.sqliteCompileFlags;
+fn sqliteCompileFlags() []const []const u8 {
+    return &.{
+        "-DSQLITE_THREADSAFE=2",
+        "-DSQLITE_OMIT_LOAD_EXTENSION",
+        "-DSQLITE_DQS=0",
+        "-DSQLITE_ENABLE_FTS5",
+        "-DSQLITE_ENABLE_JSON1",
+        "-DSQLITE_ENABLE_UPDATE_HOOK",
+        "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+        "-DSQLITE_DEFAULT_MEMSTATUS=0",
+    };
+}
 
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {
     return b.createModule(.{
@@ -4497,6 +4602,33 @@ const SourceWithSuffix = struct {
 /// examples own the enabled path's test coverage.
 fn terminalVtModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return module(b, target, optimize, "src/runtime/terminal_vt_stub.zig");
+}
+
+/// The short commit hash of the framework checkout the CLI is built
+/// from, for `native version` staleness checks. "unknown" when
+/// git is unavailable (e.g. building from a package tarball).
+fn cliBuildCommit(b: *std.Build) []const u8 {
+    var code: u8 = undefined;
+    const output = b.runAllowFail(&.{ "git", "rev-parse", "--short", "HEAD" }, &code, .ignore) catch return "unknown";
+    const trimmed = std.mem.trim(u8, output, " \n\r\t");
+    if (trimmed.len == 0) return "unknown";
+    return trimmed;
+}
+
+/// The Windows setup program, launcher and uninstaller of installed apps
+/// (src/windows_install), built for one Windows architecture.
+fn windowsLauncher(b: *std.Build, arch: std.Target.Cpu.Arch) *std.Build.Step.Compile {
+    const launcher = b.addExecutable(.{
+        .name = "native-launcher",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/windows_install/main.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .windows }),
+            .optimize = .ReleaseSmall,
+            .strip = true,
+        }),
+    });
+    launcher.subsystem = .windows;
+    return launcher;
 }
 
 fn testArtifact(b: *std.Build, mod: *std.Build.Module) *std.Build.Step.Compile {
