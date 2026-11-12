@@ -91,7 +91,7 @@ const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
 defer harness.destroy(std.testing.allocator);
 ```
 
-The harness embeds the multi-megabyte `Runtime`, so create it on the heap (`create`/`destroy`) — stack instances overflow test threads, and the same rule applies to `UiApp` instances in tests (`App.create`/`destroy`). The harness provides a pre-configured runtime with `NullPlatform` and a trace sink that captures records in memory; handler and update errors propagate (fail the test) instead of degrading. Use it to test runtime integration: lifecycle events, command dispatch, and full `UiApp` frames.
+The harness embeds the `Runtime` and its null platform, a few megabytes together, so create it on the heap (`create`/`destroy`) — stack instances overflow test threads, and the same rule applies to `UiApp` instances in tests (`App.create`/`destroy`). The harness provides a pre-configured runtime with `NullPlatform` and a trace sink that captures records in memory; handler and update errors propagate (fail the test) instead of degrading. Use it to test runtime integration: lifecycle events, command dispatch, and full `UiApp` frames.
 
 `TestHarness` is the same mechanism used by the framework's own test suite to verify bridge policy enforcement, window management, and lifecycle correctness.
 

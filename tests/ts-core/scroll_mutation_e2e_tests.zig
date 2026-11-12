@@ -30,6 +30,11 @@ const Observation = struct {
 const View = struct {
     const M = methods.RuntimeViewCanvasWidgetScroll(@This());
     pub const applyCanvasWidgetScrollAxis = M.applyCanvasWidgetScrollAxis;
+    /// The method bodies reach view buffers through `canvasStorage()`;
+    /// this mirror keeps its buffers inline, so it is its own storage.
+    pub fn canvasStorage(self: *const @This()) *@This() {
+        return @constCast(self);
+    }
     widget_layout_nodes: [4]c.WidgetLayoutNode,
     widget_layout_node_count: usize = 4,
     widget_scroll_states: [4]c.ScrollState = @splat(.{ .offset_y = 23.125, .offset_x = 17.25, .velocity_y = -31.125, .velocity_x = 21.25, .viewport_extent_y = 80, .viewport_extent_x = 100, .content_extent_y = 700, .content_extent_x = 800 }),
@@ -279,9 +284,9 @@ test "compiled scroll mutation actual runtime retains complete semantics events 
         var nodes = View.init().widget_layout_nodes;
         nodes[0].widget.scroll_axes = .both;
         nodes[2].widget.scroll_axes = .horizontal;
-        @memcpy(v.widget_layout_nodes[0..nodes.len], &nodes);
+        @memcpy(v.canvasStorage().widget_layout_nodes[0..nodes.len], &nodes);
         v.widget_layout_node_count = nodes.len;
-        @memcpy(v.widget_scroll_states[0..nodes.len], &View.init().widget_scroll_states);
+        @memcpy(v.canvasStorage().widget_scroll_states[0..nodes.len], &View.init().widget_scroll_states);
         if (i == 1) v.widget_tokens.scroll_mutation_policy = observed;
         try v.refreshCanvasWidgetSemantics();
     }
@@ -306,8 +311,8 @@ test "compiled scroll mutation actual runtime retains complete semantics events 
         };
         try exact(left, right);
         try exact(x.widgetLayoutTree().nodes, y.widgetLayoutTree().nodes);
-        try exact(x.widget_semantics_nodes[0..x.widget_semantics_node_count], y.widget_semantics_nodes[0..y.widget_semantics_node_count]);
-        try exact(x.widget_scroll_states[0..4].*, y.widget_scroll_states[0..4].*);
+        try exact(x.canvasStorage().widget_semantics_nodes[0..x.widget_semantics_node_count], y.canvasStorage().widget_semantics_nodes[0..y.widget_semantics_node_count]);
+        try exact(x.canvasStorage().widget_scroll_states[0..4].*, y.canvasStorage().widget_scroll_states[0..4].*);
         try exact(x.widget_scroll_event_ids[0..x.widget_scroll_event_count], y.widget_scroll_event_ids[0..y.widget_scroll_event_count]);
         try exact(x.widget_revision, y.widget_revision);
     }

@@ -24,6 +24,10 @@ const canvasVirtualRange = widget_bridge.canvasVirtualRange;
 pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
     return struct {
         pub fn automationSnapshot(self: *Runtime, title: []const u8) automation.snapshot.Input {
+            // Callers that can report failure allocate the buffers first;
+            // this entry point cannot fail, so a refusal here is fatal,
+            // like the frame planner's per-thread scratch.
+            self.ensureAutomationStorage() catch @panic("out of memory allocating the automation snapshot buffers");
             const count = @min(self.window_count, self.automation_windows.len);
             if (count == 0) {
                 self.automation_windows[0] = .{ .id = 1, .title = title, .bounds = geometry.RectF.fromSize(self.surface.size), .focused = true };
@@ -57,16 +61,16 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .bounds = window.info.frame,
                     .focused = window.info.focused,
                 };
-                if (view_count < self.automation_views.len) {
-                    const views = self.listViews(window.info.id, self.automation_views[view_count..]);
+                if (view_count < self.automationStorage().automation_views.len) {
+                    const views = self.listViews(window.info.id, self.automationStorage().automation_views[view_count..]);
                     view_count += views.len;
                 }
                 appendAutomationWidgets(self, window.info.id, &widget_count, &menu_item_count);
             }
             return .{
                 .windows = self.automation_windows[0..count],
-                .views = self.automation_views[0..view_count],
-                .widgets = self.automation_widgets[0..widget_count],
+                .views = self.automationStorage().automation_views[0..view_count],
+                .widgets = self.automationStorage().automation_widgets[0..widget_count],
                 .commands = self.options.commands,
                 .menus = self.options.menus,
                 .diagnostics = automationDiagnostics(self),
@@ -92,9 +96,9 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             var item_offset: usize = 0;
             for (self.status_items) |status_item| {
                 if (!status_item.active or tray_count >= self.automation_trays.len) continue;
-                const count = @min(status_item.item_count, self.automation_tray_items.len - item_offset);
-                for (status_item.items[0..count], 0..) |item, index| {
-                    self.automation_tray_items[item_offset + index] = .{
+                const count = @min(status_item.item_count, self.automationStorage().automation_tray_items.len - item_offset);
+                for (status_item.trayItems()[0..count], 0..) |item, index| {
+                    self.automationStorage().automation_tray_items[item_offset + index] = .{
                         .id = item.id,
                         .label = item.label,
                         .command = item.command,
@@ -113,7 +117,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .id = status_item.id,
                     .visible = status_item.visible,
                     .title = status_item.title,
-                    .items = self.automation_tray_items[item_offset .. item_offset + count],
+                    .items = self.automationStorage().automation_tray_items[item_offset .. item_offset + count],
                 };
                 tray_count += 1;
                 item_offset += count;
@@ -213,8 +217,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 const layout = view.widgetLayoutTree();
                 const semantics = view.widgetSemantics();
                 for (semantics) |node| {
-                    if (widget_count.* >= self.automation_widgets.len) return;
-                    self.automation_widgets[widget_count.*] = .{
+                    if (widget_count.* >= self.automationStorage().automation_widgets.len) return;
+                    self.automationStorage().automation_widgets[widget_count.*] = .{
                         .window_id = view.window_id,
                         .view_label = view.label,
                         .id = node.id,
@@ -271,8 +275,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             const declared = node.widget.context_menu;
             if (declared.len == 0) return &.{};
             const start = menu_item_count.*;
-            const count = @min(declared.len, self.automation_widget_menu_items.len - start);
-            for (declared[0..count], self.automation_widget_menu_items[start .. start + count]) |item, *slot| {
+            const count = @min(declared.len, self.automationStorage().automation_widget_menu_items.len - start);
+            for (declared[0..count], self.automationStorage().automation_widget_menu_items[start .. start + count]) |item, *slot| {
                 slot.* = .{
                     .label = item.label,
                     .enabled = item.enabled,
@@ -280,7 +284,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 };
             }
             menu_item_count.* = start + count;
-            return self.automation_widget_menu_items[start .. start + count];
+            return self.automationStorage().automation_widget_menu_items[start .. start + count];
         }
 
         pub fn frameDiagnostics(self: *Runtime) FrameDiagnostics {

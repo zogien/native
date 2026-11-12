@@ -10,6 +10,7 @@ const platform = @import("../platform/root.zig");
 
 const WindowSourcePolicy = runtime_state.WindowSourcePolicy;
 const copySourceInto = runtime_state.copySourceInto;
+const RuntimeSourceStorage = runtime_state.RuntimeSourceStorage;
 const RuntimeShellLayout = shell_layout.RuntimeShellLayout;
 const combinedViewportInsets = shell_layout.combinedViewportInsets;
 
@@ -149,6 +150,12 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             if (label.len == 0) return error.InvalidWindowOptions;
             const index = self.window_count;
             self.windows[index] = .{};
+            // A refusal after the source storage was allocated must not
+            // leave it on a slot the next reservation overwrites.
+            errdefer if (self.windows[index].source_storage) |storage| {
+                self.owned_allocator.destroy(storage);
+                self.windows[index].source_storage = null;
+            };
             const copied_label = try copyInto(&self.windows[index].label_storage, label);
             const copied_title = try copyInto(&self.windows[index].title_storage, title);
             self.windows[index].info = .{
@@ -175,16 +182,27 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         pub fn removeWindowAt(self: *Runtime, index: usize) void {
             if (index >= self.window_count) return;
             Self.removeShellLayoutForWindow(self, self.windows[index].info.id);
+            if (self.windows[index].source_storage) |storage| self.owned_allocator.destroy(storage);
             var cursor = index;
             while (cursor + 1 < self.window_count) : (cursor += 1) {
                 self.windows[cursor] = self.windows[cursor + 1];
                 self.windows[cursor].rebindStorage();
             }
             self.window_count -= 1;
+            // The vacated tail slot forgets the source storage its last
+            // occupant took along.
+            self.windows[self.window_count].source_storage = null;
         }
 
+        /// Copy `source` into the window's source storage, allocating that
+        /// storage the first time the window takes a source.
         pub fn copySource(self: *Runtime, index: usize, source: platform.WebViewSource) !platform.WebViewSource {
-            return copySourceInto(&self.windows[index].source_storage, source);
+            const storage = self.windows[index].source_storage orelse created: {
+                const created = try self.owned_allocator.create(RuntimeSourceStorage);
+                self.windows[index].source_storage = created;
+                break :created created;
+            };
+            return copySourceInto(storage, source);
         }
 
         pub fn copyLoadedSource(self: *Runtime, source: platform.WebViewSource) !platform.WebViewSource {
@@ -289,9 +307,11 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
                 const program = c.plan(policy, request[0 .. 64 + self.shell_layout_count * 8]);
                 try program.admit();
                 const slot = program.selected.?;
-                if (program.decisions != 0) self.shell_layouts[slot].window_id = window_id;
+                if (program.decisions != 0) {
+                    std.debug.assert(slot == self.shell_layout_count);
+                    return Self.appendShellLayout(self, window_id, views);
+                }
                 try self.shell_layouts[slot].copyViews(views);
-                if (program.decisions != 0) self.shell_layout_count += 1;
                 return;
             }
             if (Self.findShellLayoutIndex(self, window_id)) |index| {
@@ -299,14 +319,24 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
                 return;
             }
             if (self.shell_layout_count >= self.shell_layouts.len) return error.WindowLimitReached;
-            self.shell_layouts[self.shell_layout_count].window_id = window_id;
-            try self.shell_layouts[self.shell_layout_count].copyViews(views);
+            try Self.appendShellLayout(self, window_id, views);
+        }
+
+        /// Bind a window's first shell layout: allocated from the runtime's
+        /// `owned_allocator` here, freed again if the copy is refused, and
+        /// freed for good when the window's layout is removed.
+        fn appendShellLayout(self: *Runtime, window_id: platform.WindowId, views: []const app_manifest.ShellView) !void {
+            const layout = try self.owned_allocator.create(RuntimeShellLayout);
+            errdefer self.owned_allocator.destroy(layout);
+            layout.* = .{ .window_id = window_id };
+            try layout.copyViews(views);
+            self.shell_layouts[self.shell_layout_count] = layout;
             self.shell_layout_count += 1;
         }
 
         pub fn shellLayoutForWindow(self: *const Runtime, window_id: platform.WindowId) ?*const RuntimeShellLayout {
             const index = Self.findShellLayoutIndex(self, window_id) orelse return null;
-            return &self.shell_layouts[index];
+            return self.shell_layouts[index];
         }
 
         pub fn findShellLayoutIndex(self: *const Runtime, window_id: platform.WindowId) ?usize {
@@ -318,10 +348,10 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
 
         pub fn removeShellLayoutForWindow(self: *Runtime, window_id: platform.WindowId) void {
             const index = Self.findShellLayoutIndex(self, window_id) orelse return;
+            self.owned_allocator.destroy(self.shell_layouts[index]);
             var cursor = index;
             while (cursor + 1 < self.shell_layout_count) : (cursor += 1) {
                 self.shell_layouts[cursor] = self.shell_layouts[cursor + 1];
-                self.shell_layouts[cursor].rebindStorage();
             }
             self.shell_layout_count -= 1;
         }

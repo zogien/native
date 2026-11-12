@@ -1130,7 +1130,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             self.views[view_index].widget_resize_event_count = 0;
             for (pending_ids[0..pending_count]) |id| {
                 const node_index = self.views[view_index].canvasWidgetNodeIndexById(id) orelse continue;
-                const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+                const widget = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
                 if (widget.kind != .split) continue;
                 const fraction = if (self.views[view_index].findCanvasWidgetLayoutTween(id)) |tween| tween.spec.to else widget.value;
                 try self.dispatchEvent(app, .{ .canvas_widget_resize = .{
@@ -1161,7 +1161,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             self.views[view_index].widget_change_event_count = 0;
             for (pending_ids[0..pending_count]) |id| {
                 const node_index = self.views[view_index].canvasWidgetNodeIndexById(id) orelse continue;
-                const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+                const widget = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
                 if (widget.kind != .slider) continue;
                 try self.dispatchEvent(app, .{ .canvas_widget_change = .{
                     .window_id = self.views[view_index].window_id,

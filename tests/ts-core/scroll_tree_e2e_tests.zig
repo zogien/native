@@ -134,15 +134,15 @@ test "compiled scroll tree live consumers and engine clamps preserve complete fr
         original[2].widget.layout.anchor = .{};
         for ([_]*Harness{ left, right }) |h| {
             const view = &h.runtime.views[0];
-            @memcpy(view.widget_layout_nodes[0..original.len], &original);
+            @memcpy(view.canvasStorage().widget_layout_nodes[0..original.len], &original);
             view.widget_layout_node_count = original.len;
-            for (view.widget_scroll_states[0..original.len]) |*state| state.* = .{ .offset_y = 10000, .offset_x = 10000, .velocity_y = -23.125, .velocity_x = 31.25 };
-            try r.clampCanvasWidgetLayoutScrollOffsetsAfterReconcile(view.widget_layout_nodes[0..original.len], view.widget_scroll_states[0..original.len], null, view.widget_tokens);
+            for (view.canvasStorage().widget_scroll_states[0..original.len]) |*state| state.* = .{ .offset_y = 10000, .offset_x = 10000, .velocity_y = -23.125, .velocity_x = 31.25 };
+            try r.clampCanvasWidgetLayoutScrollOffsetsAfterReconcile(view.canvasStorage().widget_layout_nodes[0..original.len], view.canvasStorage().widget_scroll_states[0..original.len], null, view.widget_tokens);
         }
         const a = &left.runtime.views[0];
         const b = &right.runtime.views[0];
         try exact(a.widgetLayoutTree().nodes, b.widgetLayoutTree().nodes);
-        try exact(@as([]const c.ScrollState, a.widget_scroll_states[0..original.len]), @as([]const c.ScrollState, b.widget_scroll_states[0..original.len]));
+        try exact(@as([]const c.ScrollState, a.canvasStorage().widget_scroll_states[0..original.len]), @as([]const c.ScrollState, b.canvasStorage().widget_scroll_states[0..original.len]));
         try exact(a.canvasWidgetScrollContentExtent(0, .init(0, 0, 100, 100)), b.canvasWidgetScrollContentExtent(0, .init(0, 0, 100, 100)));
         try exact(a.canvasWidgetScrollContentExtentX(0, .init(0, 0, 100, 100)), b.canvasWidgetScrollContentExtentX(0, .init(0, 0, 100, 100)));
         a.translateCanvasWidgetScrollDescendants(0, .{ .dx = -21, .dy = 31 });

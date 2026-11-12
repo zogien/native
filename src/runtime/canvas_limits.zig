@@ -12,10 +12,11 @@ const canvas = @import("canvas");
 // the frame-content budgets doubled (commands 1024 -> 2048, glyphs
 // 4096 -> 8192, text 16 KiB -> 32 KiB: visible content per frame grows with
 // surface density, not with the retained-node cap — a full-height monospace
-// diff pane is ~7200 glyphs). Memory cost is fixed-capacity address space
-// in the Runtime (in-place constructed, large fields left uninitialized),
-// measured at 61.3 MiB -> 119.3 MiB (RuntimeView 1.12 MiB -> 2.65 MiB x 32
-// view slots); pages are only touched as views use their capacity.
+// diff pane is ~7200 glyphs). Memory cost is per gpu-surface view: these
+// budgets size the view's `ViewCanvasStorage` (view.zig), allocated when
+// the view is created and freed when it is removed, so a runtime pays for
+// the canvas views it has, not for every view slot (the raise took that
+// block from 1.12 MiB to 2.65 MiB).
 pub const max_canvas_commands_per_view: usize = 2048;
 pub const max_canvas_gradient_stops_per_view: usize = 64;
 // Raised 128 -> 2048 with icon-in-button and the 41-icon registry: vector
@@ -25,11 +26,9 @@ pub const max_canvas_gradient_stops_per_view: usize = 64;
 // ~800 elements; the notes example hit the old 128 the moment its folder
 // rows wore icons. 2048 also gives path-drawn charts real room (three
 // 60-point polylines ~ 360 elements — the system-monitor sparklines had
-// to become bars under the old cap). Memory is fixed-capacity address
-// space: one PathElement is 28 B, so 2048 x 28 B = 56 KiB per view for
-// each of the two per-view arrays (retained canvas + display-list
-// scratch), x 32 view slots ~ 3.6 MiB total, pages touched only as views
-// draw paths.
+// to become bars under the old cap). Memory: one PathElement is 28 B, so
+// 2048 x 28 B = 56 KiB per canvas view for each of the two per-view
+// arrays (retained canvas + display-list scratch).
 pub const max_canvas_path_elements_per_view: usize = 2048;
 pub const max_canvas_glyphs_per_view: usize = 8192;
 pub const max_canvas_text_bytes_per_view: usize = 32768;
@@ -42,9 +41,8 @@ pub const max_canvas_text_bytes_per_view: usize = 32768;
 // (NATIVE_SDK_PACKET_RETAINED_COMMAND_CAP in appkit_host.m); a frame past
 // either side's cap presents FULL (and the host drops its retained
 // state), never a partial dictionary. Engine memory is two u64 arrays:
-// 16 B x 2048 = 32 KiB per view x 32 view slots = 1 MiB fixed address
-// space; host memory is the decoded command dictionaries, realistically
-// a few hundred KB for a dense view.
+// 16 B x 2048 = 32 KiB per canvas view; host memory is the decoded
+// command dictionaries, realistically a few hundred KB for a dense view.
 pub const max_canvas_retained_packet_commands_per_view: usize = max_canvas_commands_per_view;
 pub const max_canvas_diff_changes_per_view: usize = max_canvas_commands_per_view * 2 + 1;
 pub const max_canvas_render_animations_per_view: usize = max_canvas_commands_per_view;
@@ -79,9 +77,8 @@ pub const max_canvas_visual_effect_cache_actions_per_view: usize = max_canvas_vi
 // per-frame planning arrays are threadlocal (TextLayoutPlan 96 B x 2048 =
 // 192 KiB, cache entries 96 B x 2048 = 192 KiB, cache actions 96 B x
 // 4096 = 384 KiB — ~0.8 MiB once per thread, was ~0.2 MiB), and each
-// RuntimeView retains one cache-entry array (96 B x 2048 = 192 KiB x 32
-// view slots = 6 MiB fixed address space, was 1.5 MiB; pages touch only
-// as views lay out text).
+// canvas view's storage retains one cache-entry array (96 B x 2048 =
+// 192 KiB per view, was 48 KiB).
 pub const max_canvas_text_layouts_per_view: usize = max_canvas_commands_per_view;
 // Wrapped text lines across all of a frame's layout plans (the plan
 // arrays above index into one shared line pool). Sized with the
@@ -213,14 +210,13 @@ pub const max_canvas_widget_spans_per_view: usize = 1024;
 // so declared menus scale with the 1024-node budget instead of becoming
 // the next design-effort cliff. Memory cost is one 24-byte entry (a
 // 16-byte label slice + enabled/separator flags) per slot: 24 B x 512 =
-// 12 KiB per view (was 3 KiB at 128), x 32 view slots = 384 KiB total
-// (was 96 KiB) of fixed-capacity address space; label bytes come out of
-// the existing widget-text budget, and pages are only touched as views
-// declare menus. Distinct from the platform's `max_context_menu_items`
-// (32), which caps ONE presented menu (a single NSMenu popped at the
-// pointer, truncated at presentation) — that stays small deliberately
-// because a menu nobody can scan is a design bug, while this budget
-// bounds the retained declarations across all widgets of the view.
+// 12 KiB per canvas view (was 3 KiB at 128); label bytes come out of the
+// existing widget-text budget. Distinct from the platform's
+// `max_context_menu_items` (32), which caps ONE presented menu (a single
+// NSMenu popped at the pointer, truncated at presentation) — that stays
+// small deliberately because a menu nobody can scan is a design bug,
+// while this budget bounds the retained declarations across all widgets
+// of the view.
 pub const max_canvas_widget_context_menu_items_per_view: usize = 512;
 // Window-drag region mirror per view (the Windows WM_NCHITTEST seam):
 // drag-region rects plus the press-claiming exclusions inside them. A
@@ -240,13 +236,12 @@ pub const max_canvas_widget_window_drag_regions_per_view: usize = 32;
 // series. Band series charge the pool twice (values + low), so 32
 // maximal bands also fill it — the points budget can overflow before
 // the series budget through bands, and the teaching error names the
-// right cliff (pinned in canvas_budget_edge_tests.zig). Memory
-// is fixed-capacity address space: series entries are ~64 B (slices +
-// flags) x 64 = 4 KiB per view, points are 4 B x 16384 = 64 KiB per
-// view, x 32 view slots = ~2.1 MiB total, pages touched only as views
-// chart. Overflow is loud (`WidgetChartSeriesLimitReached` /
-// `WidgetChartPointsLimitReached`), same contract as every widget budget;
-// series labels ride the existing widget-text budget.
+// right cliff (pinned in canvas_budget_edge_tests.zig). Memory is per
+// canvas view: series entries are ~64 B (slices + flags) x 64 = 4 KiB,
+// points are 4 B x 16384 = 64 KiB. Overflow is loud
+// (`WidgetChartSeriesLimitReached` / `WidgetChartPointsLimitReached`),
+// same contract as every widget budget; series labels ride the existing
+// widget-text budget.
 pub const max_canvas_widget_chart_series_per_view: usize = 64;
 pub const max_canvas_widget_chart_points_per_view: usize = 16384;
 // Chart x-axis category labels retained across all `.chart` widgets of

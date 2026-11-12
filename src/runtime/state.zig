@@ -42,22 +42,20 @@ pub const RuntimeWindow = struct {
     label_storage: [platform.max_window_label_bytes]u8 = undefined,
     title_storage: [platform.max_window_title_bytes]u8 = undefined,
     main_parent_storage: [platform.max_view_label_bytes]u8 = undefined,
-    source_storage: RuntimeSourceStorage = .{},
+    /// The window's copy of its WebView source, allocated from the
+    /// runtime's `owned_allocator` the first time the window takes a
+    /// source and freed when the window is removed; null before. `source`
+    /// slices into it.
+    source_storage: ?*RuntimeSourceStorage = null,
 
     /// A table move copies inline storage but its slices still address the
-    /// old slot. Rebind every owned field before that slot can be reused.
+    /// old slot. Rebind every inline-owned field before that slot can be
+    /// reused. The source storage is heap-owned, so `source` moves with
+    /// its pointer and needs no rebinding.
     pub fn rebindStorage(self: *RuntimeWindow) void {
         self.info.label = self.label_storage[0..self.info.label.len];
         self.info.title = self.title_storage[0..self.info.title.len];
         if (self.main_parent) |parent| self.main_parent = self.main_parent_storage[0..parent.len];
-        if (self.source) |*source| {
-            source.bytes = self.source_storage.bytes[0..source.bytes.len];
-            if (source.asset_options) |*assets| {
-                assets.root_path = self.source_storage.asset_root_path[0..assets.root_path.len];
-                assets.entry = self.source_storage.asset_entry[0..assets.entry.len];
-                assets.origin = self.source_storage.asset_origin[0..assets.origin.len];
-            }
-        }
     }
 };
 
@@ -119,14 +117,27 @@ pub const RuntimeTrayItem = struct {
     chart: ?platform.TrayChartRow = null,
 };
 
+/// One status item's menu rows, sized by `platform.max_tray_items`. A
+/// status item allocates its block when it is created and frees it when
+/// it is removed, so unused status item slots hold no menu storage.
+pub const RuntimeTrayItems = [platform.max_tray_items]RuntimeTrayItem;
+
 pub const RuntimeStatusItem = struct {
     id: platform.StatusItemId = 0,
     active: bool = false,
     visible: bool = true,
     title: []const u8 = "",
     title_storage: [platform.max_tray_title_bytes]u8 = undefined,
-    items: [platform.max_tray_items]RuntimeTrayItem = undefined,
+    /// The menu rows (see `RuntimeTrayItems`); null while the slot is
+    /// unused. The first `item_count` rows are live.
+    items: ?*RuntimeTrayItems = null,
     item_count: usize = 0,
+
+    /// The live menu rows: empty for a slot without menu storage.
+    pub fn trayItems(self: *const RuntimeStatusItem) []const RuntimeTrayItem {
+        const items = self.items orelse return &.{};
+        return items[0..self.item_count];
+    }
 };
 
 pub const ShellApplyMode = enum {

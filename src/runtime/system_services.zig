@@ -12,6 +12,7 @@ const bridge_responses = @import("bridge_responses.zig");
 const bridge = @import("../bridge/root.zig");
 const platform = @import("../platform/root.zig");
 const security = @import("../security/root.zig");
+const RuntimeTrayItems = @import("state.zig").RuntimeTrayItems;
 
 const jsonStringField = bridge_payload.jsonStringField;
 const jsonBoolField = bridge_payload.jsonBoolField;
@@ -163,6 +164,15 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             if (self.command_policy) |policy| try status_validation.options(policy, options) else try validateTrayOptions(options);
             const status_item = try statusItemSlot(self, status_item_id);
             const was_active = status_item.active;
+            // A new status item's menu storage is allocated before the
+            // platform sees the item, so a refusal leaves nothing created.
+            const allocated_items = status_item.items == null;
+            if (allocated_items) status_item.items = try self.owned_allocator.create(RuntimeTrayItems);
+            errdefer if (allocated_items) {
+                self.owned_allocator.destroy(status_item.items.?);
+                status_item.items = null;
+                status_item.item_count = 0;
+            };
             try self.options.platform.services.createStatusItem(status_item_id, options);
             try storeTrayItems(status_item, options.items);
             const title = if (options.presentation.title.len > 0) options.presentation.title else options.title;
@@ -229,6 +239,7 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
             const status_item = findStatusItem(self, status_item_id) orelse return;
             try self.options.platform.services.removeStatusItem(status_item_id);
+            if (status_item.items) |items| self.owned_allocator.destroy(items);
             status_item.* = .{};
             self.status_item_count -= 1;
         }
@@ -243,8 +254,8 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
 
         pub fn statusItemMenuItemExists(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) bool {
             const status_item = findStatusItemConst(self, status_item_id) orelse return false;
-            if (self.command_policy) |policy| return command_policy.menu(policy, status_item.items[0..status_item.item_count], item_id).exists;
-            for (status_item.items[0..status_item.item_count]) |item| {
+            if (self.command_policy) |policy| return command_policy.menu(policy, status_item.trayItems(), item_id).exists;
+            for (status_item.trayItems()) |item| {
                 if (item.id == item_id) return true;
                 if (item.segmented) |segmented| {
                     for (segmented.options) |option| if (option.id == item_id) return true;
@@ -258,8 +269,8 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         /// platform action, so the automation seam must reject them too.
         pub fn statusItemMenuItemActionable(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) bool {
             const status_item = findStatusItemConst(self, status_item_id) orelse return false;
-            if (self.command_policy) |policy| return command_policy.menu(policy, status_item.items[0..status_item.item_count], item_id).actionable;
-            for (status_item.items[0..status_item.item_count]) |item| {
+            if (self.command_policy) |policy| return command_policy.menu(policy, status_item.trayItems(), item_id).actionable;
+            for (status_item.trayItems()) |item| {
                 if (item.id == item_id) return !item.separator and item.enabled and (item.role == .command or item.role == .agent);
                 if (item.segmented) |segmented| {
                     for (segmented.options) |option| {
@@ -277,11 +288,11 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         pub fn statusItemCommandNameForItem(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) []const u8 {
             const status_item = findStatusItemConst(self, status_item_id) orelse return "tray.action";
             if (self.command_policy) |policy| {
-                const selection = command_policy.menu(policy, status_item.items[0..status_item.item_count], item_id);
+                const selection = command_policy.menu(policy, status_item.trayItems(), item_id);
                 const row = selection.row orelse return "tray.action";
-                return if (selection.option) |option| status_item.items[row].segmented.?.options[option].command else status_item.items[row].command;
+                return if (selection.option) |option| status_item.trayItems()[row].segmented.?.options[option].command else status_item.trayItems()[row].command;
             }
-            for (status_item.items[0..status_item.item_count]) |item| {
+            for (status_item.trayItems()) |item| {
                 if (item.id == item_id and item.command.len > 0) return item.command;
                 if (item.segmented) |segmented| {
                     for (segmented.options) |option| {
@@ -498,48 +509,50 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
 }
 
 fn storeTrayItems(status_item: anytype, items: []const platform.TrayMenuItem) !void {
+    // Callers allocate the menu storage before the platform sees the item.
+    const rows = status_item.items.?;
     status_item.item_count = 0;
     for (items, 0..) |item, index| {
-        status_item.items[index].id = item.id;
-        status_item.items[index].command = try copyInto(&status_item.items[index].command_storage, item.command);
-        status_item.items[index].label = try copyInto(&status_item.items[index].label_storage, item.label);
-        status_item.items[index].detail = try copyInto(&status_item.items[index].detail_storage, item.detail);
-        status_item.items[index].separator = item.separator;
-        status_item.items[index].enabled = item.enabled;
-        status_item.items[index].role = item.role;
-        status_item.items[index].key = try copyInto(&status_item.items[index].key_storage, item.key);
-        status_item.items[index].modifiers = item.modifiers;
-        status_item.items[index].segmented = null;
-        status_item.items[index].segment_option_count = 0;
+        rows[index].id = item.id;
+        rows[index].command = try copyInto(&rows[index].command_storage, item.command);
+        rows[index].label = try copyInto(&rows[index].label_storage, item.label);
+        rows[index].detail = try copyInto(&rows[index].detail_storage, item.detail);
+        rows[index].separator = item.separator;
+        rows[index].enabled = item.enabled;
+        rows[index].role = item.role;
+        rows[index].key = try copyInto(&rows[index].key_storage, item.key);
+        rows[index].modifiers = item.modifiers;
+        rows[index].segmented = null;
+        rows[index].segment_option_count = 0;
         if (item.segmented) |segmented| {
             for (segmented.options, 0..) |option, option_index| {
-                const stored = &status_item.items[index].segment_options[option_index];
+                const stored = &rows[index].segment_options[option_index];
                 stored.id = option.id;
-                stored.label = try copyInto(&status_item.items[index].segment_option_label_storage[option_index], option.label);
-                stored.command = try copyInto(&status_item.items[index].segment_option_command_storage[option_index], option.command);
+                stored.label = try copyInto(&rows[index].segment_option_label_storage[option_index], option.label);
+                stored.command = try copyInto(&rows[index].segment_option_command_storage[option_index], option.command);
                 stored.selected = option.selected;
                 stored.enabled = option.enabled;
             }
-            status_item.items[index].segment_option_count = segmented.options.len;
-            const stored = &status_item.items[index];
+            rows[index].segment_option_count = segmented.options.len;
+            const stored = &rows[index];
             stored.segmented = .{ .options = stored.segment_options[0..stored.segment_option_count] };
         }
-        status_item.items[index].metric = null;
+        rows[index].metric = null;
         if (item.metric) |metric| {
-            status_item.items[index].metric = .{
-                .primary_text = try copyInto(&status_item.items[index].metric_primary_storage, metric.primary_text),
-                .secondary_text = try copyInto(&status_item.items[index].metric_secondary_storage, metric.secondary_text),
-                .accessibility_label = try copyInto(&status_item.items[index].metric_accessibility_storage, metric.accessibility_label),
+            rows[index].metric = .{
+                .primary_text = try copyInto(&rows[index].metric_primary_storage, metric.primary_text),
+                .secondary_text = try copyInto(&rows[index].metric_secondary_storage, metric.secondary_text),
+                .accessibility_label = try copyInto(&rows[index].metric_accessibility_storage, metric.accessibility_label),
             };
         }
-        status_item.items[index].chart = null;
+        rows[index].chart = null;
         if (item.chart) |chart| {
-            @memcpy(status_item.items[index].chart_values[0..chart.values.len], chart.values);
-            const leading_caption = try copyInto(&status_item.items[index].chart_leading_caption_storage, chart.leading_caption);
-            const trailing_summary = try copyInto(&status_item.items[index].chart_trailing_summary_storage, chart.trailing_summary);
-            const accessibility_label = try copyInto(&status_item.items[index].chart_accessibility_label_storage, chart.accessibility_label);
-            status_item.items[index].chart = .{
-                .values = status_item.items[index].chart_values[0..chart.values.len],
+            @memcpy(rows[index].chart_values[0..chart.values.len], chart.values);
+            const leading_caption = try copyInto(&rows[index].chart_leading_caption_storage, chart.leading_caption);
+            const trailing_summary = try copyInto(&rows[index].chart_trailing_summary_storage, chart.trailing_summary);
+            const accessibility_label = try copyInto(&rows[index].chart_accessibility_label_storage, chart.accessibility_label);
+            rows[index].chart = .{
+                .values = rows[index].chart_values[0..chart.values.len],
                 .min_value = chart.min_value,
                 .max_value = chart.max_value,
                 .leading_caption = leading_caption,

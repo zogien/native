@@ -727,13 +727,13 @@ test "reusing a closed window slot preserves every shifted window's owned fields
     try std.testing.expectEqualStrings("HTML window title", shifted_html.info.title);
     try std.testing.expectEqualStrings("<p>Surviving HTML</p>", shifted_html.source.?.bytes);
     try std.testing.expectEqual(@intFromPtr(&shifted_assets.label_storage), @intFromPtr(shifted_assets.info.label.ptr));
-    try std.testing.expectEqual(@intFromPtr(&shifted_assets.source_storage.asset_entry), @intFromPtr(source.asset_options.?.entry.ptr));
-    try std.testing.expectEqual(@intFromPtr(&shifted_html.source_storage.bytes), @intFromPtr(shifted_html.source.?.bytes.ptr));
+    try std.testing.expectEqual(@intFromPtr(&shifted_assets.source_storage.?.asset_entry), @intFromPtr(source.asset_options.?.entry.ptr));
+    try std.testing.expectEqual(@intFromPtr(&shifted_html.source_storage.?.bytes), @intFromPtr(shifted_html.source.?.bytes.ptr));
     try std.testing.expectEqualStrings("assets-window", harness.null_platform.windows[1].label);
     try std.testing.expectEqualStrings("Asset window title", harness.null_platform.windows[1].title);
     try std.testing.expectEqualStrings("html-window", harness.null_platform.windows[2].label);
     try std.testing.expectEqualStrings("HTML window title", harness.null_platform.windows[2].title);
-    const layout = &harness.runtime.shell_layouts[0];
+    const layout = harness.runtime.shell_layouts[0];
     try std.testing.expectEqual(assets.id, layout.window_id);
     try std.testing.expectEqualStrings("asset-parent", layout.views[0].label);
     try std.testing.expectEqualStrings("asset-child", layout.views[1].label);

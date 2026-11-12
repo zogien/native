@@ -23,6 +23,7 @@ const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
 const runtime_canvas_widget_state = @import("canvas_widget_state.zig");
 const runtime_canvas_widget_runtime = @import("canvas_widget_runtime.zig");
+const runtime_canvas_scratch = @import("canvas_scratch.zig");
 const runtime_frame_profile = @import("frame_profile.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_flow = @import("flow.zig");
@@ -270,7 +271,10 @@ pub const Runtime = struct {
     video_duration_ms: u64 = 0,
     video_width: u64 = 0,
     video_height: u64 = 0,
-    shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
+    /// Per-window shell layouts, each allocated from `owned_allocator`
+    /// when its window first binds shell views and freed when the window
+    /// goes; the first `shell_layout_count` entries are live.
+    shell_layouts: [platform.max_windows]*RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
     shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
     view_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -363,15 +367,10 @@ pub const Runtime = struct {
     /// Snapshot-side storage for the frame profile's per-stage stats
     /// (the snapshot Input only references runtime-owned memory).
     automation_frame_profile_stages: [runtime_frame_profile.frame_profile_stage_count]automation.snapshot.FrameProfileStage = undefined,
-    automation_views: [automation.snapshot.max_views]platform.ViewInfo = undefined,
-    automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
-    /// Snapshot-side storage for per-widget declared context-menu items
-    /// (the snapshot Input only references runtime-owned memory; labels
-    /// alias the views' bounded menu storage). Sized so every view can
-    /// list its full per-view item budget — the snapshot never truncates
-    /// menus the runtime accepted.
-    automation_widget_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view * platform.max_views]automation.snapshot.WidgetContextMenuItem = undefined,
-    automation_tray_items: [platform.max_status_items * platform.max_tray_items]automation.snapshot.TrayItem = undefined,
+    /// The snapshot buffers that size with every view, widget, menu item,
+    /// and tray item the runtime could hold (see `AutomationSnapshotStorage`):
+    /// allocated by the first snapshot, kept until `deinit`, null before.
+    automation_storage: ?*runtime_automation_snapshot.AutomationSnapshotStorage = null,
     automation_trays: [platform.max_status_items]automation.snapshot.Tray = undefined,
     /// Handshake for the `provenance` verb: cleared before the query is
     /// evented to the app, set by the app's response publish — so the
@@ -435,46 +434,13 @@ pub const Runtime = struct {
     /// is not). Depth-counted because automation gestures nest input
     /// dispatches.
     canvas_widget_accessibility_defer_depth: usize = 0,
-    // Scratch for setCanvasWidgetLayout's reconcile pass: too large for the
-    // stack at the current node cap, and the event loop is single-threaded.
-    canvas_widget_reconcile_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
-    canvas_widget_source_semantics_scratch: [canvas_limits.max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
-    // More reconcile-pass scratch that outgrew the stack when the widget
-    // budgets quadrupled (256 -> 1024 nodes): previous control/scroll/text reconcile
-    // entries, the previous text byte pool, and the invalidation diff.
-    canvas_widget_reconcile_control_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetControlReconcileEntry = undefined,
-    canvas_widget_reconcile_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetSourceScrollEntry = undefined,
-    canvas_widget_reconcile_text_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetTextReconcileEntry = undefined,
-    canvas_widget_reconcile_text_bytes: [canvas_limits.max_canvas_widget_text_bytes_per_view]u8 = undefined,
-    canvas_widget_invalidations_scratch: [canvas_limits.max_canvas_widget_invalidations_per_view]canvas.WidgetInvalidation = undefined,
-    canvas_widget_copy_scratch: runtime_canvas_widget_runtime.CanvasWidgetCopyScratch = undefined,
+    /// The widget reconcile and frame planning scratch shared by this
+    /// runtime's gpu-surface views (see `CanvasScratch`): allocated with
+    /// the first gpu-surface view, kept until `deinit`, null before.
+    /// Reach it through `canvasScratch()`.
+    canvas_scratch: ?*runtime_canvas_scratch.CanvasScratch = null,
     canvas_widget_display_list_refresh_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_widget_accessibility_publish_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
-    canvas_frame_render_commands: [max_canvas_commands_per_view]canvas.RenderCommand = undefined,
-    canvas_frame_render_batches: [max_canvas_commands_per_view]canvas.RenderBatch = undefined,
-    canvas_frame_pipeline_cache_entries: [max_canvas_pipelines_per_view]canvas.RenderPipelineCacheEntry = undefined,
-    canvas_frame_pipeline_cache_actions: [max_canvas_pipeline_cache_actions_per_view]canvas.RenderPipelineCacheAction = undefined,
-    canvas_frame_path_geometries: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometry = undefined,
-    canvas_frame_path_geometry_cache_entries: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometryCacheEntry = undefined,
-    canvas_frame_path_geometry_cache_actions: [max_canvas_path_geometry_cache_actions_per_view]canvas.RenderPathGeometryCacheAction = undefined,
-    canvas_frame_images: [max_canvas_images_per_view]canvas.RenderImage = undefined,
-    canvas_frame_image_cache_entries: [max_canvas_images_per_view]canvas.RenderImageCacheEntry = undefined,
-    canvas_frame_image_cache_actions: [max_canvas_image_cache_actions_per_view]canvas.RenderImageCacheAction = undefined,
-    canvas_frame_layers: [max_canvas_layers_per_view]canvas.RenderLayer = undefined,
-    canvas_frame_layer_cache_entries: [max_canvas_layers_per_view]canvas.RenderLayerCacheEntry = undefined,
-    canvas_frame_layer_cache_actions: [max_canvas_layer_cache_actions_per_view]canvas.RenderLayerCacheAction = undefined,
-    canvas_frame_resources: [max_canvas_resources_per_view]canvas.RenderResource = undefined,
-    canvas_frame_resource_cache_entries: [max_canvas_resources_per_view]canvas.RenderResourceCacheEntry = undefined,
-    canvas_frame_resource_cache_actions: [max_canvas_resource_cache_actions_per_view]canvas.RenderResourceCacheAction = undefined,
-    canvas_frame_visual_effects: [max_canvas_visual_effects_per_view]canvas.VisualEffect = undefined,
-    canvas_frame_visual_effect_cache_entries: [max_canvas_visual_effects_per_view]canvas.VisualEffectCacheEntry = undefined,
-    canvas_frame_visual_effect_cache_actions: [max_canvas_visual_effect_cache_actions_per_view]canvas.VisualEffectCacheAction = undefined,
-    canvas_frame_glyph_atlas_entries: [max_canvas_glyphs_per_view]canvas.GlyphAtlasEntry = undefined,
-    canvas_frame_glyph_atlas_cache_entries: [max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry = undefined,
-    canvas_frame_glyph_atlas_cache_actions: [max_canvas_glyphs_per_view * 2]canvas.GlyphAtlasCacheAction = undefined,
-    canvas_frame_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined,
-    canvas_frame_render_override_samples: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
-    canvas_frame_render_override_combined: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
     /// Runtime-registered canvas images (see canvas_images.zig): entry
     /// metadata, the per-slot pixel buffers, and the `ReferenceImage`
     /// scratch the frame planner hands to renderers each plan. Each
@@ -536,10 +502,11 @@ pub const Runtime = struct {
         return self;
     }
 
-    /// Construct in place. The Runtime is tens of megabytes of fixed-capacity
-    /// storage; by-value construction materializes a stack temporary in Debug
-    /// builds that overflows default thread stacks, so every embedding
-    /// constructs through a pointer.
+    /// Construct in place. The Runtime is over a megabyte of fixed-capacity
+    /// bookkeeping (its capacity-sized buffers are allocated on demand);
+    /// by-value construction materializes a stack temporary in Debug builds
+    /// that overflows default thread stacks, so every embedding constructs
+    /// through a pointer.
     pub fn initAt(self: *Runtime, options: Options) void {
         inline for (@typeInfo(Runtime).@"struct".fields) |field| {
             if (comptime fieldHasSmallDefault(field)) {
@@ -561,15 +528,9 @@ pub const Runtime = struct {
         // The profile rings exceed the small-default copy bound above;
         // assign explicitly so the disabled state is never undefined.
         self.frame_profile = .{};
-        // Status rows exceed the small-default copy bound. Initialize their
-        // ownership metadata without touching unused menu payload buffers.
-        for (&self.status_items) |*item| {
-            item.id = 0;
-            item.active = false;
-            item.visible = true;
-            item.title = "";
-            item.item_count = 0;
-        }
+        // Status rows hold their menu payload on the heap (allocated per
+        // created status item), so every row starts empty and owns nothing.
+        for (&self.status_items) |*item| item.* = .{};
         // The dialog broker's result buffer exceeds the copy bound too;
         // reset its bookkeeping and leave the buffer alone.
         self.dialog_broker.reset();
@@ -612,15 +573,28 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         self.disarmMediaSurfaceWakes();
         self.releaseDialogs();
-        for (self.views[0..self.view_count]) |*view| {
-            if (view.widget_text_bytes_heap_owned) self.owned_allocator.free(view.widget_text_bytes);
-            if (view.canvas_widget_text_history_bytes_heap_owned) self.owned_allocator.free(view.canvas_widget_text_history_bytes);
-            view.widget_text_bytes = &.{};
-            view.widget_text_bytes_heap_owned = false;
-            view.canvas_widget_text_history_bytes = &.{};
-            view.canvas_widget_text_history_bytes_heap_owned = false;
-        }
+        for (self.views[0..self.view_count]) |*view| view.releaseOwnedBuffers(self.owned_allocator);
         self.view_count = 0;
+        if (self.canvas_scratch) |scratch| {
+            self.owned_allocator.destroy(scratch);
+            self.canvas_scratch = null;
+        }
+        if (self.automation_storage) |storage| {
+            self.owned_allocator.destroy(storage);
+            self.automation_storage = null;
+        }
+        for (self.windows[0..self.window_count]) |*window| {
+            if (window.source_storage) |storage| self.owned_allocator.destroy(storage);
+            window.source_storage = null;
+            window.source = null;
+        }
+        for (self.shell_layouts[0..self.shell_layout_count]) |layout| self.owned_allocator.destroy(layout);
+        self.shell_layout_count = 0;
+        for (&self.status_items) |*status_item| {
+            if (status_item.items) |items| self.owned_allocator.destroy(items);
+            status_item.items = null;
+            status_item.item_count = 0;
+        }
         if (self.targetless_ime_preedit.len > 0) {
             self.owned_allocator.free(self.targetless_ime_preedit);
             self.targetless_ime_preedit = &.{};
@@ -670,6 +644,37 @@ pub const Runtime = struct {
         }
         self.media_surface_entries = [_]runtime_media_surface.MediaSurfaceTextureEntry{.{}} ** canvas_limits.max_media_surface_channels;
         self.media_surface_count = 0;
+    }
+
+    /// The canvas scratch shared by this runtime's gpu-surface views (see
+    /// `CanvasScratch`). It exists from the first gpu-surface view on;
+    /// canvas paths run only for such views, so reaching for it earlier
+    /// is a runtime bug, checked in safe builds.
+    pub fn canvasScratch(self: *const Runtime) *runtime_canvas_scratch.CanvasScratch {
+        return self.canvas_scratch.?;
+    }
+
+    /// Allocate the shared canvas scratch if this runtime has none yet.
+    /// Called before the first gpu-surface view exists, so a refusal
+    /// leaves the runtime exactly as it was.
+    pub fn ensureCanvasScratch(self: *Runtime) !void {
+        if (self.canvas_scratch != null) return;
+        self.canvas_scratch = try self.owned_allocator.create(runtime_canvas_scratch.CanvasScratch);
+    }
+
+    /// The automation snapshot buffers (see `AutomationSnapshotStorage`).
+    /// They exist from the first snapshot on.
+    pub fn automationStorage(self: *const Runtime) *runtime_automation_snapshot.AutomationSnapshotStorage {
+        return self.automation_storage.?;
+    }
+
+    /// Allocate the automation snapshot buffers if this runtime has none
+    /// yet. Entry points that can report failure call this before they
+    /// take a snapshot; `automationSnapshot` itself cannot fail and
+    /// treats a refusal as fatal.
+    pub fn ensureAutomationStorage(self: *Runtime) !void {
+        if (self.automation_storage != null) return;
+        self.automation_storage = try self.owned_allocator.create(runtime_automation_snapshot.AutomationSnapshotStorage);
     }
 
     fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {
@@ -1172,8 +1177,9 @@ pub fn TestHarness() type {
         trace_records: [64]trace.Record = undefined,
         trace_sink: trace.BufferSink = undefined,
         runtime: Runtime = undefined,
-        /// The harness embeds the multi-megabyte Runtime, so stack
-        /// instances overflow test threads; create on the heap.
+        /// The harness embeds the Runtime and the null platform, a few
+        /// megabytes together, so stack instances overflow test threads;
+        /// create on the heap.
         pub fn create(gpa: std.mem.Allocator, surface: platform.Surface) !*Self {
             const self = try gpa.create(Self);
             self.init(surface);

@@ -27,7 +27,7 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
     return struct {
         pub fn canvasWidgetToggleAnimation(self: *const RuntimeView, id: canvas.ObjectId) ?CanvasWidgetToggleAnimation {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (!canvasWidgetSwitchControlKind(widget.kind) or widget.state.disabled) return null;
             const travel = canvas.toggleWidgetKnobTravel(widget, self.widget_tokens);
             if (travel <= 0) return null;
@@ -87,15 +87,15 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
         /// Msg dispatches with the applied fraction.
         pub fn applyCanvasWidgetSplitPointer(self: *RuntimeView, id: canvas.ObjectId, point: geometry.PointF) anyerror!?geometry.RectF {
             const divider_index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const divider = self.widget_layout_nodes[divider_index].widget;
+            const divider = self.canvasStorage().widget_layout_nodes[divider_index].widget;
             if (divider.kind != .split_divider or divider.state.disabled) return null;
-            const split_index = self.widget_layout_nodes[divider_index].parent_index orelse return null;
+            const split_index = self.canvasStorage().widget_layout_nodes[divider_index].parent_index orelse return null;
             if (split_index >= self.widget_layout_node_count) return null;
-            const split_node = self.widget_layout_nodes[split_index];
+            const split_node = self.canvasStorage().widget_layout_nodes[split_index];
             if (split_node.widget.kind != .split) return null;
 
             const content = split_node.frame.inset(split_node.widget.layout.padding).normalized();
-            const divider_extent = self.widget_layout_nodes[divider_index].frame.width;
+            const divider_extent = self.canvasStorage().widget_layout_nodes[divider_index].frame.width;
             const available = content.width - divider_extent;
             if (!(available > 0)) return null;
             const fraction = (point.x - content.x - divider_extent * 0.5) / available;
@@ -130,7 +130,7 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
 
         pub fn applyCanvasWidgetSplitFractionMoved(self: *RuntimeView, split_index: usize, requested_fraction: f32, note_resize: bool) anyerror!?geometry.RectF {
             if (split_index >= self.widget_layout_node_count) return null;
-            const split_node = self.widget_layout_nodes[split_index];
+            const split_node = self.canvasStorage().widget_layout_nodes[split_index];
             if (split_node.widget.kind != .split or split_node.widget.state.disabled) return null;
             if (!std.math.isFinite(requested_fraction)) return null;
 
@@ -138,9 +138,9 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             var divider_index: ?usize = null;
             var child = split_index + 1;
             const split_depth = split_node.depth;
-            while (child < self.widget_layout_node_count and self.widget_layout_nodes[child].depth > split_depth) : (child += 1) {
-                if (self.widget_layout_nodes[child].parent_index != split_index) continue;
-                const kind = self.widget_layout_nodes[child].widget.kind;
+            while (child < self.widget_layout_node_count and self.canvasStorage().widget_layout_nodes[child].depth > split_depth) : (child += 1) {
+                if (self.canvasStorage().widget_layout_nodes[child].parent_index != split_index) continue;
+                const kind = self.canvasStorage().widget_layout_nodes[child].widget.kind;
                 if (kind == .split_divider) {
                     if (divider_index == null) divider_index = child;
                 } else if (pane_indices[0] == null) {
@@ -154,29 +154,29 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             const handle_index = divider_index orelse return null;
 
             const content = split_node.frame.inset(split_node.widget.layout.padding).normalized();
-            const divider_extent = self.widget_layout_nodes[handle_index].frame.width;
+            const divider_extent = self.canvasStorage().widget_layout_nodes[handle_index].frame.width;
             const available = @max(0, content.width - divider_extent);
-            const first_min = @max(0, self.widget_layout_nodes[first_index].widget.layout.min_size.width);
-            const second_min = @max(0, self.widget_layout_nodes[second_index].widget.layout.min_size.width);
+            const first_min = @max(0, self.canvasStorage().widget_layout_nodes[first_index].widget.layout.min_size.width);
+            const second_min = @max(0, self.canvasStorage().widget_layout_nodes[second_index].widget.layout.min_size.width);
             const fraction = canvas.widgetSplitEffectiveFraction(split_node.widget, requested_fraction, available, first_min, second_min, true);
-            const previous_fraction = canvas.widgetSplitEffectiveFraction(split_node.widget, self.widget_layout_nodes[handle_index].widget.value, available, first_min, second_min, false);
+            const previous_fraction = canvas.widgetSplitEffectiveFraction(split_node.widget, self.canvasStorage().widget_layout_nodes[handle_index].widget.value, available, first_min, second_min, false);
             if (fraction == previous_fraction) return null;
 
             const first_width = available * fraction;
             const divider_x = content.x + first_width;
-            const dx = divider_x - self.widget_layout_nodes[handle_index].frame.x;
+            const dx = divider_x - self.canvasStorage().widget_layout_nodes[handle_index].frame.x;
             if (dx == 0) return null;
 
-            self.widget_layout_nodes[split_index].widget.value = fraction;
-            self.widget_layout_nodes[handle_index].widget.value = fraction;
-            setCanvasWidgetNodeWidth(&self.widget_layout_nodes[first_index], first_width);
-            self.widget_layout_nodes[handle_index].frame.x = divider_x;
-            self.widget_layout_nodes[handle_index].widget.frame.x = divider_x;
+            self.canvasStorage().widget_layout_nodes[split_index].widget.value = fraction;
+            self.canvasStorage().widget_layout_nodes[handle_index].widget.value = fraction;
+            setCanvasWidgetNodeWidth(&self.canvasStorage().widget_layout_nodes[first_index], first_width);
+            self.canvasStorage().widget_layout_nodes[handle_index].frame.x = divider_x;
+            self.canvasStorage().widget_layout_nodes[handle_index].widget.frame.x = divider_x;
             const second_x = divider_x + divider_extent;
             const second_width = @max(0, content.maxX() - second_x);
-            self.widget_layout_nodes[second_index].frame.x = second_x;
-            self.widget_layout_nodes[second_index].widget.frame.x = second_x;
-            setCanvasWidgetNodeWidth(&self.widget_layout_nodes[second_index], second_width);
+            self.canvasStorage().widget_layout_nodes[second_index].frame.x = second_x;
+            self.canvasStorage().widget_layout_nodes[second_index].widget.frame.x = second_x;
+            setCanvasWidgetNodeWidth(&self.canvasStorage().widget_layout_nodes[second_index], second_width);
             self.translateCanvasWidgetDescendantsX(second_index, dx);
 
             if (note_resize) self.noteCanvasWidgetResizeEvent(split_node.widget.id);
@@ -216,39 +216,39 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
         /// Horizontal twin of `translateCanvasWidgetScrollDescendants`:
         /// shift a pane subtree sideways when its pane edge moves.
         pub fn translateCanvasWidgetDescendantsX(self: *RuntimeView, node_index: usize, dx: f32) void {
-            const depth = self.widget_layout_nodes[node_index].depth;
+            const depth = self.canvasStorage().widget_layout_nodes[node_index].depth;
             var index = node_index + 1;
-            while (index < self.widget_layout_node_count and self.widget_layout_nodes[index].depth > depth) : (index += 1) {
-                const translated = self.widget_layout_nodes[index].frame.translate(.{ .dx = dx, .dy = 0 });
-                self.widget_layout_nodes[index].frame = translated;
-                self.widget_layout_nodes[index].widget.frame = translated;
+            while (index < self.widget_layout_node_count and self.canvasStorage().widget_layout_nodes[index].depth > depth) : (index += 1) {
+                const translated = self.canvasStorage().widget_layout_nodes[index].frame.translate(.{ .dx = dx, .dy = 0 });
+                self.canvasStorage().widget_layout_nodes[index].frame = translated;
+                self.canvasStorage().widget_layout_nodes[index].widget.frame = translated;
             }
         }
 
         pub fn applyCanvasWidgetResizableDelta(self: *RuntimeView, id: canvas.ObjectId, delta_x: f32) anyerror!?geometry.RectF {
             if (!std.math.isFinite(delta_x) or delta_x == 0) return null;
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (widget.kind != .resizable or widget.state.disabled) return null;
             if (!std.math.isFinite(widget.frame.width)) return null;
 
-            const previous_frame = self.widget_layout_nodes[index].frame;
+            const previous_frame = self.canvasStorage().widget_layout_nodes[index].frame;
             const min_width = canvasWidgetResizableMinWidth(widget);
             const next_width = canvas.widgetCompiledResizableWidth(widget, 0, previous_frame.width, delta_x) orelse
                 @max(min_width, previous_frame.width + delta_x);
             if (next_width == previous_frame.width) return null;
 
-            self.widget_layout_nodes[index].frame.width = next_width;
-            self.widget_layout_nodes[index].widget.frame.width = next_width;
+            self.canvasStorage().widget_layout_nodes[index].frame.width = next_width;
+            self.canvasStorage().widget_layout_nodes[index].widget.frame.width = next_width;
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
-            const dirty = unionRects(previous_frame, self.widget_layout_nodes[index].frame) orelse self.widget_layout_nodes[index].frame;
+            const dirty = unionRects(previous_frame, self.canvasStorage().widget_layout_nodes[index].frame) orelse self.canvasStorage().widget_layout_nodes[index].frame;
             return self.canvasWidgetDirtyBounds(index, dirty);
         }
 
         pub fn applyCanvasWidgetControlKeyboard(self: *RuntimeView, id: canvas.ObjectId, keyboard: canvas.WidgetKeyboardEvent) anyerror!?geometry.RectF {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
 
             const intent = canvas.widgetKeyboardControlIntent(widget, keyboard) orelse return null;
             return self.applyCanvasWidgetControlIntent(index, intent);
@@ -256,7 +256,7 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
 
         pub fn applyCanvasWidgetControlIntent(self: *RuntimeView, index: usize, intent: canvas.WidgetControlIntent) anyerror!?geometry.RectF {
             if (index >= self.widget_layout_node_count) return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             const id = widget.id;
             return switch (intent.kind) {
                 .toggle => blk: {
@@ -273,7 +273,7 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                     // fraction (and note the resize event), exactly like
                     // a drag.
                     if (widget.kind == .split_divider) {
-                        const split_index = self.widget_layout_nodes[index].parent_index orelse break :blk null;
+                        const split_index = self.canvasStorage().widget_layout_nodes[index].parent_index orelse break :blk null;
                         break :blk try self.applyCanvasWidgetSplitFraction(split_index, next_value);
                     }
                     break :blk try self.setCanvasWidgetValue(index, next_value);
@@ -292,10 +292,10 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
         /// the next layout apply — rows are not reconcile-retained).
         pub fn toggleCanvasWidgetTreeItemExpanded(self: *RuntimeView, index: usize) anyerror!?geometry.RectF {
             if (index >= self.widget_layout_node_count) return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (widget.semantics.role != .treeitem or widget.state.disabled) return null;
             const expanded = widget.state.expanded orelse return null;
-            self.widget_layout_nodes[index].widget.state.expanded = !expanded;
+            self.canvasStorage().widget_layout_nodes[index].widget.state.expanded = !expanded;
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
             return self.canvasWidgetDirtyBounds(index, widget.frame);
@@ -314,7 +314,7 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
         /// snapped back on the next position tick.
         pub fn applyCanvasWidgetSliderValue(self: *RuntimeView, id: canvas.ObjectId, point: geometry.PointF) anyerror!?geometry.RectF {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (widget.kind != .slider or widget.state.disabled or widget.frame.width <= 0) return null;
 
             const next_value = (point.x - widget.frame.x) / widget.frame.width;
@@ -325,13 +325,13 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
 
         pub fn toggleCanvasWidgetBooleanControl(self: *RuntimeView, id: canvas.ObjectId) anyerror!?geometry.RectF {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if ((widget.kind != .accordion and widget.kind != .checkbox and widget.kind != .toggle_button and widget.kind != .toggle and !canvasWidgetSwitchControlKind(widget.kind)) or widget.state.disabled) return null;
 
             const selected = canvas_widget_runtime.canvasWidgetCompiledToggleSelected(widget, 8, false, false) orelse
                 canvas_widget_runtime.canvasWidgetCompiledAccordionSelected(widget, 8, null, false) orelse !canvasWidgetBooleanSelected(widget);
-            self.widget_layout_nodes[index].widget.state.selected = selected;
-            self.widget_layout_nodes[index].widget.value = if (selected) 1 else 0;
+            self.canvasStorage().widget_layout_nodes[index].widget.state.selected = selected;
+            self.canvasStorage().widget_layout_nodes[index].widget.value = if (selected) 1 else 0;
             // Disclosure widgets note the toggle for the NEXT rebuild:
             // this optimistic echo already flipped the retained state,
             // so the rebuild-time flip detection that arms the
@@ -347,7 +347,7 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
 
         pub fn setCanvasWidgetSelected(self: *RuntimeView, id: canvas.ObjectId, selected: bool) anyerror!?geometry.RectF {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (widget.state.disabled) return null;
             const tree_row = widget.semantics.role == .treeitem;
             switch (widget.kind) {
@@ -382,7 +382,7 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                 const policy_len = canvas_widget_runtime.canvasWidgetTreePolicy(self.widgetLayoutTree(), index, 8, &clear);
                 if (policy_len) |len| if (len != self.widget_layout_node_count) @panic("invalid tree selection policy result");
                 const scope = if (policy_len == null) canvas_widget_runtime.canvasWidgetTreeScopeIndex(self.widgetLayoutTree(), index) else null;
-                for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, row_index| {
+                for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, row_index| {
                     if (row_index == index) continue;
                     if (node.widget.semantics.role != .treeitem) continue;
                     if (policy_len != null) {
@@ -405,8 +405,8 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                     if (len != self.widget_layout_node_count) @panic("invalid radio selection policy result");
                 }
                 const scope = if (policy_len == null) canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), index) else null;
-                const parent_index = self.widget_layout_nodes[index].parent_index;
-                for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, radio_index| {
+                const parent_index = self.canvasStorage().widget_layout_nodes[index].parent_index;
+                for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, radio_index| {
                     if (radio_index == index or node.widget.kind != .radio) continue;
                     if (policy_len != null) {
                         if (clear[radio_index] == 0) continue;
@@ -428,8 +428,8 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                 else
                     null;
                 if (policy_len) |len| if (len != self.widget_layout_node_count) @panic("invalid sibling selection policy result");
-                const parent_index = self.widget_layout_nodes[index].parent_index;
-                for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, sibling_index| {
+                const parent_index = self.canvasStorage().widget_layout_nodes[index].parent_index;
+                for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, sibling_index| {
                     if (sibling_index == index) continue;
                     if (menu_policy_len != null) {
                         if (menu_clear[sibling_index + 1] == 0) continue;
@@ -445,16 +445,16 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             }
 
             const target_value: f32 = if (selected) 1 else 0;
-            if (self.widget_layout_nodes[index].widget.state.selected != selected or self.widget_layout_nodes[index].widget.value != target_value) {
-                dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(index, self.widget_layout_nodes[index].frame));
+            if (self.canvasStorage().widget_layout_nodes[index].widget.state.selected != selected or self.canvasStorage().widget_layout_nodes[index].widget.value != target_value) {
+                dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(index, self.canvasStorage().widget_layout_nodes[index].frame));
                 changed = true;
             }
             if (!changed) return null;
-            self.widget_layout_nodes[index].widget.state.selected = selected;
-            self.widget_layout_nodes[index].widget.value = target_value;
+            self.canvasStorage().widget_layout_nodes[index].widget.state.selected = selected;
+            self.canvasStorage().widget_layout_nodes[index].widget.value = target_value;
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
-            return dirty orelse self.widget_layout_nodes[index].frame;
+            return dirty orelse self.canvasStorage().widget_layout_nodes[index].frame;
         }
 
         /// Whether the menu group containing `index` currently has a
@@ -463,8 +463,8 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
         /// selection-clearing scope, so the two rules always agree on
         /// what "the group" is.
         fn canvasWidgetMenuGroupHasCommittedRow(self: *const RuntimeView, index: usize) bool {
-            const parent_index = self.widget_layout_nodes[index].parent_index;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count]) |*node| {
+            const parent_index = self.canvasStorage().widget_layout_nodes[index].parent_index;
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count]) |*node| {
                 if (node.parent_index != parent_index or node.widget.kind != .menu_item) continue;
                 if (canvasWidgetSelectableSelected(node.widget)) return true;
             }
@@ -473,13 +473,13 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
 
         pub fn setCanvasWidgetValue(self: *RuntimeView, index: usize, value: f32) anyerror!?geometry.RectF {
             if (index >= self.widget_layout_node_count) return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (!std.math.isFinite(value)) return null;
             var candidate = widget;
             candidate.value = value;
             const next_value = canvas.widgetCompiledSliderValue(candidate, 0, null, 0, false) orelse std.math.clamp(value, 0, 1);
             if (next_value == widget.value) return null;
-            self.widget_layout_nodes[index].widget.value = next_value;
+            self.canvasStorage().widget_layout_nodes[index].widget.value = next_value;
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
             return self.canvasWidgetDirtyBounds(index, widget.frame);

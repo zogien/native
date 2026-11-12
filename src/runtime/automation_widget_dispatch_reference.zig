@@ -227,7 +227,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 return error.ViewNotFound;
             };
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.id) orelse return error.InvalidCommand;
-            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            const widget = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
             if (widget.context_menu.len == 0) return error.ContextMenuUndeclared;
             if (item.item_index >= widget.context_menu.len) return error.ContextMenuItemOutOfRange;
             const declared = widget.context_menu[item.item_index];
@@ -239,7 +239,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         pub fn dispatchWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: platform.WidgetContextMenuActionEvent) anyerror!void {
             const view_index = try widgetContextMenuTargetViewIndex(self, item);
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.id) orelse return error.InvalidCommand;
-            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            const widget = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
 
             // This direct dispatch supersedes any pending presentation:
             // the replacement request commits first (bookkeeping must
@@ -550,9 +550,9 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             var inner_scroll_changed = false;
             if (self.views[view_index].canEditCanvasWidgetText(target.id)) {
                 if (self.views[view_index].canvasWidgetNodeIndexById(target.id)) |node_index| {
-                    const before = self.views[view_index].widget_layout_nodes[node_index].widget;
+                    const before = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
                     self.views[view_index].scrollCanvasTextInputCaretIntoView(node_index);
-                    const after = self.views[view_index].widget_layout_nodes[node_index].widget;
+                    const after = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
                     inner_scroll_changed = before.value != after.value or before.value_x != after.value_x;
                 }
             }
@@ -572,7 +572,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
             } else if (caret_initialized or inner_scroll_changed) {
                 if (self.views[view_index].canvasWidgetNodeIndexById(target.id)) |node_index| {
-                    if (self.views[view_index].canvasWidgetDirtyBounds(node_index, self.views[view_index].widget_layout_nodes[node_index].frame)) |dirty| {
+                    if (self.views[view_index].canvasWidgetDirtyBounds(node_index, self.views[view_index].canvasStorage().widget_layout_nodes[node_index].frame)) |dirty| {
                         try CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, dirty);
                     }
                 }

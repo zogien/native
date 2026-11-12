@@ -14,11 +14,19 @@ const Pair = struct {
     left: *Harness,
     right: *Harness,
     fn create() !Pair {
+        return createOwnedBy(null);
+    }
+    /// `owners` become the runtimes' ownership allocators before they own
+    /// anything (startup already allocates the window's source copy and
+    /// the canvas view's storage), as if each runtime were constructed
+    /// with one.
+    fn createOwnedBy(owners: ?[2]std.mem.Allocator) !Pair {
         const a = try Harness.create(std.testing.allocator, .{});
         errdefer a.destroy(std.testing.allocator);
         const b = try Harness.create(std.testing.allocator, .{});
         errdefer b.destroy(std.testing.allocator);
         for ([_]*Harness{ a, b }, 0..) |h, i| {
+            if (owners) |allocators| h.runtime.owned_allocator = allocators[i];
             h.null_platform.gpu_surfaces = true;
             try h.start(.{ .context = h, .name = "font-registry", .source = sdk.platform.WebViewSource.html("") });
             h.runtime.started_timestamp_ns = 0;
@@ -97,19 +105,21 @@ test "compiled font registry preserves complete admission, permanent identity, c
     try pair.same();
 }
 test "compiled font registry preserves allocation refusal, parse refusal, retry and frozen allocator identity" {
-    const pair = try Pair.create();
     var counters = [_]std.testing.FailingAllocator{
         std.testing.FailingAllocator.init(std.testing.allocator, .{}),
         std.testing.FailingAllocator.init(std.testing.allocator, .{}),
     };
+    const pair = try Pair.createOwnedBy(.{ counters[0].allocator(), counters[1].allocator() });
     var mutated = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     for ([_]*Harness{ pair.left, pair.right }, 0..) |h, i| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-        h.runtime.owned_allocator = failing.allocator();
+        // The runtime's own allocator refuses the registration's bytes.
+        counters[i].fail_index = counters[i].alloc_index;
         try std.testing.expectError(error.OutOfMemory, h.runtime.registerCanvasFont(64, font));
-        h.runtime.owned_allocator = counters[i].allocator();
+        counters[i].fail_index = std.math.maxInt(usize);
+        // A refused parse leaves no bytes behind.
+        const live_bytes = counters[i].allocated_bytes - counters[i].freed_bytes;
         try std.testing.expectError(error.FontParseFailed, h.runtime.registerCanvasFont(64, "bad"));
-        try std.testing.expectEqual(counters[i].allocated_bytes, counters[i].freed_bytes);
+        try std.testing.expectEqual(live_bytes, counters[i].allocated_bytes - counters[i].freed_bytes);
         try h.runtime.registerCanvasFont(64, font);
         h.runtime.options.allocator = mutated.allocator();
     }

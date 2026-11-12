@@ -133,7 +133,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             // loop answers the request event by mounting it — one
             // authored menu, platform-appropriate presentation.
             if (deepestContextMenuRouteNode(self, index, pointer_event.route)) |node_index| {
-                const widget = self.views[index].widget_layout_nodes[node_index].widget;
+                const widget = self.views[index].canvasStorage().widget_layout_nodes[node_index].widget;
                 const count = @min(widget.context_menu.len, items.len);
                 if (count == 0) return;
                 if (has_presenter) {
@@ -197,7 +197,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 facts.selected = self.views[index].canvas_widget_selected_text_id;
                 if (pointer_event.target) |target| {
                     const node_index = self.views[index].canvasWidgetNodeIndexById(target.id) orelse return;
-                    const widget = self.views[index].widget_layout_nodes[node_index].widget;
+                    const widget = self.views[index].canvasStorage().widget_layout_nodes[node_index].widget;
                     facts.target = target.id;
                     facts.flags |= 1 | (if (canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind)) @as(u32, 2) else 0) |
                         (if (widget.state.disabled) @as(u32, 4) else 0) | (if (widget.kind == .terminal) @as(u32, 8) else 0);
@@ -207,7 +207,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                         (if (widget.terminal.pty != 0 and grid.running) @as(u32, 256) else 0);
                     if (self.views[index].canvasWidgetNodeIndexById(facts.selected)) |selected| {
                         facts.flags |= 1024;
-                        facts.selected_group = self.views[index].widget_layout_nodes[selected].widget.static_text_group_id;
+                        facts.selected_group = self.views[index].canvasStorage().widget_layout_nodes[selected].widget.static_text_group_id;
                         facts.target_group = widget.static_text_group_id;
                     }
                 }
@@ -242,7 +242,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             // user clicked (macOS behavior).
             if (pointer_event.target) |target| {
                 const node_index = self.views[index].canvasWidgetNodeIndexById(target.id) orelse return;
-                const widget = self.views[index].widget_layout_nodes[node_index].widget;
+                const widget = self.views[index].canvasStorage().widget_layout_nodes[node_index].widget;
                 if (canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) and !widget.state.disabled) {
                     if (!has_presenter) return;
                     try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event);
@@ -281,8 +281,8 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 const selected_group_target = if (selected_id != 0 and selected_id != target.id) blk: {
                     const selected_index = self.views[index].canvasWidgetNodeIndexById(selected_id) orelse break :blk false;
                     const target_index = self.views[index].canvasWidgetNodeIndexById(target.id) orelse break :blk false;
-                    const selected_widget = self.views[index].widget_layout_nodes[selected_index].widget;
-                    const target_widget = self.views[index].widget_layout_nodes[target_index].widget;
+                    const selected_widget = self.views[index].canvasStorage().widget_layout_nodes[selected_index].widget;
+                    const target_widget = self.views[index].canvasStorage().widget_layout_nodes[target_index].widget;
                     break :blk selected_widget.static_text_group_id != 0 and
                         selected_widget.static_text_group_id == target_widget.static_text_group_id;
                 } else false;
@@ -535,7 +535,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 default_item_paste => {
                     var keyboard_event = editKeyboardEvent(self, view_index, target_id) orelse return;
                     const node_index = self.views[view_index].canvasWidgetNodeIndexById(target_id) orelse return;
-                    const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+                    const widget = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
                     if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return;
                     var paste_buffer: [platform.max_clipboard_data_bytes]u8 = undefined;
                     const text = self.readClipboard(&paste_buffer) catch return;
@@ -560,7 +560,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
 
         fn applyDefaultTerminalAction(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, target_id: canvas.ObjectId, item_id: u32) anyerror!void {
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(target_id) orelse return;
-            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            const widget = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
             if (widget.kind != .terminal or widget.state.disabled) return;
 
             switch (item_id) {
@@ -638,7 +638,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 .paste => {
                     var keyboard = editKeyboardEvent(self, index, pending.target_id) orelse return;
                     const node = self.views[index].canvasWidgetNodeIndexById(pending.target_id) orelse return;
-                    const widget = self.views[index].widget_layout_nodes[node].widget;
+                    const widget = self.views[index].canvasStorage().widget_layout_nodes[node].widget;
                     if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return;
                     var buffer: [platform.max_clipboard_data_bytes]u8 = undefined;
                     const text = self.readClipboard(&buffer) catch return;
@@ -657,7 +657,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 },
                 .terminal_copy, .terminal_paste => {
                     const node = self.views[index].canvasWidgetNodeIndexById(pending.target_id) orelse return;
-                    const widget = self.views[index].widget_layout_nodes[node].widget;
+                    const widget = self.views[index].canvasStorage().widget_layout_nodes[node].widget;
                     if (widget.kind != .terminal or widget.state.disabled) return;
                     const grid = widget.terminal.grid orelse return;
                     if (action == .terminal_copy) {
@@ -712,7 +712,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
 
         fn editableSelectionText(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) ?[]const u8 {
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(target_id) orelse return null;
-            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            const widget = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
             if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return null;
             const range = canvas.widgetTextClipboardState(widget).selection orelse return null;
             return widget.text[range.start..range.end];
@@ -721,12 +721,12 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// The deepest node on the pointer route carrying an app-declared
         /// context menu.
         fn deepestContextMenuRouteNode(self: *const Runtime, view_index: usize, route: []const canvas.WidgetEventRouteEntry) ?usize {
-            if (self.context_menu_policy) |policy| return menu_policy.route(policy, self.views[view_index].widget_layout_nodes[0..self.views[view_index].widget_layout_node_count], route);
+            if (self.context_menu_policy) |policy| return menu_policy.route(policy, self.views[view_index].canvasStorage().widget_layout_nodes[0..self.views[view_index].widget_layout_node_count], route);
             var result: ?usize = null;
             var result_depth: usize = 0;
             for (route) |entry| {
                 if (entry.node_index >= self.views[view_index].widget_layout_node_count) continue;
-                const node = self.views[view_index].widget_layout_nodes[entry.node_index];
+                const node = self.views[view_index].canvasStorage().widget_layout_nodes[entry.node_index];
                 if (node.widget.context_menu.len == 0 or node.widget.state.disabled) continue;
                 if (result == null or node.depth >= result_depth) {
                     result = entry.node_index;

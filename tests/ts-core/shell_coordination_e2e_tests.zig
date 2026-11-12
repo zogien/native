@@ -53,7 +53,7 @@ const Pair = struct {
         try exact(self.left.null_platform.views[0..self.left.null_platform.view_count], self.right.null_platform.views[0..self.right.null_platform.view_count]);
         try exact(self.left.null_platform.webviews[0..self.left.null_platform.webview_count], self.right.null_platform.webviews[0..self.right.null_platform.webview_count]);
         try exact(self.left.runtime.shell_layout_count, self.right.runtime.shell_layout_count);
-        for (self.left.runtime.shell_layouts[0..self.left.runtime.shell_layout_count], self.right.runtime.shell_layouts[0..self.right.runtime.shell_layout_count]) |*a, *b| {
+        for (self.left.runtime.shell_layouts[0..self.left.runtime.shell_layout_count], self.right.runtime.shell_layouts[0..self.right.runtime.shell_layout_count]) |a, b| {
             try exact(a.window_id, b.window_id);
             try exact(a.viewSlice(), b.viewSlice());
         }

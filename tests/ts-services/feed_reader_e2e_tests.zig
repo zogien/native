@@ -65,9 +65,9 @@ const PointerIntentState = struct {
         state.chain = v.canvas_widget_hover_msg_chain;
         state.chain_len = v.canvas_widget_hover_msg_chain_len;
         state.node_len = v.widget_layout_node_count;
-        @memcpy(state.nodes[0..state.node_len], v.widget_layout_nodes[0..state.node_len]);
+        @memcpy(state.nodes[0..state.node_len], v.canvasStorage().widget_layout_nodes[0..state.node_len]);
         state.semantic_len = v.widget_semantics_node_count;
-        @memcpy(state.semantics[0..state.semantic_len], v.widget_semantics_nodes[0..state.semantic_len]);
+        @memcpy(state.semantics[0..state.semantic_len], v.canvasStorage().widget_semantics_nodes[0..state.semantic_len]);
         state.dirty_len = harness.runtime.dirty_region_count;
         @memcpy(state.dirty[0..state.dirty_len], harness.runtime.dirty_regions[0..state.dirty_len]);
         state.cursor_calls = harness.null_platform.view_cursor_count;
@@ -785,9 +785,9 @@ test "compiled scroll runtime preserves driver overscroll, exact echoes and revo
             return canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 300, 180), nodes);
         }
         fn capture(view: anytype, values: []canvas.ScrollState, frames: []geometry.RectF, stage: usize) void {
-            const node = view.widget_layout_nodes[0];
+            const node = view.canvasStorage().widget_layout_nodes[0];
             values[stage] = view.canvasWidgetScrollState(0, node, node.frame);
-            frames[stage] = view.widget_layout_nodes[1].frame;
+            frames[stage] = view.canvasStorage().widget_layout_nodes[1].frame;
         }
     };
     for ([_]bool{ false, true }) |native| {
@@ -1598,9 +1598,9 @@ test "compiled menu policy preserves visible entry traversal committed choice an
         try std.testing.expectEqual(@as(?canvas.ObjectId, 11), view.canvasWidgetMenuSurfaceEntryId(menu_index, true));
         try std.testing.expectEqual(@as(?canvas.ObjectId, 32), view.canvasWidgetMenuSurfaceEntryId(fixed_index, true));
         const selected_index = view.canvasWidgetNodeIndexById(11).?;
-        view.widget_layout_nodes[selected_index].widget.state.disabled = true;
+        view.canvasStorage().widget_layout_nodes[selected_index].widget.state.disabled = true;
         try std.testing.expectEqual(@as(?canvas.ObjectId, 13), view.canvasWidgetMenuSurfaceEntryId(menu_index, false));
-        view.widget_layout_nodes[selected_index].widget.state.disabled = false;
+        view.canvasStorage().widget_layout_nodes[selected_index].widget.state.disabled = false;
         view.canvas_widget_focused_id = 11;
         view.canvas_widget_focus_visible_id = 11;
         // Menu arrows and Home/End stay on visible rows, including a
@@ -1652,11 +1652,11 @@ test "compiled menu policy preserves visible entry traversal committed choice an
         try std.testing.expectEqual(@as(?canvas.ObjectId, 46), view.canvasWidgetMenuSurfaceEntryId(nested_index, false));
         _ = try view.setCanvasWidgetSelected(46, false);
         const list_index = view.canvasWidgetNodeIndexById(43).?;
-        view.widget_layout_nodes[list_index].widget.state.selected = true;
+        view.canvasStorage().widget_layout_nodes[list_index].widget.state.selected = true;
         try std.testing.expectEqual(@as(?canvas.ObjectId, 43), view.canvasWidgetMenuSurfaceEntryId(nested_index, true));
-        view.widget_layout_nodes[list_index].widget.state.selected = false;
+        view.canvasStorage().widget_layout_nodes[list_index].widget.state.selected = false;
         const valued_index = view.canvasWidgetNodeIndexById(41).?;
-        view.widget_layout_nodes[valued_index].widget.value = 1;
+        view.canvasStorage().widget_layout_nodes[valued_index].widget.value = 1;
         try std.testing.expectEqual(@as(?canvas.ObjectId, 46), view.canvasWidgetMenuSurfaceEntryId(nested_index, true));
         try std.testing.expect((try view.setCanvasWidgetSelected(41, true)) != null);
     }
@@ -1733,13 +1733,13 @@ test "compiled toggle policy preserves visible focus and nested group boundaries
         }
         try std.testing.expectEqual(@as(?geometry.RectF, null), try view.toggleCanvasWidgetBooleanControl(12));
         const valued_index = view.canvasWidgetNodeIndexById(30).?;
-        view.widget_layout_nodes[valued_index].widget.value = 0.75;
+        view.canvasStorage().widget_layout_nodes[valued_index].widget.value = 0.75;
         _ = try view.toggleCanvasWidgetBooleanControl(30);
-        try std.testing.expect(!view.widget_layout_nodes[valued_index].widget.state.selected);
-        try std.testing.expectEqual(@as(f32, 0), view.widget_layout_nodes[valued_index].widget.value);
+        try std.testing.expect(!view.canvasStorage().widget_layout_nodes[valued_index].widget.state.selected);
+        try std.testing.expectEqual(@as(f32, 0), view.canvasStorage().widget_layout_nodes[valued_index].widget.value);
         _ = try view.toggleCanvasWidgetBooleanControl(30);
-        try std.testing.expect(view.widget_layout_nodes[valued_index].widget.state.selected);
-        try std.testing.expectEqual(@as(f32, 1), view.widget_layout_nodes[valued_index].widget.value);
+        try std.testing.expect(view.canvasStorage().widget_layout_nodes[valued_index].widget.state.selected);
+        try std.testing.expectEqual(@as(f32, 1), view.canvasStorage().widget_layout_nodes[valued_index].widget.value);
     }
 }
 
@@ -2513,7 +2513,7 @@ test "compiled text rebuild policy matches native source selection composition a
                                 _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", initial_layout);
                                 // Supply retained runtime state independently of the
                                 // previous source tree, as local input/IME would do.
-                                const retained = &harness.runtime.views[0].widget_layout_nodes[1].widget;
+                                const retained = &harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget;
                                 retained.text = "local café\nnext";
                                 retained.text_selection = retained_selection;
                                 retained.text_composition = if (composition_mode == 1) .{ .start = 1, .end = 3 } else null;
@@ -2595,8 +2595,8 @@ test "compiled text reconciliation retains the full budget and respects disabled
         var nodes: [2]canvas.WidgetLayoutNode = undefined;
         var layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{widget} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
         _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
-        harness.runtime.views[0].widget_layout_nodes[1].widget.text = local;
-        harness.runtime.views[0].widget_layout_nodes[1].widget.text_selection = .{ .anchor = local.len, .focus = local.len };
+        harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget.text = local;
+        harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget.text_selection = .{ .anchor = local.len, .focus = local.len };
         _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
         var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
         try std.testing.expectEqualStrings(local, retained.findById(2).?.widget.text);
@@ -2753,7 +2753,7 @@ test "compiled clipboard paste uses shared storage freed by selection and compos
             if (kind == .input) try std.testing.expect(std.mem.indexOfScalar(u8, current.text, '\n') == null);
             // A full view still admits exactly the bytes freed by active
             // preedit, and reports a truncated multibyte suffix loudly.
-            harness.runtime.views[0].widget_layout_nodes[1].widget.text_composition = .{ .start = 0, .end = 2 };
+            harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget.text_composition = .{ .start = 0, .end = 2 };
             fixture.truncated = false;
             try harness.runtime.writeClipboard("é🙂");
             try harness.runtime.dispatchPlatformEvent(application, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "v", .modifiers = .{ .primary = true } } });
@@ -2798,7 +2798,7 @@ test "compiled history recording matches native retained entries and payloads" {
                 .{ .anchor = std.math.maxInt(usize), .focus = std.math.maxInt(usize), .affinity = .downstream },
             }) |selection| {
                 for (edits) |edit| {
-                    var expected_entry: ?@TypeOf(view.canvas_widget_text_history_entries[0]) = null;
+                    var expected_entry: ?@TypeOf(view.canvasStorage().canvas_widget_text_history_entries[0]) = null;
                     var expected_len: usize = 0;
                     for ([_]bool{ false, true }) |compiled| {
                         // Unmount between variants so unchanged authored bytes
@@ -2817,7 +2817,7 @@ test "compiled history recording matches native retained entries and payloads" {
                         _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
                         _ = try view.applyCanvasWidgetTextEdit(2, edit);
                         try std.testing.expect(view.canvas_widget_text_history_entry_count <= 1);
-                        const entry = if (view.canvas_widget_text_history_entry_count == 0) null else view.canvas_widget_text_history_entries[0];
+                        const entry = if (view.canvas_widget_text_history_entry_count == 0) null else view.canvasStorage().canvas_widget_text_history_entries[0];
                         const payload = view.canvas_widget_text_history_bytes[0..view.canvas_widget_text_history_byte_count];
                         if (!compiled) {
                             expected_entry = entry;
@@ -2928,7 +2928,7 @@ test "compiled composition updates preserve removed bytes redo and neighboring p
     // Force actual eviction and movement using a small shared pool, without
     // changing the editors' text capacity or the number of entry slots.
     view.canvas_widget_text_history_bytes = history_pool[0..40];
-    const Entry = @TypeOf(view.canvas_widget_text_history_entries[0]);
+    const Entry = @TypeOf(view.canvasStorage().canvas_widget_text_history_entries[0]);
     const HistorySnapshot = struct {
         entries: [16]Entry = @splat(.{}),
         count: usize = 0,
@@ -2946,9 +2946,9 @@ test "compiled composition updates preserve removed bytes redo and neighboring p
         compiled: bool = false,
         fn save(self: *@This(), v: anytype) !void {
             var snapshot: HistorySnapshot = .{ .count = v.canvas_widget_text_history_entry_count, .next_serial = v.canvas_widget_text_history_next_serial, .payload_len = v.canvas_widget_text_history_byte_count };
-            @memcpy(snapshot.entries[0..snapshot.count], v.canvas_widget_text_history_entries[0..snapshot.count]);
+            @memcpy(snapshot.entries[0..snapshot.count], v.canvasStorage().canvas_widget_text_history_entries[0..snapshot.count]);
             @memcpy(snapshot.payload[0..v.canvas_widget_text_history_byte_count], v.canvas_widget_text_history_bytes[0..v.canvas_widget_text_history_byte_count]);
-            for (v.widget_layout_nodes[1..4], 0..) |node, i| {
+            for (v.canvasStorage().widget_layout_nodes[1..4], 0..) |node, i| {
                 const widget = node.widget;
                 @memcpy(snapshot.text[i][0..widget.text.len], widget.text);
                 snapshot.lengths[i] = widget.text.len;
@@ -2995,7 +2995,7 @@ test "compiled composition updates preserve removed bytes redo and neighboring p
                 try battery.edit(view, 2, .{ .set_selection = .{ .anchor = 7, .focus = 1, .affinity = .downstream } });
                 try battery.edit(view, 2, .{ .insert_text = "é" });
                 try battery.shortcut(harness, app, 2, false);
-                try std.testing.expectEqualStrings("Lé🙂R", view.widget_layout_nodes[1].widget.text);
+                try std.testing.expectEqualStrings("Lé🙂R", view.canvasStorage().widget_layout_nodes[1].widget.text);
                 try battery.edit(view, 3, .{ .insert_text = "old" });
                 try battery.shortcut(harness, app, 3, false);
                 try battery.edit(view, 2, .{ .set_composition = .{ .text = "x" } });
@@ -3004,7 +3004,7 @@ test "compiled composition updates preserve removed bytes redo and neighboring p
                 for ([_][]const u8{ "日本🙂previewlong", "", "é🙂", "ĩ🙂" }) |preview| {
                     try battery.edit(view, 2, .{ .set_composition = .{ .text = preview, .cursor = 0 } });
                     var saw_provisional = false;
-                    for (view.canvas_widget_text_history_entries[0..view.canvas_widget_text_history_entry_count]) |entry| {
+                    for (view.canvasStorage().canvas_widget_text_history_entries[0..view.canvas_widget_text_history_entry_count]) |entry| {
                         if (!entry.provisional_composition) continue;
                         saw_provisional = true;
                         try std.testing.expectEqualStrings("é🙂", view.canvas_widget_text_history_bytes[entry.byte_start..][0..entry.removed_len]);
@@ -3013,7 +3013,7 @@ test "compiled composition updates preserve removed bytes redo and neighboring p
                 }
                 // The oldest widget's edit was evicted to fit the long
                 // preview; target Redo and the later neighbor still fit.
-                for (view.canvas_widget_text_history_entries[0..view.canvas_widget_text_history_entry_count]) |entry| try std.testing.expect(entry.target_id != 4);
+                for (view.canvasStorage().canvas_widget_text_history_entries[0..view.canvas_widget_text_history_entry_count]) |entry| try std.testing.expect(entry.target_id != 4);
                 switch (ending) {
                     0 => try battery.edit(view, 2, .commit_composition),
                     1 => {
@@ -3033,22 +3033,22 @@ test "compiled composition updates preserve removed bytes redo and neighboring p
                         try battery.edit(view, 2, .commit_composition);
                     },
                 }
-                for (view.canvas_widget_text_history_entries[0..view.canvas_widget_text_history_entry_count]) |entry| try std.testing.expect(!entry.provisional_composition);
+                for (view.canvasStorage().canvas_widget_text_history_entries[0..view.canvas_widget_text_history_entry_count]) |entry| try std.testing.expect(!entry.provisional_composition);
                 if (ending == 1) {
                     try battery.shortcut(harness, app, 2, true);
-                    try std.testing.expectEqualStrings("LéR", view.widget_layout_nodes[1].widget.text);
+                    try std.testing.expectEqualStrings("LéR", view.canvasStorage().widget_layout_nodes[1].widget.text);
                 } else if (ending != 4) {
                     try battery.shortcut(harness, app, 2, true);
-                    try std.testing.expectEqualStrings(if (ending == 2) "LR" else "Lĩ🙂R", view.widget_layout_nodes[1].widget.text);
+                    try std.testing.expectEqualStrings(if (ending == 2) "LR" else "Lĩ🙂R", view.canvasStorage().widget_layout_nodes[1].widget.text);
                     try battery.shortcut(harness, app, 2, false);
-                    try std.testing.expectEqualStrings("Lé🙂R", view.widget_layout_nodes[1].widget.text);
-                    try std.testing.expectEqual(@as(usize, 7), view.widget_layout_nodes[1].widget.text_selection.?.anchor);
-                    try std.testing.expectEqual(@as(usize, 1), view.widget_layout_nodes[1].widget.text_selection.?.focus);
+                    try std.testing.expectEqualStrings("Lé🙂R", view.canvasStorage().widget_layout_nodes[1].widget.text);
+                    try std.testing.expectEqual(@as(usize, 7), view.canvasStorage().widget_layout_nodes[1].widget.text_selection.?.anchor);
+                    try std.testing.expectEqual(@as(usize, 1), view.canvasStorage().widget_layout_nodes[1].widget.text_selection.?.focus);
                 }
                 try battery.shortcut(harness, app, 3, false);
-                try std.testing.expectEqualStrings("Neighbor", view.widget_layout_nodes[2].widget.text);
+                try std.testing.expectEqualStrings("Neighbor", view.canvasStorage().widget_layout_nodes[2].widget.text);
                 try battery.shortcut(harness, app, 3, true);
-                try std.testing.expectEqualStrings("NeighborN", view.widget_layout_nodes[2].widget.text);
+                try std.testing.expectEqualStrings("NeighborN", view.canvasStorage().widget_layout_nodes[2].widget.text);
                 try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
             }
         }
@@ -3096,7 +3096,7 @@ test "compiled timeline lookup availability and stale recording match native exa
     try harness.start(.{ .context = &context, .name = "compiled-timeline", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") });
     _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
     const view = &harness.runtime.views[0];
-    const Entry = @TypeOf(view.canvas_widget_text_history_entries[0]);
+    const Entry = @TypeOf(view.canvasStorage().canvas_widget_text_history_entries[0]);
     const target_id = std.math.maxInt(canvas.ObjectId) - 17;
     const neighbor_id = target_id ^ (@as(canvas.ObjectId, 1) << 32);
     const hash_a = comptime std.hash.Wyhash.hash(0, "a");
@@ -3140,7 +3140,7 @@ test "compiled timeline lookup availability and stale recording match native exa
                         view.canvas_widget_text_history_byte_count = pattern.len * 2;
                         for (pattern, 0..) |p, i| {
                             @memcpy(view.canvas_widget_text_history_bytes[i * 2 ..][0..2], "ab");
-                            view.canvas_widget_text_history_entries[i] = .{
+                            view.canvasStorage().canvas_widget_text_history_entries[i] = .{
                                 .serial = std.math.maxInt(u64) - i,
                                 .target_id = if (p.target) target_id else neighbor_id,
                                 .target_kind = if (p.kind) kind else .button,
@@ -3157,8 +3157,8 @@ test "compiled timeline lookup availability and stale recording match native exa
                                 .provisional_composition = p.provisional,
                             };
                         }
-                        if (mode == 3) view.widget_layout_nodes[1].widget.state.disabled = true;
-                        if (mode == 4) view.widget_layout_nodes[1].widget.text_composition = .{ .start = 0, .end = 1 };
+                        if (mode == 3) view.canvasStorage().widget_layout_nodes[1].widget.state.disabled = true;
+                        if (mode == 4) view.canvasStorage().widget_layout_nodes[1].widget.text_composition = .{ .start = 0, .end = 1 };
                         const availability = view.canvasWidgetTextHistoryAvailability(target_id);
                         const shortcut = if (mode < 2) view.canvasWidgetTextHistoryShortcut(.{ .id = target_id, .kind = kind, .bounds = .{}, .index = 1, .state = .{} }, .{ .phase = .key_down, .key = "z", .modifiers = .{ .super = true, .shift = mode == 1 } }) else null;
                         if (mode == 2) _ = try view.applyCanvasWidgetTextEdit(target_id, .{ .insert_text = "!" });
@@ -3173,14 +3173,14 @@ test "compiled timeline lookup availability and stale recording match native exa
                                 s.edit.insert_text = expected_insert[0..inserted.len];
                             };
                             expected_count = count;
-                            @memcpy(expected_entries[0..count], view.canvas_widget_text_history_entries[0..count]);
+                            @memcpy(expected_entries[0..count], view.canvasStorage().canvas_widget_text_history_entries[0..count]);
                             expected_payload_len = payload.len;
                             @memcpy(expected_payload[0..payload.len], payload);
                         } else {
                             try std.testing.expectEqualDeep(expected_availability, availability);
                             try std.testing.expectEqualDeep(expected_shortcut, shortcut);
                             try std.testing.expectEqual(expected_count, count);
-                            try std.testing.expectEqualDeep(expected_entries[0..count], view.canvas_widget_text_history_entries[0..count]);
+                            try std.testing.expectEqualDeep(expected_entries[0..count], view.canvasStorage().canvas_widget_text_history_entries[0..count]);
                             try std.testing.expectEqualSlices(u8, expected_payload[0..expected_payload_len], payload);
                         }
                     }
@@ -3244,16 +3244,16 @@ test "compiled history replay matches native shortcut continuation and completio
                                 var expected_count: usize = 0;
                                 var expected_applied = false;
                                 for ([_]bool{ false, true }) |compiled| {
-                                    view.widget_layout_nodes[1].widget.kind = kind;
-                                    view.widget_layout_nodes[1].widget.interaction_policy = if (compiled) core.nativeTextPolicy else null;
-                                    view.widget_layout_nodes[1].widget.text = text;
-                                    view.widget_layout_nodes[1].widget.text_selection = current_selection;
+                                    view.canvasStorage().widget_layout_nodes[1].widget.kind = kind;
+                                    view.canvasStorage().widget_layout_nodes[1].widget.interaction_policy = if (compiled) core.nativeTextPolicy else null;
+                                    view.canvasStorage().widget_layout_nodes[1].widget.text = text;
+                                    view.canvasStorage().widget_layout_nodes[1].widget.text_selection = current_selection;
                                     view.canvas_widget_focused_id = 2;
                                     view.canvas_widget_text_history_entry_count = 1;
                                     view.canvas_widget_text_history_byte_count = pair.removed.len + pair.inserted.len;
                                     @memcpy(view.canvas_widget_text_history_bytes[0..pair.removed.len], pair.removed);
                                     @memcpy(view.canvas_widget_text_history_bytes[pair.removed.len..][0..pair.inserted.len], pair.inserted);
-                                    view.canvas_widget_text_history_entries[0] = .{
+                                    view.canvasStorage().canvas_widget_text_history_entries[0] = .{
                                         .serial = std.math.maxInt(u64) - 1,
                                         .target_id = 2,
                                         .target_kind = kind,
@@ -3268,7 +3268,7 @@ test "compiled history replay matches native shortcut continuation and completio
                                         .after_selection = after_selection,
                                         .applied = !redo,
                                     };
-                                    const serial = view.canvas_widget_text_history_entries[0].serial;
+                                    const serial = view.canvasStorage().canvas_widget_text_history_entries[0].serial;
                                     const edit = switch (mode) {
                                         0 => if (view.canvasWidgetTextHistoryShortcut(target, .{ .phase = .key_down, .key = "Z", .modifiers = .{ .super = true, .shift = redo } })) |shortcut| shortcut.edit else null,
                                         1 => view.canvasWidgetTextHistoryReplayNext(target, serial, redo),
@@ -3278,7 +3278,7 @@ test "compiled history replay matches native shortcut continuation and completio
                                         },
                                     };
                                     const count = view.canvas_widget_text_history_entry_count;
-                                    const applied = if (count == 0) false else view.canvas_widget_text_history_entries[0].applied;
+                                    const applied = if (count == 0) false else view.canvasStorage().canvas_widget_text_history_entries[0].applied;
                                     if (!compiled) {
                                         expected = edit;
                                         expected_count = count;
@@ -3493,7 +3493,7 @@ test "compiled clipboard keyboard and edit menus preserve source bytes eligibili
                 const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{field} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
                 _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
                 try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 50, .y = 30 } });
-                harness.runtime.views[0].widget_layout_nodes[1].widget.text_selection = case.selection;
+                harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget.text_selection = case.selection;
                 try harness.runtime.writeClipboard("sentinel");
                 const before_writes = harness.null_platform.clipboardWriteCount();
                 try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "c", .modifiers = .{ .primary = true } } });
@@ -3524,7 +3524,7 @@ test "compiled clipboard keyboard and edit menus preserve source bytes eligibili
                     try std.testing.expectEqualStrings(wanted, try harness.runtime.readClipboard(&clipboard));
                     try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_text_history_entry_count);
                 }
-                harness.runtime.views[0].widget_layout_nodes[1].widget.state.disabled = true;
+                harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget.state.disabled = true;
                 const requests = harness.null_platform.context_menu_request_count;
                 try harness.runtime.dispatchPlatformEvent(app, right_click);
                 try std.testing.expectEqual(requests, harness.null_platform.context_menu_request_count);
@@ -3597,7 +3597,7 @@ test "runtime clipboard and history routing consult the focused compiled editor 
     const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{field} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 50, .y = 30 } });
-    harness.runtime.views[0].widget_layout_nodes[1].widget.text_selection = .{ .anchor = 0, .focus = 3 };
+    harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget.text_selection = .{ .anchor = 0, .focus = 3 };
     try harness.runtime.writeClipboard("sentinel");
     const writes = harness.null_platform.clipboardWriteCount();
     const copy = native_sdk.platform.Event{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "C", .modifiers = .{ .primary = true } } };
@@ -3649,18 +3649,18 @@ test "compiled editor boundary policy matches native runtime phases and state" {
                         for (compositions) |composition| {
                             for ([_]?bool{ null, false, true }) |expanded| {
                                 const event = canvas.WidgetKeyboardEvent{ .phase = phase, .key = key, .text = payload, .modifiers = .{ .shift = bits & 1 != 0, .control = bits & 2 != 0, .alt = bits & 4 != 0, .super = bits & 8 != 0 } };
-                                var widget = view.widget_layout_nodes[1].widget;
+                                var widget = view.canvasStorage().widget_layout_nodes[1].widget;
                                 widget.kind = kind;
                                 widget.text_selection = .{ .anchor = 7, .focus = 3 };
                                 widget.text_composition = composition;
                                 widget.state.expanded = expanded;
                                 widget.interaction_policy = null;
-                                view.widget_layout_nodes[1].widget = widget;
+                                view.canvasStorage().widget_layout_nodes[1].widget = widget;
                                 const target = canvas.WidgetFocusTarget{ .id = 2, .kind = kind, .bounds = widget.frame, .index = 1, .state = widget.state };
                                 const expected_intent = canvas.widgetKeyboardTextBoundaryIntent(widget, event);
                                 const expected_edit = view.canvasWidgetKeyboardTextEdit(target, event);
                                 widget.interaction_policy = core.nativeTextPolicy;
-                                view.widget_layout_nodes[1].widget = widget;
+                                view.canvasStorage().widget_layout_nodes[1].widget = widget;
                                 try std.testing.expectEqualDeep(expected_intent, canvas.widgetKeyboardTextBoundaryIntent(widget, event));
                                 try std.testing.expectEqualDeep(expected_edit, view.canvasWidgetKeyboardTextEdit(target, event));
                             }
@@ -3679,9 +3679,9 @@ test "compiled editor boundary policy matches native runtime phases and state" {
     for ([_]canvas.WidgetKind{ .text, .button, .terminal }) |kind| {
         try std.testing.expectEqualDeep(canvas.WidgetTextBoundaryIntent.fallback, canvas.widgetKeyboardTextBoundaryIntent(.{ .kind = kind, .interaction_policy = Never.policy }, escape));
     }
-    view.widget_layout_nodes[1].widget.kind = .search_field;
-    view.widget_layout_nodes[1].widget.state.disabled = true;
-    view.widget_layout_nodes[1].widget.interaction_policy = Never.policy;
+    view.canvasStorage().widget_layout_nodes[1].widget.kind = .search_field;
+    view.canvasStorage().widget_layout_nodes[1].widget.state.disabled = true;
+    view.canvasStorage().widget_layout_nodes[1].widget.interaction_policy = Never.policy;
     try std.testing.expectEqual(@as(?canvas.TextInputEvent, null), view.canvasWidgetKeyboardTextEdit(.{ .id = 2, .kind = .search_field, .bounds = .{}, .index = 1, .state = .{} }, escape));
     try std.testing.expectEqual(@as(?canvas.TextInputEvent, null), view.canvasWidgetKeyboardTextEdit(.{ .id = 999, .kind = .input, .bounds = .{}, .index = 1, .state = .{} }, escape));
 }
@@ -3727,29 +3727,29 @@ test "runtime stamps compiled Escape and single line navigation before retained 
     try Spy.key(harness, app, "escape", "", false);
     try std.testing.expectEqual(@as(usize, 1), Spy.calls);
     try std.testing.expect(Spy.last_edit == null);
-    try std.testing.expectEqualStrings("aé🙂z", view.widget_layout_nodes[1].widget.text);
+    try std.testing.expectEqualStrings("aé🙂z", view.canvasStorage().widget_layout_nodes[1].widget.text);
     Spy.suppress = false;
     _ = try view.applyCanvasWidgetTextEdit(2, .{ .set_selection = .{ .anchor = 7, .focus = 3 } });
     try Spy.key(harness, app, "arrowup", "", true);
     try std.testing.expectEqualDeep(canvas.TextInputEvent{ .move_caret = .{ .direction = .start, .extend = true } }, Spy.last_edit.?);
-    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 7, .focus = 0 }, view.widget_layout_nodes[1].widget.text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 7, .focus = 0 }, view.canvasStorage().widget_layout_nodes[1].widget.text_selection.?);
     _ = try view.applyCanvasWidgetTextEdit(2, .{ .set_selection = .{ .anchor = 3, .focus = 3 } });
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .ime_set_composition, .text = "日本" } });
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), view.canvas_widget_ime_owner_id);
     try Spy.key(harness, app, "ESC", "", false);
     try std.testing.expectEqualDeep(canvas.TextInputEvent.cancel_composition, Spy.last_edit.?);
-    try std.testing.expectEqualStrings("aé🙂z", view.widget_layout_nodes[1].widget.text);
-    try std.testing.expect(view.widget_layout_nodes[1].widget.text_composition == null);
+    try std.testing.expectEqualStrings("aé🙂z", view.canvasStorage().widget_layout_nodes[1].widget.text);
+    try std.testing.expect(view.canvasStorage().widget_layout_nodes[1].widget.text_composition == null);
     try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_widget_ime_owner_id);
     try std.testing.expect(view.canvas_widget_ime_commit_grace == .none);
     view.canvas_widget_focused_id = 3;
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .text_input, .text = "!" } });
-    try std.testing.expectEqualStrings("Neighbor!", view.widget_layout_nodes[2].widget.text);
-    try std.testing.expectEqualStrings("aé🙂z", view.widget_layout_nodes[1].widget.text);
+    try std.testing.expectEqualStrings("Neighbor!", view.canvasStorage().widget_layout_nodes[2].widget.text);
+    try std.testing.expectEqualStrings("aé🙂z", view.canvasStorage().widget_layout_nodes[1].widget.text);
     view.canvas_widget_focused_id = 2;
     try Spy.key(harness, app, "ESC", "", false);
     try std.testing.expectEqualDeep(canvas.TextInputEvent.clear, Spy.last_edit.?);
-    try std.testing.expectEqualStrings("", view.widget_layout_nodes[1].widget.text);
+    try std.testing.expectEqualStrings("", view.canvasStorage().widget_layout_nodes[1].widget.text);
     try Spy.key(harness, app, "ESC", "", false);
     try std.testing.expectEqualDeep(canvas.TextInputEvent.clear, Spy.last_edit.?);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
@@ -5404,14 +5404,14 @@ test "compiled focus return preserves retained dismissal, unmount and compaction
         // Raw retained queries preserve first-match ID facts even when
         // an alias is present. Adoption independently rejects duplicates.
         const alias_index = view.canvasWidgetNodeIndexById(children[2].id).?;
-        view.widget_layout_nodes[alias_index].widget.id = children[0].id;
+        view.canvasStorage().widget_layout_nodes[alias_index].widget.id = children[0].id;
         for (0..7) |surface| {
             view.canvas_widget_focus_return_policy = null;
             const expected = view.canvasWidgetAnchorTriggerFocusId(surface);
             view.canvas_widget_focus_return_policy = CountPolicy.run;
             try std.testing.expectEqual(expected, view.canvasWidgetAnchorTriggerFocusId(surface));
         }
-        view.widget_layout_nodes[alias_index].widget.id = children[2].id;
+        view.canvasStorage().widget_layout_nodes[alias_index].widget.id = children[2].id;
         view.canvas_widget_focus_return_policy = null;
         const surface_index = view.canvasWidgetNodeIndexById(children[1].id).?;
         const expected = view.canvasWidgetAnchorTriggerFocusId(surface_index) orelse 0;
@@ -5420,7 +5420,7 @@ test "compiled focus return preserves retained dismissal, unmount and compaction
         view.canvas_widget_focused_id = item_id;
         view.canvas_widget_focus_visible_id = item_id;
         CountPolicy.calls = 0;
-        const visible = !view.widget_layout_nodes[surface_index].widget.semantics.hidden;
+        const visible = !view.canvasStorage().widget_layout_nodes[surface_index].widget.semantics.hidden;
         _ = try view.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         const dismissed_focus = if (visible) expected else item_id;
         try std.testing.expectEqual(dismissed_focus, view.canvas_widget_focused_id);
@@ -5629,7 +5629,7 @@ test "compiled surface callbacks preserve retained consumers, compaction and sin
         _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
         // Visibility stamping is a native tooltip capability. Compare
         // these exact retained facts, including a visible tooltip sibling.
-        view.widget_layout_nodes[5].widget.semantics.hidden = variant & 16 != 0;
+        view.canvasStorage().widget_layout_nodes[5].widget.semantics.hidden = variant & 16 != 0;
         for (0..8) |index| {
             view.canvas_widget_surface_scope_policy = null;
             const child = view.canvasWidgetAnchoredDismissibleChildIndex(index);
@@ -5839,7 +5839,7 @@ test "compiled tooltip binding preserves prospective pruning and full-width alia
                 .layout = .{ .anchor = if ((index + variant) % 4 == 0) null else .{ .placement = .above } },
             }, .frame = frame, .parent_index = parent, .depth = if (parent) |p| nodes[p].depth + 1 else 0 };
         }
-        @memcpy(view.widget_layout_nodes[0..nodes.len], &nodes);
+        @memcpy(view.canvasStorage().widget_layout_nodes[0..nodes.len], &nodes);
         view.widget_layout_node_count = nodes.len;
         view.widget_layout_root_bounds = geometry.RectF.init(0, 0, 640, 480);
         const layout = view.widgetLayoutTree();
@@ -5937,7 +5937,7 @@ test "compiled tooltip pruning stays transactional on rejected adoption and foll
     view.canvas_tooltip_shown_from_focus = true;
     view.applyCanvasTooltipVisibility();
     const index = view.canvasWidgetOwnedTooltipIndex(1).?;
-    try std.testing.expect(!view.widget_layout_nodes[index].widget.semantics.hidden);
+    try std.testing.expect(!view.canvasStorage().widget_layout_nodes[index].widget.semantics.hidden);
     // Seventeen anchored surfaces exceed the retained per-view budget of sixteen.
     var overflow: [17]canvas.Widget = undefined;
     for (&overflow, 0..) |*widget, i| widget.* = .{ .id = 100 + i, .kind = .tooltip, .text = "Overflow", .layout = .{ .anchor = .{ .placement = .above } } };
@@ -5947,7 +5947,7 @@ test "compiled tooltip pruning stays transactional on rejected adoption and foll
     try std.testing.expectError(error.WidgetAnchoredSurfaceLimitReached, harness.runtime.setCanvasWidgetLayout(1, "canvas", rejected));
     try std.testing.expectEqual(tooltip_id, view.canvas_tooltip_shown_id);
     try std.testing.expectEqual(owner_id, view.canvas_tooltip_shown_owner_id);
-    try std.testing.expect(!view.widget_layout_nodes[index].widget.semantics.hidden);
+    try std.testing.expect(!view.canvasStorage().widget_layout_nodes[index].widget.semantics.hidden);
     _ = try harness.runtime.createView(.{ .window_id = 1, .label = "second", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
     _ = try harness.runtime.setCanvasWidgetLayout(1, "second", view.widgetLayoutTree());
     harness.runtime.views[1].canvas_widget_tooltip_policy = core.nativeTooltipPolicy;
@@ -6035,7 +6035,7 @@ test "compiled tooltip intent matches native event seams and all retained regist
             var expected_semantics_count: usize = 0;
             for (0..2) |backend| {
                 core.rt.frameReset();
-                @memcpy(view.widget_layout_nodes[0..nodes.len], &nodes);
+                @memcpy(view.canvasStorage().widget_layout_nodes[0..nodes.len], &nodes);
                 seed.write(view);
                 harness.runtime.app_active = variant / 72 != 1;
                 harness.runtime.windows[0].info.focused = variant / 72 != 2;
@@ -6046,12 +6046,12 @@ test "compiled tooltip intent matches native event seams and all retained regist
                 view.canvas_last_pointer_position = null;
                 view.canvas_widget_hovered_id = 0;
                 view.canvas_widget_pressed_id = 0;
-                if (cause == 13) view.widget_layout_nodes[1].widget.kind = .text_field;
+                if (cause == 13) view.canvasStorage().widget_layout_nodes[1].widget.kind = .text_field;
                 // Direct surface dismissal also accepts a visible static
                 // zero-ID tooltip; zero equality still clears stale slots.
                 if (cause == 14) {
-                    view.widget_layout_nodes[2].widget.id = 0;
-                    view.widget_layout_nodes[2].widget.layout.anchor = null;
+                    view.canvasStorage().widget_layout_nodes[2].widget.id = 0;
+                    view.canvasStorage().widget_layout_nodes[2].widget.layout.anchor = null;
                 }
                 view.applyCanvasTooltipVisibility();
                 try view.refreshCanvasWidgetSemantics();
@@ -6079,7 +6079,7 @@ test "compiled tooltip intent matches native event seams and all retained regist
                     @memcpy(expected_semantics[0..expected_semantics_count], view.widgetSemantics());
                 } else {
                     try std.testing.expectEqualDeep(expected, State.read(view));
-                    try std.testing.expectEqualDeep(expected_nodes, view.widget_layout_nodes[0..nodes.len].*);
+                    try std.testing.expectEqualDeep(expected_nodes, view.canvasStorage().widget_layout_nodes[0..nodes.len].*);
                     try std.testing.expectEqual(expected_semantics_count, view.widgetSemantics().len);
                     try std.testing.expectEqualDeep(expected_semantics[0..expected_semantics_count], view.widgetSemantics());
                     comparisons += 1;
@@ -6191,7 +6191,7 @@ test "compiled tooltip pointer and frame intent matches complete native retained
             var expected_semantics_count: usize = 0;
             for (0..2) |backend| {
                 core.rt.frameReset();
-                @memcpy(view.widget_layout_nodes[0..nodes.len], &nodes);
+                @memcpy(view.canvasStorage().widget_layout_nodes[0..nodes.len], &nodes);
                 seed.write(view);
                 harness.runtime.app_active = variant / 72 % 3 != 1;
                 harness.runtime.windows[0].info.focused = variant / 72 % 3 != 2;
@@ -6206,7 +6206,7 @@ test "compiled tooltip pointer and frame intent matches complete native retained
                 view.gpu_timestamp_ns = 0;
                 view.widget_tokens.metrics.tooltip_warm_window_ms = if (variant / 216 == 0) 400 else 0;
                 // All declared delays, including immediate and the i32 maximum.
-                view.widget_layout_nodes[2].widget.tooltip_delay_ms = if (variant % 4 == 0) 0 else if (variant % 4 == 1) -1 else if (variant % 4 == 2) 10 else 2147483647;
+                view.canvasStorage().widget_layout_nodes[2].widget.tooltip_delay_ms = if (variant % 4 == 0) 0 else if (variant % 4 == 1) -1 else if (variant % 4 == 2) 10 else 2147483647;
                 view.applyCanvasTooltipVisibility();
                 try view.refreshCanvasWidgetSemantics();
                 view.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
@@ -6235,7 +6235,7 @@ test "compiled tooltip pointer and frame intent matches complete native retained
                     @memcpy(expected_semantics[0..expected_semantics_count], view.widgetSemantics());
                 } else {
                     try std.testing.expectEqualDeep(expected, State.read(view));
-                    try std.testing.expectEqualDeep(expected_nodes, view.widget_layout_nodes[0..nodes.len].*);
+                    try std.testing.expectEqualDeep(expected_nodes, view.canvasStorage().widget_layout_nodes[0..nodes.len].*);
                     try std.testing.expectEqual(expected_semantics_count, view.widgetSemantics().len);
                     try std.testing.expectEqualDeep(expected_semantics[0..expected_semantics_count], view.widgetSemantics());
                     comparisons += 1;
@@ -6359,7 +6359,7 @@ test "compiled tooltip reconciliation matches retained state, semantics and fram
             for (0..2) |backend| {
                 core.rt.frameReset();
                 view.widget_layout_node_count = nodes.len;
-                @memcpy(view.widget_layout_nodes[0..nodes.len], &nodes);
+                @memcpy(view.canvasStorage().widget_layout_nodes[0..nodes.len], &nodes);
                 seed.write(view);
                 harness.runtime.app_active = variant / 72 % 3 != 1;
                 harness.runtime.windows[0].info.focused = variant / 72 % 3 != 2;
@@ -6373,7 +6373,7 @@ test "compiled tooltip reconciliation matches retained state, semantics and fram
                 view.gpu_timestamp_ns = 0;
                 view.widget_tokens.metrics.tooltip_warm_window_ms = if (variant / 216 == 0) 400 else 0;
                 // All declared delays, including immediate and the i32 maximum.
-                view.widget_layout_nodes[2].widget.tooltip_delay_ms = if (variant % 4 == 0) 0 else if (variant % 4 == 1) -1 else if (variant % 4 == 2) 10 else 2147483647;
+                view.canvasStorage().widget_layout_nodes[2].widget.tooltip_delay_ms = if (variant % 4 == 0) 0 else if (variant % 4 == 1) -1 else if (variant % 4 == 2) 10 else 2147483647;
                 view.applyCanvasTooltipVisibility();
                 try view.refreshCanvasWidgetSemantics();
                 view.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
@@ -6406,7 +6406,7 @@ test "compiled tooltip reconciliation matches retained state, semantics and fram
                         if (cause == 23) next_hints[0].layout.anchor = null;
                         next_children[0].children = &next_hints;
                         if (cause == 24) {
-                            view.widget_layout_nodes[2].widget.layout.anchor = null;
+                            view.canvasStorage().widget_layout_nodes[2].widget.layout.anchor = null;
                             view.canvas_tooltip_armed_id = 0;
                             view.canvas_tooltip_shown_id = 0;
                         }
@@ -6526,7 +6526,7 @@ test "compiled tooltip reconciliation stops after a failed visibility capability
             core.rt.frameReset();
             Probe.stages = @splat(false);
             Probe.publishes = 0;
-            @memcpy(view.widget_layout_nodes[0..nodes.len], &nodes);
+            @memcpy(view.canvasStorage().widget_layout_nodes[0..nodes.len], &nodes);
             view.canvas_widget_tooltip_policy = if (backend == 0) null else Probe.policy;
             view.widget_accessibility_published = false;
             view.canvas_widget_hovered_id = owner;
@@ -6548,7 +6548,7 @@ test "compiled tooltip reconciliation stops after a failed visibility capability
             view.canvas_last_pointer_position = if (cause == 3) null else .{ .x = 90, .y = 115 };
             view.gpu_input_timestamp_ns = now;
             view.widget_revision = 100;
-            view.widget_layout_nodes[2].widget.tooltip_delay_ms = 0;
+            view.canvasStorage().widget_layout_nodes[2].widget.tooltip_delay_ms = 0;
             view.applyCanvasTooltipVisibility();
             try view.refreshCanvasWidgetSemantics();
             const result = switch (cause) {
@@ -6567,7 +6567,7 @@ test "compiled tooltip reconciliation stops after a failed visibility capability
                 @memcpy(expected_semantics[0..expected_count], view.widgetSemantics());
             } else {
                 try std.testing.expectEqualDeep(expected_registers, registers);
-                try std.testing.expectEqualDeep(expected_nodes, view.widget_layout_nodes[0..nodes.len].*);
+                try std.testing.expectEqualDeep(expected_nodes, view.canvasStorage().widget_layout_nodes[0..nodes.len].*);
                 try std.testing.expectEqualDeep(expected_semantics[0..expected_count], view.widgetSemantics());
                 try std.testing.expect(!Probe.stages[10] and !Probe.stages[11]); // No reseed or frame after failure.
                 if (cause == 0) try std.testing.expect(!Probe.stages[1] and !Probe.stages[2] and !Probe.stages[3]);
@@ -6647,7 +6647,7 @@ test "compiled tooltip pruning preserves asymmetric stale slots and native-width
         var expected_count: usize = 0;
         for (0..2) |backend| {
             core.rt.frameReset();
-            @memcpy(v.widget_layout_nodes[0..nodes.len], &nodes);
+            @memcpy(v.canvasStorage().widget_layout_nodes[0..nodes.len], &nodes);
             v.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
             v.canvas_tooltip_armed_id = armed;
             v.canvas_tooltip_armed_owner_id = owner;
@@ -6683,7 +6683,7 @@ test "compiled tooltip pruning preserves asymmetric stale slots and native-width
                 @memcpy(expected_semantics[0..expected_count], v.widgetSemantics());
             } else {
                 try std.testing.expectEqualDeep(expected, State.read(v));
-                try std.testing.expectEqualDeep(expected_nodes, v.widget_layout_nodes[0..nodes.len].*);
+                try std.testing.expectEqualDeep(expected_nodes, v.canvasStorage().widget_layout_nodes[0..nodes.len].*);
                 try std.testing.expectEqualDeep(expected_semantics[0..expected_count], v.widgetSemantics());
                 comparisons += 1;
             }
@@ -6895,9 +6895,9 @@ test "compiled surface dismissal preserves complete cleanup and semantics failur
             state.cursor = v.canvas_widget_cursor;
             state.chain_len = v.canvas_widget_hover_msg_chain_len;
             @memcpy(&state.chain, &v.canvas_widget_hover_msg_chain);
-            @memcpy(&state.nodes, v.widget_layout_nodes[0..6]);
+            @memcpy(&state.nodes, v.canvasStorage().widget_layout_nodes[0..6]);
             state.semantic_len = v.widget_semantics_node_count;
-            @memcpy(state.semantics[0..state.semantic_len], v.widget_semantics_nodes[0..state.semantic_len]);
+            @memcpy(state.semantics[0..state.semantic_len], v.canvasStorage().widget_semantics_nodes[0..state.semantic_len]);
             state.dirty_len = runtime.dirty_region_count;
             @memcpy(state.dirty[0..state.dirty_len], runtime.dirty_regions[0..state.dirty_len]);
             return state;
@@ -6950,8 +6950,8 @@ test "compiled surface dismissal preserves complete cleanup and semantics failur
             v.canvas_tooltip_shown_id = 0;
             _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
             try std.testing.expectEqual(@as(usize, 6), v.widget_layout_node_count);
-            v.widget_layout_nodes[2].widget.kind = kind;
-            v.widget_layout_nodes[2].widget.semantics.hidden = false;
+            v.canvasStorage().widget_layout_nodes[2].widget.kind = kind;
+            v.canvasStorage().widget_layout_nodes[2].widget.semantics.hidden = false;
             v.canvas_widget_focused_id = ids[slots % 4];
             v.canvas_widget_focus_visible_id = ids[(slots / 4) % 4];
             v.canvas_widget_hovered_id = ids[(slots / 16) % 4];
@@ -6970,7 +6970,7 @@ test "compiled surface dismissal preserves complete cleanup and semantics failur
             v.canvas_widget_hover_msg_chain_len = canvas.max_widget_depth;
             v.widget_revision = 100;
             harness.runtime.dirty_region_count = 0;
-            if (variant == 3) v.widget_layout_nodes[5].depth = canvas.max_widget_depth;
+            if (variant == 3) v.canvasStorage().widget_layout_nodes[5].depth = canvas.max_widget_depth;
             v.canvas_widget_surface_scope_policy = if (backend == 0) null else Probe.policy;
             v.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
             v.canvas_widget_focus_return_policy = if (backend == 0) null else core.nativeFocusReturnPolicy;
@@ -6979,7 +6979,7 @@ test "compiled surface dismissal preserves complete cleanup and semantics failur
             if (variant == 3) {
                 try std.testing.expectError(error.WidgetDepthExceeded, v.dismissCanvasWidgetSurfaceAtIndex(2));
                 try std.testing.expectEqual(@as(u64, 100), v.widget_revision);
-                try std.testing.expect(v.widget_layout_nodes[2].widget.semantics.hidden);
+                try std.testing.expect(v.canvasStorage().widget_layout_nodes[2].widget.semantics.hidden);
             } else {
                 const dismissed = try v.dismissCanvasWidgetSurfaceAtIndex(2);
                 result = if (dismissed) |value| .{ .id = value.id, .dirty = value.dirty } else null;
@@ -6995,7 +6995,7 @@ test "compiled surface dismissal preserves complete cleanup and semantics failur
                 try std.testing.expectEqualSlices(u8, &.{ 0, 2, 3, 4 }, Probe.stages[0..Probe.len]);
                 comparisons += 1;
             }
-            v.widget_layout_nodes[5].depth = nodes[5].depth;
+            v.canvasStorage().widget_layout_nodes[5].depth = nodes[5].depth;
         }
     };
     try std.testing.expectEqual(@as(usize, 1024), comparisons);
@@ -7009,7 +7009,7 @@ test "compiled surface dismissal preserves complete cleanup and semantics failur
     const compacted = &harness.runtime.views[0];
     try std.testing.expect(compacted.canvas_widget_surface_scope_policy == Probe.policy);
     const compacted_surface = compacted.canvasWidgetNodeIndexById(base + 2).?;
-    compacted.widget_layout_nodes[compacted_surface].widget.semantics.hidden = false;
+    compacted.canvasStorage().widget_layout_nodes[compacted_surface].widget.semantics.hidden = false;
     const return_id = compacted.canvasWidgetAnchorTriggerFocusId(compacted_surface) orelse 0;
     compacted.canvas_widget_focused_id = base + 3;
     compacted.canvas_widget_focus_visible_id = base + 3;
@@ -7083,11 +7083,11 @@ test "compiled outside dismissal preserves anchor toggles, shielding and all cal
             v.canvas_tooltip_shown_id = 0;
             v.canvas_tooltip_armed_id = 0;
             _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
-            v.widget_layout_nodes[3].widget.semantics.hidden = variant & 4 != 0;
-            v.widget_layout_nodes[6].widget.semantics.hidden = false;
+            v.canvasStorage().widget_layout_nodes[3].widget.semantics.hidden = variant & 4 != 0;
+            v.canvasStorage().widget_layout_nodes[6].widget.semantics.hidden = false;
             // Compare first-match full-width aliases on a raw retained tree.
-            if (variant == 7) v.widget_layout_nodes[7].widget.id = base + 2;
-            if (variant == 8) v.widget_layout_nodes[3].widget.id = 0;
+            if (variant == 7) v.canvasStorage().widget_layout_nodes[7].widget.id = base + 2;
+            if (variant == 8) v.canvasStorage().widget_layout_nodes[3].widget.id = 0;
             const focused_id: canvas.ObjectId = switch (focus) {
                 0 => 0,
                 1 => base + 2,
@@ -7148,14 +7148,14 @@ test "compiled outside dismissal preserves anchor toggles, shielding and all cal
                 try std.testing.expectEqual(expected_from_focus, v.canvas_tooltip_shown_from_focus);
                 try std.testing.expectEqualDeep(expected_chain, v.canvas_widget_hover_msg_chain);
                 try std.testing.expectEqual(expected_chain_len, v.canvas_widget_hover_msg_chain_len);
-                try std.testing.expectEqualDeep(expected_nodes, v.widget_layout_nodes[0..8].*);
+                try std.testing.expectEqualDeep(expected_nodes, v.canvasStorage().widget_layout_nodes[0..8].*);
                 try std.testing.expectEqualDeep(expected_semantics[0..expected_semantic_len], v.widgetSemantics());
                 try std.testing.expectEqual(expected_dismissed, dismissed);
                 try std.testing.expectEqualDeep(expected_dirty, dirty);
                 comparisons += 1;
             }
-            v.widget_layout_nodes[7].widget.id = base + 7;
-            v.widget_layout_nodes[3].widget.id = base + 5;
+            v.canvasStorage().widget_layout_nodes[7].widget.id = base + 7;
+            v.canvasStorage().widget_layout_nodes[3].widget.id = base + 5;
         }
     };
     try std.testing.expectEqual(@as(usize, 3780), comparisons);
@@ -7293,7 +7293,7 @@ test "compiled pointer interaction matches complete native state and fallible co
     var retained: [2][8]canvas.WidgetLayoutNode = undefined;
     for (harnesses, 0..) |harness, backend| {
         _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
-        @memcpy(&retained[backend], harness.runtime.views[0].widget_layout_nodes[0..8]);
+        @memcpy(&retained[backend], harness.runtime.views[0].canvasStorage().widget_layout_nodes[0..8]);
         harness.runtime.options.platform.services.set_view_cursor_fn = CursorProbe.set;
     }
     const points = [_]geometry.PointF{ .{ .x = 50, .y = 40 }, .{ .x = 50, .y = 125 }, .{ .x = 320, .y = 170 }, .{ .x = 321, .y = 170 }, .{ .x = 670, .y = 460 }, .{ .x = -10, .y = -20 } };
@@ -7316,7 +7316,7 @@ test "compiled pointer interaction matches complete native state and fallible co
             const harness = harnesses[backend];
             const v = &harness.runtime.views[0];
             core.rt.frameReset();
-            @memcpy(v.widget_layout_nodes[0..8], &retained[backend]);
+            @memcpy(v.canvasStorage().widget_layout_nodes[0..8], &retained[backend]);
             v.canvas_widget_surface_scope_policy = null;
             v.canvas_widget_tooltip_policy = null;
             v.canvas_widget_focused_id = base + 4;
@@ -7371,7 +7371,7 @@ test "compiled pointer interaction matches complete native state and fallible co
             NoEvents.input = null;
             const input = native_sdk.GpuSurfaceInputEvent{ .window_id = 1, .label = "canvas", .kind = kind, .pointer_id = pointer_id, .x = point.x, .y = point.y };
             // An unrelated invalid node fails only a later semantics commit.
-            if (fault == 1) v.widget_layout_nodes[7].depth = canvas.max_widget_depth;
+            if (fault == 1) v.canvasStorage().widget_layout_nodes[7].depth = canvas.max_widget_depth;
             v.canvas_widget_surface_scope_policy = if (backend == 0) null else core.nativeSurfaceScopePolicy;
             v.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
             var err: ?anyerror = null;
@@ -7478,8 +7478,8 @@ test "compiled pointer focus preserves all ring kinds, aliases and unchanged key
             _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
             // Raw retained aliases and zero IDs retain the reference's
             // first-match behavior; source publication rejects aliases.
-            if (variant == 2) v.widget_layout_nodes[1].widget.id = target;
-            if (variant == 4) v.widget_layout_nodes[2].widget.id = 0;
+            if (variant == 2) v.canvasStorage().widget_layout_nodes[1].widget.id = target;
+            if (variant == 4) v.canvasStorage().widget_layout_nodes[2].widget.id = 0;
             v.canvas_widget_focused_id = retained_ids[slot];
             v.canvas_widget_focus_visible_id = retained_ids[slot];
             v.canvas_widget_focus_visible_keyboard = keyboard;
@@ -7534,8 +7534,8 @@ test "compiled pointer focus preserves all ring kinds, aliases and unchanged key
             }
             // Restore the deliberately invalid raw fixture before the
             // next adoption validates both old and candidate identities.
-            v.widget_layout_nodes[1].widget.id = target - 2;
-            v.widget_layout_nodes[2].widget.id = target;
+            v.canvasStorage().widget_layout_nodes[1].widget.id = target - 2;
+            v.canvasStorage().widget_layout_nodes[2].widget.id = target;
         }
     };
     try std.testing.expectEqual(@as(usize, 360), comparisons);
@@ -7574,7 +7574,7 @@ test "compiled consumed secondary input preserves containment retirement and vie
         harness.runtime.views[1].canvas_widget_surface_scope_policy = Probe.policy;
         try harness.runtime.closeView(1, "retired");
         try std.testing.expect(harness.runtime.views[0].canvas_widget_surface_scope_policy == Probe.policy);
-        @memcpy(&retained[backend], harness.runtime.views[0].widget_layout_nodes[0..2]);
+        @memcpy(&retained[backend], harness.runtime.views[0].canvasStorage().widget_layout_nodes[0..2]);
     }
     const kinds = [_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up, .pointer_drag, .pointer_move, .pointer_cancel };
     const pointers = [_]u64{ 0, 7, 0x8000_0000_0000_0007, std.math.maxInt(u64) };
@@ -7585,7 +7585,7 @@ test "compiled consumed secondary input preserves containment retirement and vie
             const harness = harnesses[backend];
             const v = &harness.runtime.views[0];
             core.rt.frameReset();
-            @memcpy(v.widget_layout_nodes[0..2], &retained[backend]);
+            @memcpy(v.canvasStorage().widget_layout_nodes[0..2], &retained[backend]);
             v.canvas_widget_surface_scope_policy = if (backend == 0) null else Probe.policy;
             v.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
             v.canvas_widget_hovered_id = children[0].id;
@@ -7696,8 +7696,8 @@ test "compiled command consumers preserve complete native state, exact ids and c
         for (harnesses, 0..) |harness, backend| {
             _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
             harness.runtime.views[0].canvas_widget_surface_scope_policy = if (backend == 0) null else core.nativeSurfaceScopePolicy;
-            harness.runtime.views[0].widget_layout_nodes[1].widget.id = id;
-            harness.runtime.views[0].widget_layout_nodes[1].widget.kind = kind;
+            harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget.id = id;
+            harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget.kind = kind;
         }
         for (phases) |phase| for (0..16) |variant| {
             var expected: PointerIntentState = undefined;
@@ -7730,8 +7730,8 @@ test "compiled command consumers preserve complete native state, exact ids and c
         for (0..4) |variant| for (harnesses, 0..) |harness, backend| {
             recorders[backend] = .{};
             const v = &harness.runtime.views[0];
-            v.widget_layout_nodes[1].widget.kind = if (variant == 1) .text else if (variant == 2) .button else kind;
-            v.widget_layout_nodes[1].widget.command = if (variant == 3) "" else "current.command";
+            v.canvasStorage().widget_layout_nodes[1].widget.kind = if (variant == 1) .text else if (variant == 2) .button else kind;
+            v.canvasStorage().widget_layout_nodes[1].widget.command = if (variant == 3) "" else "current.command";
             try harness.runtime.dispatchCanvasWidgetCommandForId(apps[backend], 0, id);
             if (backend == 1) {
                 try std.testing.expectEqualDeep(recorders[0], recorders[1]);
@@ -7743,9 +7743,9 @@ test "compiled command consumers preserve complete native state, exact ids and c
     for (harnesses, 0..) |harness, backend| {
         recorders[backend] = .{};
         const v = &harness.runtime.views[0];
-        v.widget_layout_nodes[1].widget.id = 7;
-        v.widget_layout_nodes[1].widget.kind = .button;
-        v.widget_layout_nodes[1].widget.command = "invalid/name";
+        v.canvasStorage().widget_layout_nodes[1].widget.id = 7;
+        v.canvasStorage().widget_layout_nodes[1].widget.kind = .button;
+        v.canvasStorage().widget_layout_nodes[1].widget.command = "invalid/name";
         try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchCanvasWidgetCommandForId(apps[backend], 0, 7));
         try std.testing.expectEqual(@as(usize, 0), recorders[backend].count);
         const point: geometry.PointF = .{ .x = 10, .y = 10 };
@@ -7796,7 +7796,7 @@ test "compiled keyboard commands match native canonical keys, modifiers, expansi
         for (harnesses, 0..) |harness, backend| {
             recorders[backend] = .{};
             const v = &harness.runtime.views[0];
-            v.widget_layout_nodes[1].widget.kind = kind;
+            v.canvasStorage().widget_layout_nodes[1].widget.kind = kind;
             const target: canvas.WidgetFocusTarget = .{ .index = 1, .id = id, .kind = kind, .bounds = nodes[1].frame, .state = .{ .expanded = if (expanded == 0) null else expanded == 2 } };
             const event: runtime_ns.CanvasWidgetKeyboardEvent = .{ .view_label = "canvas", .target = target, .keyboard = .{ .phase = phase, .key = key, .focus_moved = moved, .modifiers = .{ .shift = modifiers & 1 != 0, .control = modifiers & 2 != 0, .alt = modifiers & 4 != 0, .super = modifiers & 8 != 0 } } };
             try harness.runtime.dispatchCanvasWidgetCommandFromKeyboard(apps[backend], event);
@@ -8205,9 +8205,9 @@ test "compiled keyboard participation matches native kinds, roles and exact iden
     const view = &harness.runtime.views[0];
     const ids = [_]u64{ 0, 7, 9007199254740993, std.math.maxInt(u64) };
     for (std.enums.values(canvas.WidgetKind)) |kind| for (std.enums.values(canvas.WidgetRole)) |role| for (ids) |id| for (0..3) |identity_case| for (0..2) |stage| {
-        view.widget_layout_nodes[1].widget.id = if (identity_case == 2) id ^ 1 else id;
-        view.widget_layout_nodes[1].widget.kind = kind;
-        view.widget_layout_nodes[1].widget.semantics.role = role;
+        view.canvasStorage().widget_layout_nodes[1].widget.id = if (identity_case == 2) id ^ 1 else id;
+        view.canvasStorage().widget_layout_nodes[1].widget.kind = kind;
+        view.canvasStorage().widget_layout_nodes[1].widget.semantics.role = role;
         view.canvas_widget_focus_visible_id = if (identity_case == 0) id else id ^ 1;
         const before = PointerIntentState.read(view, harness);
         view.canvas_widget_surface_scope_policy = null;
@@ -8233,9 +8233,9 @@ test "compiled keyboard participation matches complete routed events and borrowe
     var expected_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
     var actual_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
     for ([_]canvas.WidgetKind{ .list_item, .button, .menu_item }) |kind| for ([_]canvas.WidgetRole{ .none, .treeitem }) |role| for (0..16) |flags| for (0..3) |focus_case| for ([_]native_sdk.platform.GpuSurfaceInputKind{ .key_down, .key_up, .text_input }) |phase| for ([_][]const u8{ "arrowdown", "arrowup", "home", "end", "enter", "space", "tab", "a", "unknown" }) |key| {
-        view.widget_layout_nodes[1].widget.kind = kind;
-        view.widget_layout_nodes[1].widget.semantics.role = role;
-        view.widget_layout_nodes[1].widget.state.disabled = flags & 4 != 0;
+        view.canvasStorage().widget_layout_nodes[1].widget.kind = kind;
+        view.canvasStorage().widget_layout_nodes[1].widget.semantics.role = role;
+        view.canvasStorage().widget_layout_nodes[1].widget.state.disabled = flags & 4 != 0;
         view.focused = flags & 8 == 0;
         view.canvas_widget_focused_id = if (focus_case == 0) 0 else if (focus_case == 1) children[0].id else children[0].id + 1;
         view.canvas_widget_focus_visible_id = if (flags & 1 != 0) view.canvas_widget_focused_id else view.canvas_widget_focused_id ^ 1;
@@ -8312,8 +8312,8 @@ test "compiled keyboard participation owns navigation, routing and explicit acti
             view.canvas_widget_focused_id = children[0].id;
             view.canvas_widget_focus_visible_id = if (ring) children[0].id else 0;
             view.canvas_widget_focus_visible_keyboard = ring;
-            view.widget_layout_nodes[1].widget.semantics.role = role;
-            view.widget_layout_nodes[2].widget.semantics.role = role;
+            view.canvasStorage().widget_layout_nodes[1].widget.semantics.role = role;
+            view.canvasStorage().widget_layout_nodes[2].widget.semantics.role = role;
             const app: native_sdk.App = .{ .context = &events[backend], .name = "keys", .source = native_sdk.WebViewSource.html(""), .event_fn = Events.event };
             try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .timestamp_ns = 1_000_000, .key = key, .modifiers = .{ .shift = modifiers & 1 != 0, .control = modifiers & 2 != 0 } } });
             if (backend == 0) expected = PointerIntentState.read(view, harness) else {
@@ -8329,7 +8329,7 @@ test "compiled keyboard participation owns navigation, routing and explicit acti
             view.canvas_widget_focused_id = children[0].id;
             view.canvas_widget_focus_visible_id = if (ring) children[0].id else 0;
             view.canvas_widget_focus_visible_keyboard = ring;
-            view.widget_layout_nodes[1].widget.semantics.role = role;
+            view.canvasStorage().widget_layout_nodes[1].widget.semantics.role = role;
             const app: native_sdk.App = .{ .context = &events[backend], .name = "keys", .source = native_sdk.WebViewSource.html(""), .event_fn = Events.event };
             const input_timestamp = view.gpu_input_timestamp_ns;
             _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = children[0].id, .action = action });
@@ -8353,8 +8353,8 @@ test "compiled keyboard participation owns navigation, routing and explicit acti
         view.canvas_widget_focused_id = children[0].id;
         view.canvas_widget_focus_visible_id = 0;
         view.canvas_widget_focus_visible_keyboard = false;
-        view.widget_layout_nodes[1].widget.semantics.role = .none;
-        view.widget_layout_nodes[2].widget.semantics.role = .none;
+        view.canvasStorage().widget_layout_nodes[1].widget.semantics.role = .none;
+        view.canvasStorage().widget_layout_nodes[2].widget.semantics.role = .none;
         try compiled.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .timestamp_ns = 1_000_000, .key = "arrowdown" } });
         try std.testing.expectEqual(if (decision == 1) children[0].id else children[1].id, view.canvas_widget_focused_id);
         try std.testing.expectEqual(if (decision == 1) @as(u64, 0) else children[1].id, events[1].target);
@@ -8545,15 +8545,15 @@ test "compiled keyboard focus owns intent, ordering, eligibility, visibility, co
     for ([_]u8{ 8, 6 }) |stage| {
         view.canvas_widget_focused_id = children[0].id;
         view.canvas_widget_focus_visible_id = 0;
-        view.widget_layout_nodes[2].widget.text_selection = null;
+        view.canvasStorage().widget_layout_nodes[2].widget.text_selection = null;
         Spy.stage = stage;
         Spy.decision = if (stage == 6) 1 else 0;
         try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab", .timestamp_ns = 123_000_000 } });
         try std.testing.expectEqual(children[1].id, view.canvas_widget_focused_id);
-        if (stage == 8) try std.testing.expectEqual(@as(?canvas.TextSelection, null), view.widget_layout_nodes[2].widget.text_selection) else {
+        if (stage == 8) try std.testing.expectEqual(@as(?canvas.TextSelection, null), view.canvasStorage().widget_layout_nodes[2].widget.text_selection) else {
             try std.testing.expectEqual(@as(u64, 0), view.canvas_widget_focus_visible_id);
             try std.testing.expect(!view.canvas_widget_focus_visible_keyboard);
-            try std.testing.expectEqual(canvas.TextSelection.collapsed("café".len), view.widget_layout_nodes[2].widget.text_selection.?);
+            try std.testing.expectEqual(canvas.TextSelection.collapsed("café".len), view.canvasStorage().widget_layout_nodes[2].widget.text_selection.?);
         }
     }
     Spy.stage = 255;
@@ -8652,7 +8652,7 @@ test "compiled keyboard focus preserves fixed clip continuations, exhausted walk
             _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
             const view = &harness.runtime.views[0];
             view.focused = true;
-            for (view.widget_layout_nodes[0..view.widget_layout_node_count]) |*node| if (node.widget.kind == .radio) {
+            for (view.canvasStorage().widget_layout_nodes[0..view.widget_layout_node_count]) |*node| if (node.widget.kind == .radio) {
                 node.widget.state.selected = node.widget.id == 5;
                 node.widget.value = 0;
             };
@@ -8679,13 +8679,13 @@ test "compiled keyboard focus preserves fixed clip continuations, exhausted walk
             view.canvas_widget_focused_id = 2;
             view.canvas_widget_focus_visible_id = 0;
             view.canvas_widget_focus_visible_keyboard = false;
-            view.widget_layout_nodes[1].widget.text_selection = if (existing_selection) .{ .anchor = 1, .focus = 3 } else null;
-            view.widget_layout_nodes[2].depth = canvas.max_widget_depth;
+            view.canvasStorage().widget_layout_nodes[1].widget.text_selection = if (existing_selection) .{ .anchor = 1, .focus = 3 } else null;
+            view.canvasStorage().widget_layout_nodes[2].depth = canvas.max_widget_depth;
             const revision = view.widget_revision;
             if (!existing_selection) {
                 try std.testing.expectError(error.WidgetDepthExceeded, harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab", .timestamp_ns = 789_000_000 } }));
                 try std.testing.expectEqual(revision, view.widget_revision);
-                try std.testing.expectEqual(canvas.TextSelection.collapsed("café".len), view.widget_layout_nodes[1].widget.text_selection.?);
+                try std.testing.expectEqual(canvas.TextSelection.collapsed("café".len), view.canvasStorage().widget_layout_nodes[1].widget.text_selection.?);
             } else try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab", .timestamp_ns = 789_000_000 } });
             try std.testing.expectEqual(editables[0].id, view.canvas_widget_focused_id);
             if (backend == 0) expected = PointerIntentState.read(view, harness) else try PointerIntentState.expect(expected, PointerIntentState.read(view, harness));
@@ -8921,14 +8921,14 @@ test "compiled drag routing preserves complete state, exact identities and orpha
     const ids = [_]u64{ 2, 9007199254740993, std.math.maxInt(u64) };
     const values = [_]f32{ 0, 5.9999995, 6, -6, 30 };
     for (ids) |id| {
-        view.widget_layout_nodes[1].widget.id = id;
-        view.widget_layout_nodes[1].widget.state.disabled = false;
+        view.canvasStorage().widget_layout_nodes[1].widget.id = id;
+        view.canvasStorage().widget_layout_nodes[1].widget.state.disabled = false;
         var capture_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
         const capture = try view.widgetLayoutTree().routeDragEvent(.{ .source_id = id, .point = .{} }, &capture_entries);
         const hit = capture.target.?;
         for (0..3) |eligibility| for (0..16) |mask| for (ids) |pointer| for ([_]bool{ false, true }) |same_pointer| for (kinds) |kind| for (values) |dx| {
-            view.widget_layout_nodes[1].widget.state.disabled = eligibility == 1;
-            view.widget_layout_nodes[1].widget.id = if (eligibility == 2) id ^ 1 else id;
+            view.canvasStorage().widget_layout_nodes[1].widget.state.disabled = eligibility == 1;
+            view.canvasStorage().widget_layout_nodes[1].widget.id = if (eligibility == 2) id ^ 1 else id;
             const input: native_sdk.platform.GpuSurfaceInputEvent = .{ .window_id = 1, .label = "canvas", .kind = kind, .pointer_id = if (same_pointer) pointer else pointer ^ 1, .x = 10 + dx, .y = 20, .delta_x = 99 };
             var expected_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
             var actual_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;

@@ -193,6 +193,71 @@ pub fn clearImeGraceOnViewBlur(runtime: anytype, view: *RuntimeView) void {
     }
 }
 
+/// The fixed-capacity buffers of one gpu-surface view: the display list
+/// and widget tree storage, every array their retained slices point into
+/// (gradient stops, path elements, glyphs, text bytes, spans, context
+/// menus, chart data, text history), and the large per-view planner
+/// caches and packet baseline mirrors. Capacities are the per-view
+/// budgets in `canvas_limits.zig`; what this block changes is WHEN the
+/// bytes exist. The runtime allocates one from its init-frozen
+/// `owned_allocator` when a gpu-surface view is created and frees it
+/// when the view is removed or the runtime deinits, so a runtime pays
+/// for the canvas views it has, not for every view slot it could have.
+/// Native-control views never own one. Keeping every array a retained
+/// slice can point into inside this one block is what lets view
+/// compaction move a view by moving the pointer: the slices travel with
+/// the bytes they name.
+pub const ViewCanvasStorage = struct {
+    canvas_packet_baseline_keys: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
+    canvas_packet_baseline_fingerprints: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
+    /// Draw-order-parallel bounds of the retained baseline commands: the
+    /// pixels each retained command covered when it last reached the
+    /// glass. The frame planner derives Msg-rebuild dirty bounds from the
+    /// SAME edit script the patch present ships (upserts + evicts), and
+    /// an upsert/evict must repaint the command's OLD extent too — these
+    /// are those extents.
+    canvas_packet_baseline_bounds: [max_canvas_retained_packet_commands_per_view]geometry.RectF = undefined,
+    canvas_commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
+    canvas_gradient_stops: [max_canvas_gradient_stops_per_view]canvas.GradientStop = undefined,
+    canvas_path_elements: [max_canvas_path_elements_per_view]canvas.PathElement = undefined,
+    canvas_glyphs: [max_canvas_glyphs_per_view]canvas.Glyph = undefined,
+    canvas_text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
+    presented_canvas_commands: [max_canvas_commands_per_view]PresentedCanvasCommand = undefined,
+    canvas_render_animations: [max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined,
+    canvas_frame_render_overrides: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
+    canvas_frame_path_geometry_cache: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometryCacheEntry = undefined,
+    canvas_frame_image_cache: [max_canvas_images_per_view]canvas.RenderImageCacheEntry = undefined,
+    canvas_frame_layer_cache: [max_canvas_layers_per_view]canvas.RenderLayerCacheEntry = undefined,
+    canvas_frame_resource_cache: [max_canvas_resources_per_view]canvas.RenderResourceCacheEntry = undefined,
+    canvas_frame_visual_effect_cache: [max_canvas_visual_effects_per_view]canvas.VisualEffectCacheEntry = undefined,
+    canvas_frame_glyph_atlas_cache: [max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry = undefined,
+    canvas_frame_text_layout_cache: [max_canvas_text_layouts_per_view]canvas.TextLayoutCacheEntry = undefined,
+    widget_layout_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
+    widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
+    widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,
+    widget_source_text_entries: [max_canvas_widget_source_text_entries_per_view]CanvasWidgetSourceTextEntry = undefined,
+    widget_source_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]CanvasWidgetSourceScrollEntry = undefined,
+    /// SOURCE-side selected state per control on the previous rebuild:
+    /// the control reconcile reads it to tell model-driven
+    /// toggle-buttons (source wins) from uncontrolled ones (retained
+    /// state wins).
+    widget_source_control_entries: [canvas_limits.max_canvas_widget_nodes_per_view]canvas_widget_runtime.CanvasWidgetSourceControlEntry = undefined,
+    widget_text_inline_bytes: [canvas_limits.max_canvas_widget_inline_text_bytes_per_view]u8 = undefined,
+    widget_span_entries: [canvas_limits.max_canvas_widget_spans_per_view]canvas.TextSpan = undefined,
+    widget_context_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view]canvas.WidgetContextMenuItem = undefined,
+    /// Chart series and points retained across all `.chart` widgets of
+    /// the view (labels ride `widget_text_bytes`), same bump-copy
+    /// discipline as spans.
+    widget_chart_series_entries: [canvas_limits.max_canvas_widget_chart_series_per_view]canvas.ChartSeries = undefined,
+    widget_chart_points: [canvas_limits.max_canvas_widget_chart_points_per_view]f32 = undefined,
+    widget_chart_x_labels: [canvas_limits.max_canvas_widget_chart_x_labels_per_view][]const u8 = undefined,
+    /// Per-view, per-widget undo/redo deltas. Text bytes are shared across
+    /// entries, so ordinary typing costs one byte per step rather than a
+    /// full document snapshot.
+    canvas_widget_text_history_entries: [max_canvas_widget_text_history_entries_per_view]view_widget_text.CanvasWidgetTextHistoryEntry = undefined,
+    canvas_widget_text_history_inline_bytes: [canvas_limits.max_canvas_widget_inline_text_history_bytes_per_view]u8 = undefined,
+};
+
 pub const RuntimeView = struct {
     id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
@@ -290,31 +355,21 @@ pub const RuntimeView = struct {
     canvas_packet_baseline_count: usize = 0,
     canvas_packet_baseline_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     canvas_packet_baseline_scale: f32 = 1,
-    canvas_packet_baseline_keys: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
-    canvas_packet_baseline_fingerprints: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
-    /// Draw-order-parallel bounds of the retained baseline commands: the
-    /// pixels each retained command covered when it last reached the
-    /// glass. The frame planner derives Msg-rebuild dirty bounds from the
-    /// SAME edit script the patch present ships (upserts + evicts), and
-    /// an upsert/evict must repaint the command's OLD extent too — these
-    /// are those extents.
-    canvas_packet_baseline_bounds: [max_canvas_retained_packet_commands_per_view]geometry.RectF = undefined,
+    /// This view's canvas and widget buffers (see `ViewCanvasStorage`):
+    /// owned by gpu-surface views from creation to removal, null for
+    /// every other kind. Reach it through `canvasStorage()`.
+    canvas_storage: ?*ViewCanvasStorage = null,
     /// Patch telemetry surfaced on the automation snapshot view line
     /// (present_mode= / present_patch_*= / present_retained_commands=).
     gpu_present_packet_mode: platform.GpuPresentPacketMode = .none,
     gpu_present_patch_bytes: usize = 0,
     gpu_present_patch_upsert_count: usize = 0,
     gpu_present_patch_evict_count: usize = 0,
-    canvas_commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
     canvas_command_count: usize = 0,
     canvas_revision: u64 = 0,
-    canvas_gradient_stops: [max_canvas_gradient_stops_per_view]canvas.GradientStop = undefined,
     canvas_gradient_stop_count: usize = 0,
-    canvas_path_elements: [max_canvas_path_elements_per_view]canvas.PathElement = undefined,
     canvas_path_element_count: usize = 0,
-    canvas_glyphs: [max_canvas_glyphs_per_view]canvas.Glyph = undefined,
     canvas_glyph_count: usize = 0,
-    canvas_text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
     canvas_text_len: usize = 0,
     canvas_display_list_widget_owned: bool = false,
     canvas_widget_display_list_prefix_count: usize = 0,
@@ -328,10 +383,8 @@ pub const RuntimeView = struct {
     presented_canvas_revision: u64 = 0,
     presented_canvas_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     presented_canvas_scale: f32 = 1,
-    presented_canvas_commands: [max_canvas_commands_per_view]PresentedCanvasCommand = undefined,
     presented_canvas_command_count: usize = 0,
     presented_canvas_has_unkeyed: bool = false,
-    canvas_render_animations: [max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined,
     canvas_render_animation_count: usize = 0,
     /// Runtime-driven layout tweens (split fractions easing toward
     /// declared targets). Advanced once per presented frame from the
@@ -374,21 +427,13 @@ pub const RuntimeView = struct {
     canvas_widget_loop_animation_count: usize = 0,
     canvas_render_animation_dirty_bounds: [max_canvas_render_animation_dirty_bounds_per_view]CanvasRenderAnimationDirtyBounds = undefined,
     canvas_render_animation_dirty_bounds_count: usize = 0,
-    canvas_frame_render_overrides: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
     canvas_frame_render_override_count: usize = 0,
-    canvas_frame_path_geometry_cache: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometryCacheEntry = undefined,
     canvas_frame_path_geometry_cache_count: usize = 0,
-    canvas_frame_image_cache: [max_canvas_images_per_view]canvas.RenderImageCacheEntry = undefined,
     canvas_frame_image_cache_count: usize = 0,
-    canvas_frame_layer_cache: [max_canvas_layers_per_view]canvas.RenderLayerCacheEntry = undefined,
     canvas_frame_layer_cache_count: usize = 0,
-    canvas_frame_resource_cache: [max_canvas_resources_per_view]canvas.RenderResourceCacheEntry = undefined,
     canvas_frame_resource_cache_count: usize = 0,
-    canvas_frame_visual_effect_cache: [max_canvas_visual_effects_per_view]canvas.VisualEffectCacheEntry = undefined,
     canvas_frame_visual_effect_cache_count: usize = 0,
-    canvas_frame_glyph_atlas_cache: [max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry = undefined,
     canvas_frame_glyph_atlas_cache_count: usize = 0,
-    canvas_frame_text_layout_cache: [max_canvas_text_layouts_per_view]canvas.TextLayoutCacheEntry = undefined,
     canvas_frame_text_layout_cache_count: usize = 0,
     canvas_frame_pipeline_cache: [max_canvas_pipelines_per_view]canvas.RenderPipelineCacheEntry = undefined,
     canvas_frame_pipeline_cache_count: usize = 0,
@@ -453,7 +498,6 @@ pub const RuntimeView = struct {
     canvas_frame_profile_surface_area: f32 = 0,
     canvas_frame_profile_dirty_area: f32 = 0,
     canvas_frame_profile_dirty_ratio: f32 = 0,
-    widget_layout_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
     widget_layout_node_count: usize = 0,
     widget_layout_root_bounds: ?geometry.RectF = null,
     /// Optional compiled traversal for this retained view. A function
@@ -465,7 +509,6 @@ pub const RuntimeView = struct {
     canvas_widget_focus_return_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Portable tooltip ownership and binding survival over retained facts.
     canvas_widget_tooltip_policy: ?*const fn ([]const u8, []u8) usize = null,
-    widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     widget_semantics_node_count: usize = 0,
     /// Fingerprint of the last accessibility tree actually handed to the
     /// platform (and whether one ever was): the publish path skips the
@@ -489,7 +532,6 @@ pub const RuntimeView = struct {
     gpu_canvas_frame_requested: bool = false,
     widget_revision: u64 = 0,
     widget_tokens: canvas.DesignTokens = .{},
-    widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,
     /// Scroll nodes whose offset changed since the last app dispatch
     /// (wheel, kinetic, keyboard, accessibility): drained into
     /// `canvas_widget_scroll` events at the gpu-surface dispatch points.
@@ -517,15 +559,8 @@ pub const RuntimeView = struct {
     /// lossless (see `canvas_limits.max_canvas_widget_change_events_per_view`).
     widget_change_event_ids: [canvas_limits.max_canvas_widget_change_events_per_view]canvas.ObjectId = undefined,
     widget_change_event_count: usize = 0,
-    widget_source_text_entries: [max_canvas_widget_source_text_entries_per_view]CanvasWidgetSourceTextEntry = undefined,
     widget_source_text_count: usize = 0,
-    widget_source_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]CanvasWidgetSourceScrollEntry = undefined,
     widget_source_scroll_count: usize = 0,
-    /// SOURCE-side selected state per control on the previous rebuild:
-    /// the control reconcile reads it to tell model-driven
-    /// toggle-buttons (source wins) from uncontrolled ones (retained
-    /// state wins).
-    widget_source_control_entries: [canvas_limits.max_canvas_widget_nodes_per_view]canvas_widget_runtime.CanvasWidgetSourceControlEntry = undefined,
     widget_source_control_count: usize = 0,
     /// SOURCE-side autofocus ids on the previous rebuild: the edge
     /// detector — a rebuild only moves focus to a widget whose flag was
@@ -790,24 +825,17 @@ pub const RuntimeView = struct {
     canvas_widget_drag_regions: [canvas_limits.max_canvas_widget_window_drag_regions_per_view]platform.WindowDragRegion = undefined,
     canvas_widget_drag_region_count: usize = 0,
     canvas_widget_drag_regions_pushed: bool = false,
-    widget_text_inline_bytes: [canvas_limits.max_canvas_widget_inline_text_bytes_per_view]u8 = undefined,
-    /// Points at `widget_text_inline_bytes` for ordinary views and upgrades to
-    /// heap-owned large-file capacity only when a retained layout needs it.
+    /// Points at the canvas storage's `widget_text_inline_bytes` for
+    /// ordinary gpu-surface views (empty for views without canvas storage)
+    /// and upgrades to heap-owned large-file capacity only when a retained
+    /// layout needs it.
     widget_text_bytes: []u8 = &.{},
     widget_text_bytes_heap_owned: bool = false,
     widget_text_len: usize = 0,
-    widget_span_entries: [canvas_limits.max_canvas_widget_spans_per_view]canvas.TextSpan = undefined,
     widget_span_len: usize = 0,
-    widget_context_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view]canvas.WidgetContextMenuItem = undefined,
     widget_context_menu_len: usize = 0,
-    /// Chart series and points retained across all `.chart` widgets of
-    /// the view (labels ride `widget_text_bytes`), same bump-copy
-    /// discipline as spans.
-    widget_chart_series_entries: [canvas_limits.max_canvas_widget_chart_series_per_view]canvas.ChartSeries = undefined,
     widget_chart_series_len: usize = 0,
-    widget_chart_points: [canvas_limits.max_canvas_widget_chart_points_per_view]f32 = undefined,
     widget_chart_points_len: usize = 0,
-    widget_chart_x_labels: [canvas_limits.max_canvas_widget_chart_x_labels_per_view][]const u8 = undefined,
     widget_chart_x_labels_len: usize = 0,
     /// Whether this view is the focused child INSIDE its window. This
     /// memory deliberately survives app deactivation and window key
@@ -826,14 +854,10 @@ pub const RuntimeView = struct {
     accessibility_label_storage: [platform.max_view_accessibility_label_bytes]u8 = undefined,
     text_storage: [platform.max_view_text_bytes]u8 = undefined,
     command_storage: [platform.max_view_command_bytes]u8 = undefined,
-    /// Per-view, per-widget undo/redo deltas. Kept at the tail so adding
-    /// editor history does not move the established hot render/layout
-    /// fields inside RuntimeView. Text bytes are shared across entries, so
-    /// ordinary typing costs one byte per step rather than a full document
-    /// snapshot.
-    canvas_widget_text_history_entries: [max_canvas_widget_text_history_entries_per_view]view_widget_text.CanvasWidgetTextHistoryEntry = undefined,
+    /// Text history bookkeeping. The entries live in the canvas storage;
+    /// `canvas_widget_text_history_bytes` points at the storage's inline
+    /// history bytes or at heap-owned large-file capacity.
     canvas_widget_text_history_entry_count: usize = 0,
-    canvas_widget_text_history_inline_bytes: [canvas_limits.max_canvas_widget_inline_text_history_bytes_per_view]u8 = undefined,
     canvas_widget_text_history_bytes: []u8 = &.{},
     canvas_widget_text_history_bytes_heap_owned: bool = false,
     canvas_widget_text_history_byte_count: usize = 0,
@@ -952,7 +976,6 @@ pub const RuntimeView = struct {
     pub const refreshCanvasFrameBudgetStatus = CanvasFrameMethods.refreshCanvasFrameBudgetStatus;
     pub const copyPresentedCanvasSummary = CanvasFrameMethods.copyPresentedCanvasSummary;
     pub const copyPresentedCanvasSummaryWithPolicy = CanvasFrameMethods.copyPresentedCanvasSummaryWithPolicy;
-    pub const copyPresentedCanvasSummaryFrom = CanvasFrameMethods.copyPresentedCanvasSummaryFrom;
     pub const currentCanvasHasUnkeyed = CanvasFrameMethods.currentCanvasHasUnkeyed;
     pub const currentCanvasHasUnkeyedWithPolicy = CanvasFrameMethods.currentCanvasHasUnkeyedWithPolicy;
     pub const diffPresentedCanvasSummary = CanvasFrameMethods.diffPresentedCanvasSummary;
@@ -1285,34 +1308,56 @@ pub const RuntimeView = struct {
         self.gpu_first_frame_latency_budget_ok = self.gpu_first_frame_latency_budget_exceeded_count == 0;
     }
 
-    pub fn copyRuntimeStateFrom(self: *RuntimeView, source: *const RuntimeView, scratch: *canvas_widget_runtime.CanvasWidgetCopyScratch) void {
-        const widget_text_bytes = self.widget_text_bytes;
-        const widget_text_bytes_heap_owned = self.widget_text_bytes_heap_owned;
-        const text_history_bytes = self.canvas_widget_text_history_bytes;
-        const text_history_bytes_heap_owned = self.canvas_widget_text_history_bytes_heap_owned;
+    /// This view's canvas storage. Only gpu-surface views own one (see
+    /// `ViewCanvasStorage`); asking any other view is a runtime bug,
+    /// checked in safe builds.
+    pub fn canvasStorage(self: *const RuntimeView) *ViewCanvasStorage {
+        return self.canvas_storage.?;
+    }
+
+    /// Take ownership of a freshly allocated canvas storage block. The
+    /// widget text and text history pools start out in its inline bytes.
+    pub fn adoptCanvasStorage(self: *RuntimeView, storage: *ViewCanvasStorage) void {
+        self.canvas_storage = storage;
+        self.widget_text_bytes = &storage.widget_text_inline_bytes;
+        self.canvas_widget_text_history_bytes = &storage.canvas_widget_text_history_inline_bytes;
+    }
+
+    /// Return everything this view owns on the heap (its canvas storage
+    /// and any large-file text pools) to `allocator`, which must be the
+    /// runtime's init-frozen `owned_allocator` that made them.
+    pub fn releaseOwnedBuffers(self: *RuntimeView, allocator: std.mem.Allocator) void {
+        if (self.widget_text_bytes_heap_owned) allocator.free(self.widget_text_bytes);
+        if (self.canvas_widget_text_history_bytes_heap_owned) allocator.free(self.canvas_widget_text_history_bytes);
+        if (self.canvas_storage) |storage| allocator.destroy(storage);
+        self.forgetOwnedBuffers();
+    }
+
+    /// Drop this slot's references to heap buffers without freeing them:
+    /// for a slot whose buffers compaction moved to another slot.
+    pub fn forgetOwnedBuffers(self: *RuntimeView) void {
+        self.canvas_storage = null;
+        self.widget_text_bytes = &.{};
+        self.widget_text_bytes_heap_owned = false;
+        self.canvas_widget_text_history_bytes = &.{};
+        self.canvas_widget_text_history_bytes_heap_owned = false;
+    }
+
+    /// Move `source` into this slot (view compaction shifts every later
+    /// view down one slot). The canvas storage and any heap-owned text
+    /// pools move by pointer, so the display list, the widget tree, and
+    /// every slice into them stay valid without copying a byte of them;
+    /// only the short strings kept in the view's own inline buffers are
+    /// re-copied into this slot. `source` is left aliasing the moved
+    /// buffers: the caller overwrites it or calls `forgetOwnedBuffers`.
+    pub fn moveRuntimeStateFrom(self: *RuntimeView, source: *const RuntimeView) void {
         self.* = source.*;
-        self.widget_text_bytes = widget_text_bytes;
-        self.widget_text_bytes_heap_owned = widget_text_bytes_heap_owned;
-        self.canvas_widget_text_history_bytes = text_history_bytes;
-        self.canvas_widget_text_history_bytes_heap_owned = text_history_bytes_heap_owned;
-        if (self.canvas_widget_text_history_bytes.ptr != source.canvas_widget_text_history_bytes.ptr) {
-            @memcpy(
-                self.canvas_widget_text_history_bytes[0..source.canvas_widget_text_history_byte_count],
-                source.canvas_widget_text_history_bytes[0..source.canvas_widget_text_history_byte_count],
-            );
-        }
         self.label = copyInto(&self.label_storage, source.label) catch unreachable;
         self.parent = if (source.parent) |parent| copyInto(&self.parent_storage, parent) catch unreachable else null;
         self.role = copyInto(&self.role_storage, source.role) catch unreachable;
         self.accessibility_label = copyInto(&self.accessibility_label_storage, source.accessibility_label) catch unreachable;
         self.text = copyInto(&self.text_storage, source.text) catch unreachable;
         self.command = copyInto(&self.command_storage, source.command) catch unreachable;
-        self.copyCanvasDisplayList(source.canvasDisplayList()) catch unreachable;
-        self.canvas_revision = source.canvas_revision;
-        self.copyPresentedCanvasSummaryFrom(source);
-        self.copyWidgetLayoutTree(source.widgetLayoutTree(), scratch) catch unreachable;
-        self.widget_revision = source.widget_revision;
-        @memcpy(self.widget_scroll_states[0..source.widget_layout_node_count], source.widget_scroll_states[0..source.widget_layout_node_count]);
     }
 
     pub fn ensureLargeCanvasWidgetTextStorage(self: *RuntimeView, allocator: std.mem.Allocator) !void {

@@ -20,19 +20,19 @@ fn harness(owner: ?policy.Policy) !*sdk.runtime.TestHarness() {
     return h;
 }
 fn viewEqual(a: anytype, b: @TypeOf(a)) !void {
-    try exact(a.canvas_render_animations, b.canvas_render_animations);
+    try exact(a.canvasStorage().canvas_render_animations, b.canvasStorage().canvas_render_animations);
     try exact(a.canvas_render_animation_count, b.canvas_render_animation_count);
     try exact(a.canvas_render_animation_dirty_bounds, b.canvas_render_animation_dirty_bounds);
     try exact(a.canvas_render_animation_dirty_bounds_count, b.canvas_render_animation_dirty_bounds_count);
-    try exact(a.canvas_frame_render_overrides, b.canvas_frame_render_overrides);
+    try exact(a.canvasStorage().canvas_frame_render_overrides, b.canvasStorage().canvas_frame_render_overrides);
     try exact(a.canvas_frame_render_override_count, b.canvas_frame_render_override_count);
 }
 fn seed(view: anytype, animations: []const Animation, overrides: []const Override) void {
-    @memset(&view.canvas_render_animations, .{ .id = 93, .duration_ms = 42, .to_opacity = 0.123 });
-    @memcpy(view.canvas_render_animations[0..animations.len], animations);
+    @memset(&view.canvasStorage().canvas_render_animations, .{ .id = 93, .duration_ms = 42, .to_opacity = 0.123 });
+    @memcpy(view.canvasStorage().canvas_render_animations[0..animations.len], animations);
     view.canvas_render_animation_count = animations.len;
-    @memset(&view.canvas_frame_render_overrides, .{ .id = 94, .opacity = 0.321, .transform = .translate(7, 8) });
-    @memcpy(view.canvas_frame_render_overrides[0..overrides.len], overrides);
+    @memset(&view.canvasStorage().canvas_frame_render_overrides, .{ .id = 94, .opacity = 0.321, .transform = .translate(7, 8) });
+    @memcpy(view.canvasStorage().canvas_frame_render_overrides[0..overrides.len], overrides);
     view.canvas_frame_render_override_count = overrides.len;
     @memset(&view.canvas_render_animation_dirty_bounds, .{ .id = 95, .bounds = .init(7, 8, 9, 10) });
     for (animations, 0..) |animation, i| view.canvas_render_animation_dirty_bounds[i] = .{ .id = animation.id, .bounds = if (i % 2 == 0) .init(1, 2, -3, 4) else null };

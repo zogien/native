@@ -173,10 +173,14 @@ test "compiled snapshot runtime projection preserves complete snapshots menus me
         rt.status_items[1].active = true;
         rt.status_items[1].id = std.math.maxInt(u32);
         rt.status_items[1].title = "Tray";
+        // A status item's menu rows live in storage it allocates when
+        // created; this fixture builds the status item by hand.
+        const rows = try rt.owned_allocator.create(std.meta.Child(std.meta.Child(@TypeOf(rt.status_items[1].items))));
+        rt.status_items[1].items = rows;
         rt.status_items[1].item_count = 3;
-        rt.status_items[1].items[0] = .{ .id = std.math.maxInt(u32), .label = "raw\x00\xff", .command = "choose", .detail = "Detail", .key = "K", .modifiers = .{ .command = true }, .enabled = false };
-        rt.status_items[1].items[1] = .{ .separator = true };
-        rt.status_items[1].items[2] = .{ .label = "Last", .command = "last" };
+        rows[0] = .{ .id = std.math.maxInt(u32), .label = "raw\x00\xff", .command = "choose", .detail = "Detail", .key = "K", .modifiers = .{ .command = true }, .enabled = false };
+        rows[1] = .{ .separator = true };
+        rows[2] = .{ .label = "Last", .command = "last" };
     }
     const expected = left.runtime.automationSnapshot("snapshot");
     var actual = right.runtime.automationSnapshot("snapshot");
@@ -187,7 +191,13 @@ test "compiled snapshot runtime projection preserves complete snapshots menus me
     try exact(expected, actual);
     try std.testing.expect(actual.widgets.len != 0 and actual.trays.len == 1 and actual.audio != null and actual.video != null and actual.frame_profile != null);
     try std.testing.expect(actual.windows.ptr == &right.runtime.automation_windows);
-    try std.testing.expect(actual.widgets.ptr == &right.runtime.automation_widgets);
+    try std.testing.expect(actual.widgets.ptr == &right.runtime.automationStorage().automation_widgets);
+    // The fallback projection needs runtimes without windows; the windows
+    // come back before teardown, which returns what they own.
+    const window_counts = [_]usize{ left.runtime.window_count, right.runtime.window_count };
+    defer for (lanes, window_counts) |rt, count| {
+        rt.window_count = count;
+    };
     for (lanes) |rt| {
         rt.window_count = 0;
         rt.audio_active = false;

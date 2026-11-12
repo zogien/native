@@ -60,7 +60,7 @@ pub fn diff(view: anytype, output: []canvas.DiffChange, owner: Policy) ![]const 
     const decision = call(&admission, &admitted, owner);
     if (decision.len != 64 or wire.word(decision, 4) != 0 or wire.word(decision, 8) > 1) @panic("invalid scene diff admission");
     if (wire.word(decision, 8) == 0) return output[0..0];
-    const previous = view.presented_canvas_commands[0..view.presented_canvas_command_count];
+    const previous = view.canvasStorage().presented_canvas_commands[0..view.presented_canvas_command_count];
     const current = view.canvasDisplayList().commands;
     if (previous.len > max_count or current.len > max_count) @panic("scene observation input exceeds native storage");
     const storage = scratch.get();

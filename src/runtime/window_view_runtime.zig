@@ -52,15 +52,22 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             if (options.kind == .webview) return Self.createWebViewView(self, options);
             if (self.view_count >= platform.max_views) return error.ViewLimitReached;
 
-            try self.options.platform.services.createView(options);
+            // A gpu-surface view's canvas storage is allocated before the
+            // platform sees the view, so running out of memory refuses the
+            // view with nothing created and nothing to undo.
+            const storage = try Self.allocateViewCanvasStorage(self, options.kind);
             var reserved = false;
+            errdefer if (!reserved) {
+                if (storage) |owned| self.owned_allocator.destroy(owned);
+            };
+            try self.options.platform.services.createView(options);
             errdefer {
                 if (reserved) {
                     if (Self.findViewIndex(self, options.window_id, options.label)) |index| Self.removeViewAt(self, index);
                 }
                 self.options.platform.services.closeView(options.window_id, options.label) catch {};
             }
-            try Self.reserveView(self, options);
+            try Self.reserveView(self, options, storage);
             reserved = true;
             self.invalidateFor(.command, options.frame);
             return self.views[self.view_count - 1].info();
@@ -503,7 +510,16 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             }
         }
 
-        pub fn reserveView(self: *Runtime, options: platform.ViewOptions) !void {
+        /// The canvas storage a new view of `kind` needs: one block for a
+        /// gpu-surface view, none for any other kind. The runtime's shared
+        /// canvas scratch comes with its first gpu-surface view.
+        fn allocateViewCanvasStorage(self: *Runtime, kind: platform.ViewKind) !?*runtime_view.ViewCanvasStorage {
+            if (kind != .gpu_surface) return null;
+            try self.ensureCanvasScratch();
+            return try self.owned_allocator.create(runtime_view.ViewCanvasStorage);
+        }
+
+        pub fn reserveView(self: *Runtime, options: platform.ViewOptions, storage: ?*runtime_view.ViewCanvasStorage) !void {
             const index = self.view_count;
             self.views[index] = .{
                 .id = WindowStorageMethods.allocateViewId(self),
@@ -529,8 +545,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 .keyboard_active = windowKeyboardActive(self, options.window_id),
                 .open = true,
             };
-            self.views[index].widget_text_bytes = &self.views[index].widget_text_inline_bytes;
-            self.views[index].canvas_widget_text_history_bytes = &self.views[index].canvas_widget_text_history_inline_bytes;
+            if (storage) |owned| self.views[index].adoptCanvasStorage(owned);
             self.views[index].label = try copyInto(&self.views[index].label_storage, options.label);
             self.views[index].parent = if (options.parent) |parent| try copyInto(&self.views[index].parent_storage, parent) else null;
             self.views[index].role = try copyInto(&self.views[index].role_storage, options.role);
@@ -725,19 +740,17 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 self.targetless_ime_preedit_len = 0;
                 self.targetless_ime_commit_grace = false;
             }
+            // The removed view's buffers go back to the allocator; every
+            // later view moves down one slot, taking its buffers along by
+            // pointer, and the vacated tail slot forgets the buffers its
+            // last occupant took with it.
+            self.views[index].releaseOwnedBuffers(self.owned_allocator);
             var cursor = index;
             while (cursor + 1 < self.view_count) : (cursor += 1) {
-                const next = &self.views[cursor + 1];
-                self.views[cursor].copyRuntimeStateFrom(next, &self.canvas_widget_copy_scratch);
+                self.views[cursor].moveRuntimeStateFrom(&self.views[cursor + 1]);
             }
             self.view_count -= 1;
-            const released = &self.views[self.view_count];
-            if (released.widget_text_bytes_heap_owned) self.owned_allocator.free(released.widget_text_bytes);
-            if (released.canvas_widget_text_history_bytes_heap_owned) self.owned_allocator.free(released.canvas_widget_text_history_bytes);
-            released.widget_text_bytes = &.{};
-            released.widget_text_bytes_heap_owned = false;
-            released.canvas_widget_text_history_bytes = &.{};
-            released.canvas_widget_text_history_bytes_heap_owned = false;
+            self.views[self.view_count].forgetOwnedBuffers();
         }
 
         pub fn removeViewsForWindow(self: *Runtime, window_id: platform.WindowId) void {

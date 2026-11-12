@@ -71,7 +71,7 @@ test "runtime gates JavaScript window API by origin and configured permission" {
     const Harness = TestHarness();
 
     const denied_origin = try std.testing.allocator.create(Harness);
-    defer std.testing.allocator.destroy(denied_origin);
+    defer denied_origin.destroy(std.testing.allocator);
     denied_origin.init(.{});
     denied_origin.runtime.options.js_window_api = true;
     try denied_origin.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
@@ -83,7 +83,7 @@ test "runtime gates JavaScript window API by origin and configured permission" {
 
     const filesystem_only = [_][]const u8{security.permission_filesystem};
     const denied_permission = try std.testing.allocator.create(Harness);
-    defer std.testing.allocator.destroy(denied_permission);
+    defer denied_permission.destroy(std.testing.allocator);
     denied_permission.init(.{});
     denied_permission.runtime.options.js_window_api = true;
     denied_permission.runtime.options.security.permissions = &filesystem_only;
@@ -96,7 +96,7 @@ test "runtime gates JavaScript window API by origin and configured permission" {
 
     const window_permission = [_][]const u8{security.permission_window};
     const allowed = try std.testing.allocator.create(Harness);
-    defer std.testing.allocator.destroy(allowed);
+    defer allowed.destroy(std.testing.allocator);
     allowed.init(.{});
     allowed.runtime.options.js_window_api = true;
     allowed.runtime.options.security.permissions = &window_permission;
@@ -114,7 +114,7 @@ test "runtime gates JavaScript webview API by origin and configured permission" 
     const Harness = TestHarness();
 
     const denied_origin = try std.testing.allocator.create(Harness);
-    defer std.testing.allocator.destroy(denied_origin);
+    defer denied_origin.destroy(std.testing.allocator);
     denied_origin.init(.{});
     denied_origin.runtime.options.js_window_api = true;
     try denied_origin.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
@@ -126,7 +126,7 @@ test "runtime gates JavaScript webview API by origin and configured permission" 
 
     const filesystem_only = [_][]const u8{security.permission_filesystem};
     const denied_permission = try std.testing.allocator.create(Harness);
-    defer std.testing.allocator.destroy(denied_permission);
+    defer denied_permission.destroy(std.testing.allocator);
     denied_permission.init(.{});
     denied_permission.runtime.options.js_window_api = true;
     denied_permission.runtime.options.security.permissions = &filesystem_only;
@@ -140,7 +140,7 @@ test "runtime gates JavaScript webview API by origin and configured permission" 
     const window_permission = [_][]const u8{security.permission_window};
     const webview_origins = [_][]const u8{ "zero://inline", "https://example.com" };
     const allowed = try std.testing.allocator.create(Harness);
-    defer std.testing.allocator.destroy(allowed);
+    defer allowed.destroy(std.testing.allocator);
     allowed.init(.{});
     allowed.runtime.options.js_window_api = true;
     allowed.runtime.options.security.permissions = &window_permission;

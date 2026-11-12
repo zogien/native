@@ -94,7 +94,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
 
         fn applyCanvasWidgetTextEditWithHistory(self: *RuntimeView, target_id: canvas.ObjectId, edit: canvas.TextInputEvent, record_history: bool) anyerror!?geometry.RectF {
             const index = self.canvasWidgetNodeIndexById(target_id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (!canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return null;
 
             const previous_bounds = widget.frame;
@@ -123,10 +123,10 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 updateCanvasWidgetTextCompositionHistory(self, target_id, widget, next_state);
             }
             self.scrollCanvasTextInputCaretIntoView(index);
-            const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
+            const semantics = try self.widgetLayoutTree().collectSemantics(&self.canvasStorage().widget_semantics_nodes);
             self.widget_semantics_node_count = semantics.len;
             self.widget_revision += 1;
-            return self.canvasWidgetDirtyBounds(index, unionRects(previous_bounds, self.widget_layout_nodes[index].frame) orelse self.widget_layout_nodes[index].frame);
+            return self.canvasWidgetDirtyBounds(index, unionRects(previous_bounds, self.canvasStorage().widget_layout_nodes[index].frame) orelse self.canvasStorage().widget_layout_nodes[index].frame);
         }
 
         /// The leading edge of a non-empty selection. At a soft-wrap
@@ -159,7 +159,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
 
         pub fn canvasWidgetKeyboardTextEdit(self: *RuntimeView, target: canvas.WidgetFocusTarget, keyboard: canvas.WidgetKeyboardEvent) ?canvas.TextInputEvent {
             const index = self.canvasWidgetNodeIndexById(target.id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (!canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return null;
 
             const plain_vertical_navigation_key = widget.kind == .textarea and
@@ -404,7 +404,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             keyboard: canvas.WidgetKeyboardEvent,
         ) ?CanvasWidgetTextHistoryShortcutResult {
             const node_index = self.canvasWidgetNodeIndexById(target.id) orelse return null;
-            const widget = self.widget_layout_nodes[node_index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[node_index].widget;
             if (!canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled or widget.text_composition != null) return null;
             const action = canvas.widgetKeyboardTextHistoryAction(widget, keyboard) orelse return null;
             clearCanvasWidgetTextVerticalGoal(self);
@@ -419,7 +419,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 (if (redo) timeline.redo_index else timeline.undo_index) orelse return null
             else
                 canvasWidgetTextHistoryIndex(self, target.id, widget.kind, redo) orelse return null;
-            const entry = self.canvas_widget_text_history_entries[history_index];
+            const entry = self.canvasStorage().canvas_widget_text_history_entries[history_index];
             if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .start, current_hash)) |result| {
                 return switch (result) {
                     .clear => blk: {
@@ -463,7 +463,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             target_id: canvas.ObjectId,
         ) CanvasWidgetTextHistoryAvailability {
             const node_index = self.canvasWidgetNodeIndexById(target_id) orelse return .{};
-            const widget = self.widget_layout_nodes[node_index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[node_index].widget;
             if (!canvasWidgetEditableTextKind(widget.kind) or
                 widget.state.disabled or
                 widget.text_composition != null)
@@ -477,11 +477,11 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             }
             var availability: CanvasWidgetTextHistoryAvailability = .{};
             if (canvasWidgetTextHistoryIndex(self, target_id, widget.kind, false)) |history_index| {
-                const entry = self.canvas_widget_text_history_entries[history_index];
+                const entry = self.canvasStorage().canvas_widget_text_history_entries[history_index];
                 availability.can_undo = widget.text.len == entry.after_text_len and current_hash == entry.after_hash;
             }
             if (canvasWidgetTextHistoryIndex(self, target_id, widget.kind, true)) |history_index| {
-                const entry = self.canvas_widget_text_history_entries[history_index];
+                const entry = self.canvasStorage().canvas_widget_text_history_entries[history_index];
                 availability.can_redo = widget.text.len == entry.before_text_len and current_hash == entry.before_hash;
             }
             return availability;
@@ -502,7 +502,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return null;
             }
             const node_index = self.canvasWidgetNodeIndexById(target.id) orelse return null;
-            const widget = self.widget_layout_nodes[node_index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[node_index].widget;
             if (widget.kind != target.kind or
                 !self.canEditCanvasWidgetText(target.id) or
                 widget.text_composition != null)
@@ -510,7 +510,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return null;
             }
             const history_index = canvasWidgetTextHistoryIndexForSerial(self, serial) orelse return null;
-            const entry = self.canvas_widget_text_history_entries[history_index];
+            const entry = self.canvasStorage().canvas_widget_text_history_entries[history_index];
             if (entry.target_id != target.id or
                 entry.target_kind != target.kind or
                 entry.provisional_composition or
@@ -526,7 +526,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                         break :blk null;
                     },
                     .complete => blk: {
-                        self.canvas_widget_text_history_entries[history_index].applied = redo;
+                        self.canvasStorage().canvas_widget_text_history_entries[history_index].applied = redo;
                         break :blk null;
                     },
                     .edit => |edit| edit,
@@ -541,7 +541,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             const desired_selection = if (redo) entry.after_selection else entry.before_selection;
             if (widget.text.len == desired_len and current_hash == desired_hash) {
                 if (canvasTextSelectionsEqual(selection, desired_selection)) {
-                    self.canvas_widget_text_history_entries[history_index].applied = redo;
+                    self.canvasStorage().canvas_widget_text_history_entries[history_index].applied = redo;
                     return null;
                 }
                 return .{ .set_selection = desired_selection };
@@ -580,10 +580,10 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         ) void {
             if (serial == 0) return;
             const node_index = self.canvasWidgetNodeIndexById(target.id) orelse return;
-            const widget = self.widget_layout_nodes[node_index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[node_index].widget;
             if (widget.kind != target.kind) return;
             const history_index = canvasWidgetTextHistoryIndexForSerial(self, serial) orelse return;
-            const entry = self.canvas_widget_text_history_entries[history_index];
+            const entry = self.canvasStorage().canvas_widget_text_history_entries[history_index];
             if (entry.target_id != target.id or
                 entry.target_kind != target.kind or
                 entry.provisional_composition or
@@ -592,7 +592,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return;
             }
             if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .commit, null)) |result| {
-                if (result == .complete) self.canvas_widget_text_history_entries[history_index].applied = redo;
+                if (result == .complete) self.canvasStorage().canvas_widget_text_history_entries[history_index].applied = redo;
                 return;
             }
             const desired_len = if (redo) entry.after_text_len else entry.before_text_len;
@@ -605,7 +605,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             {
                 return;
             }
-            self.canvas_widget_text_history_entries[history_index].applied = redo;
+            self.canvasStorage().canvas_widget_text_history_entries[history_index].applied = redo;
         }
 
         fn compiledCanvasWidgetTextHistoryReplay(
@@ -694,7 +694,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 var cursor = self.canvas_widget_text_history_entry_count;
                 while (cursor > 0) {
                     cursor -= 1;
-                    const entry = self.canvas_widget_text_history_entries[cursor];
+                    const entry = self.canvasStorage().canvas_widget_text_history_entries[cursor];
                     if (entry.target_id == target_id and !entry.applied) {
                         removeCanvasWidgetTextHistoryEntry(self, cursor);
                     }
@@ -705,7 +705,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 clearCanvasWidgetTextHistory(self, target_id);
                 return false;
             }
-            while (self.canvas_widget_text_history_entry_count >= self.canvas_widget_text_history_entries.len or
+            while (self.canvas_widget_text_history_entry_count >= self.canvasStorage().canvas_widget_text_history_entries.len or
                 self.canvas_widget_text_history_byte_count + byte_len > self.canvas_widget_text_history_bytes.len)
             {
                 if (self.canvas_widget_text_history_entry_count == 0) return false;
@@ -728,7 +728,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             const serial = self.canvas_widget_text_history_next_serial;
             self.canvas_widget_text_history_next_serial +%= 1;
             if (self.canvas_widget_text_history_next_serial == 0) self.canvas_widget_text_history_next_serial = 1;
-            self.canvas_widget_text_history_entries[self.canvas_widget_text_history_entry_count] = .{
+            self.canvasStorage().canvas_widget_text_history_entries[self.canvas_widget_text_history_entry_count] = .{
                 .serial = serial,
                 .target_id = target_id,
                 .target_kind = target_kind,
@@ -760,7 +760,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             if (widget.interaction_policy == null) return null;
             var entries: [canvas.max_text_history_timeline_entries]canvas.TextHistoryTimelineEntry = undefined;
             const count = self.canvas_widget_text_history_entry_count;
-            for (self.canvas_widget_text_history_entries[0..count], 0..) |entry, index| entries[index] = .{
+            for (self.canvasStorage().canvas_widget_text_history_entries[0..count], 0..) |entry, index| entries[index] = .{
                 .target_matches = entry.target_id == target_id,
                 .kind_matches = entry.target_kind == widget.kind,
                 .applied = entry.applied,
@@ -786,17 +786,17 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             if (compiledCanvasWidgetTextHistoryTimeline(self, target_id, widget, text_len, text_hash)) |timeline| return timeline.matches_state;
             const target_kind = widget.kind;
             var latest_applied: ?usize = null;
-            for (self.canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count], 0..) |entry, index| {
+            for (self.canvasStorage().canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count], 0..) |entry, index| {
                 if (entry.target_id != target_id) continue;
                 if (entry.target_kind != target_kind) return false;
                 if (entry.provisional_composition) return false;
                 if (entry.applied) latest_applied = index;
             }
             if (latest_applied) |index| {
-                const entry = self.canvas_widget_text_history_entries[index];
+                const entry = self.canvasStorage().canvas_widget_text_history_entries[index];
                 return text_len == entry.after_text_len and text_hash == entry.after_hash;
             }
-            for (self.canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count]) |entry| {
+            for (self.canvasStorage().canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count]) |entry| {
                 if (entry.target_id != target_id or entry.target_kind != target_kind or entry.provisional_composition or entry.applied) continue;
                 return text_len == entry.before_text_len and text_hash == entry.before_hash;
             }
@@ -814,7 +814,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             after: canvas.TextEditState,
         ) void {
             var provisional_index = canvasWidgetTextCompositionHistoryIndex(self, target_id) orelse return;
-            var provisional = self.canvas_widget_text_history_entries[provisional_index];
+            var provisional = self.canvasStorage().canvas_widget_text_history_entries[provisional_index];
             const after_hash = textHistoryHash(after.text);
             const state = canvas.TextCompositionHistoryState{
                 .prefix_len = provisional.prefix_len,
@@ -842,7 +842,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 }
                 removeCanvasWidgetTextHistoryEntry(self, 0);
                 provisional_index = canvasWidgetTextCompositionHistoryIndex(self, target_id) orelse return;
-                provisional = self.canvas_widget_text_history_entries[provisional_index];
+                provisional = self.canvasStorage().canvas_widget_text_history_entries[provisional_index];
             }
 
             const inserted_start = provisional.byte_start + provisional.removed_len;
@@ -855,7 +855,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                     self.canvas_widget_text_history_bytes[old_tail_start + growth .. old_byte_count + growth],
                     self.canvas_widget_text_history_bytes[old_tail_start..old_byte_count],
                 );
-                for (self.canvas_widget_text_history_entries[provisional_index + 1 .. self.canvas_widget_text_history_entry_count]) |*entry| {
+                for (self.canvasStorage().canvas_widget_text_history_entries[provisional_index + 1 .. self.canvas_widget_text_history_entry_count]) |*entry| {
                     entry.byte_start += growth;
                 }
                 self.canvas_widget_text_history_byte_count += growth;
@@ -866,7 +866,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                     self.canvas_widget_text_history_bytes[old_tail_start - shrink .. old_byte_count - shrink],
                     self.canvas_widget_text_history_bytes[old_tail_start..old_byte_count],
                 );
-                for (self.canvas_widget_text_history_entries[provisional_index + 1 .. self.canvas_widget_text_history_entry_count]) |*entry| {
+                for (self.canvasStorage().canvas_widget_text_history_entries[provisional_index + 1 .. self.canvas_widget_text_history_entry_count]) |*entry| {
                     entry.byte_start -= shrink;
                 }
                 self.canvas_widget_text_history_byte_count -= shrink;
@@ -876,10 +876,10 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 inserted,
             );
 
-            self.canvas_widget_text_history_entries[provisional_index].inserted_len = new_inserted_len;
-            self.canvas_widget_text_history_entries[provisional_index].after_text_len = after.text.len;
-            self.canvas_widget_text_history_entries[provisional_index].after_hash = after_hash;
-            self.canvas_widget_text_history_entries[provisional_index].after_selection = after.selection;
+            self.canvasStorage().canvas_widget_text_history_entries[provisional_index].inserted_len = new_inserted_len;
+            self.canvasStorage().canvas_widget_text_history_entries[provisional_index].after_text_len = after.text.len;
+            self.canvasStorage().canvas_widget_text_history_entries[provisional_index].after_hash = after_hash;
+            self.canvasStorage().canvas_widget_text_history_entries[provisional_index].after_selection = after.selection;
             if (plan.action == .retain) return;
             if (plan.action == .remove) {
                 removeCanvasWidgetTextHistoryEntry(self, provisional_index);
@@ -892,20 +892,20 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             var cursor = self.canvas_widget_text_history_entry_count;
             while (cursor > 0) {
                 cursor -= 1;
-                const entry = self.canvas_widget_text_history_entries[cursor];
+                const entry = self.canvasStorage().canvas_widget_text_history_entries[cursor];
                 if (entry.target_id == target_id and !entry.applied) {
                     removeCanvasWidgetTextHistoryEntry(self, cursor);
                 }
             }
             provisional_index = canvasWidgetTextCompositionHistoryIndex(self, target_id) orelse return;
-            self.canvas_widget_text_history_entries[provisional_index].provisional_composition = false;
+            self.canvasStorage().canvas_widget_text_history_entries[provisional_index].provisional_composition = false;
         }
 
         fn canvasWidgetTextCompositionHistoryIndex(self: *const RuntimeView, target_id: canvas.ObjectId) ?usize {
             var index = self.canvas_widget_text_history_entry_count;
             while (index > 0) {
                 index -= 1;
-                const entry = self.canvas_widget_text_history_entries[index];
+                const entry = self.canvasStorage().canvas_widget_text_history_entries[index];
                 if (entry.target_id == target_id and entry.provisional_composition) return index;
             }
             return null;
@@ -913,7 +913,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
 
         fn canvasWidgetTextHistoryIndex(self: *const RuntimeView, target_id: canvas.ObjectId, target_kind: canvas.WidgetKind, redo: bool) ?usize {
             if (redo) {
-                for (self.canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count], 0..) |entry, index| {
+                for (self.canvasStorage().canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count], 0..) |entry, index| {
                     if (entry.target_id == target_id and entry.target_kind == target_kind and !entry.applied and !entry.provisional_composition) return index;
                 }
                 return null;
@@ -921,14 +921,14 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             var index = self.canvas_widget_text_history_entry_count;
             while (index > 0) {
                 index -= 1;
-                const entry = self.canvas_widget_text_history_entries[index];
+                const entry = self.canvasStorage().canvas_widget_text_history_entries[index];
                 if (entry.target_id == target_id and entry.target_kind == target_kind and entry.applied and !entry.provisional_composition) return index;
             }
             return null;
         }
 
         fn canvasWidgetTextHistoryIndexForSerial(self: *const RuntimeView, serial: u64) ?usize {
-            for (self.canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count], 0..) |entry, index| {
+            for (self.canvasStorage().canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count], 0..) |entry, index| {
                 if (entry.serial == serial) return index;
             }
             return null;
@@ -947,7 +947,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             var index = self.canvas_widget_text_history_entry_count;
             while (index > 0) {
                 index -= 1;
-                if (self.canvas_widget_text_history_entries[index].target_id == target_id) {
+                if (self.canvasStorage().canvas_widget_text_history_entries[index].target_id == target_id) {
                     removeCanvasWidgetTextHistoryEntry(self, index);
                 }
             }
@@ -961,12 +961,12 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             var index = self.canvas_widget_text_history_entry_count;
             while (index > 0) {
                 index -= 1;
-                const entry = self.canvas_widget_text_history_entries[index];
+                const entry = self.canvasStorage().canvas_widget_text_history_entries[index];
                 const node_index = self.canvasWidgetNodeIndexById(entry.target_id) orelse {
                     removeCanvasWidgetTextHistoryEntry(self, index);
                     continue;
                 };
-                const widget = self.widget_layout_nodes[node_index].widget;
+                const widget = self.canvasStorage().widget_layout_nodes[node_index].widget;
                 if (widget.kind != entry.target_kind or !canvasWidgetEditableTextKind(widget.kind)) {
                     removeCanvasWidgetTextHistoryEntry(self, index);
                 }
@@ -976,7 +976,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                     clearCanvasWidgetTextVerticalGoal(self);
                     return;
                 };
-                if (self.widget_layout_nodes[node_index].widget.kind != .textarea) {
+                if (self.canvasStorage().widget_layout_nodes[node_index].widget.kind != .textarea) {
                     clearCanvasWidgetTextVerticalGoal(self);
                 }
             }
@@ -986,7 +986,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             if (remove_index >= self.canvas_widget_text_history_entry_count) return;
             var write_byte: usize = 0;
             var write_entry: usize = 0;
-            for (self.canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count], 0..) |entry, index| {
+            for (self.canvasStorage().canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count], 0..) |entry, index| {
                 if (index == remove_index) continue;
                 const entry_byte_len = entry.removed_len + entry.inserted_len;
                 const source = self.canvas_widget_text_history_bytes[entry.byte_start .. entry.byte_start + entry_byte_len];
@@ -999,7 +999,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 }
                 var moved = entry;
                 moved.byte_start = write_byte;
-                self.canvas_widget_text_history_entries[write_entry] = moved;
+                self.canvasStorage().canvas_widget_text_history_entries[write_entry] = moved;
                 write_byte += entry_byte_len;
                 write_entry += 1;
             }
@@ -1022,7 +1022,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             const layout = self.widgetLayoutTree();
             if (canvasWidgetLayoutNodeHidden(layout, index)) return false;
             if (!canvasWidgetLayoutNodeFrameVisible(layout, index)) return false;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             return canvasWidgetEditableTextKind(widget.kind) and !widget.state.disabled;
         }
 
@@ -1035,7 +1035,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             const focused_id = self.canvas_widget_focused_id;
             if (focused_id == 0 or !self.canEditCanvasWidgetText(focused_id)) return false;
             const index = self.canvasWidgetNodeIndexById(focused_id) orelse return false;
-            const widget = &self.widget_layout_nodes[index].widget;
+            const widget = &self.canvasStorage().widget_layout_nodes[index].widget;
             if (widget.text_selection != null) return false;
             widget.text_selection = canvas.TextSelection.collapsed(widget.text.len);
             try self.refreshCanvasWidgetSemantics();
@@ -1053,7 +1053,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         ) anyerror!?geometry.RectF {
             clearCanvasWidgetTextVerticalGoal(self);
             const index = self.canvasWidgetNodeIndexById(target_id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (widget.state.disabled) return null;
             if (canvas.widgetStaticTextSelectable(widget)) {
                 return applyCanvasWidgetStaticTextPointer(self, index, target_id, point, dragging);
@@ -1077,8 +1077,8 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             // caretless.
             if (widget.text_selection != null and canvasTextSelectionsEqual(current_selection, next_selection) and widget.text_composition == null) return null;
 
-            self.widget_layout_nodes[index].widget.text_selection = next_selection;
-            self.widget_layout_nodes[index].widget.text_composition = null;
+            self.canvasStorage().widget_layout_nodes[index].widget.text_selection = next_selection;
+            self.canvasStorage().widget_layout_nodes[index].widget.text_composition = null;
             if (widget.text_composition != null) {
                 updateCanvasWidgetTextCompositionHistory(self, target_id, widget, .{
                     .text = widget.text,
@@ -1189,7 +1189,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         /// anchor. Ordinary widgets remain independently selectable;
         /// bounded code paragraphs opt into one ordered source group.
         fn applyCanvasWidgetStaticTextPointer(self: *RuntimeView, index: usize, target_id: canvas.ObjectId, point: geometry.PointF, extend: bool) anyerror!?geometry.RectF {
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (widget.static_text_group_id != 0) {
                 return applyCanvasWidgetStaticTextGroupPointer(
                     self,
@@ -1205,7 +1205,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             const next_selection = canvas.staticTextSelectionForWidgetPoint(widget, point, anchor, self.widget_tokens) orelse return null;
             if (self.canvas_widget_selected_text_id == target_id and widget.text_selection != null and canvasTextSelectionsEqual(current_selection, next_selection)) return null;
 
-            self.widget_layout_nodes[index].widget.text_selection = next_selection;
+            self.canvasStorage().widget_layout_nodes[index].widget.text_selection = next_selection;
             self.canvas_widget_selected_text_id = target_id;
             self.canvas_widget_selected_text_group_id = 0;
             self.canvas_widget_selected_text_group_anchor = 0;
@@ -1233,7 +1233,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             var point_offset: usize = 0;
             var best_distance = std.math.inf(f32);
             const layout = self.widgetLayoutTree();
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, candidate_index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, candidate_index| {
                 const candidate = node.widget;
                 if (candidate.static_text_group_id != group_id or
                     canvasWidgetLayoutNodeHidden(layout, candidate_index) or
@@ -1268,7 +1268,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 point_offset = local.focus;
             }
             const selected_index = point_index orelse return null;
-            const selected_widget = self.widget_layout_nodes[selected_index].widget;
+            const selected_widget = self.canvasStorage().widget_layout_nodes[selected_index].widget;
             const focus = @as(usize, @intCast(selected_widget.static_text_group_offset)) + point_offset;
             const anchor = if (extend)
                 self.canvas_widget_selected_text_group_anchor
@@ -1279,7 +1279,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
 
             var dirty: ?geometry.RectF = null;
             var changed = false;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, candidate_index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, candidate_index| {
                 const candidate = node.widget;
                 if (candidate.static_text_group_id != group_id) {
                     continue;
@@ -1345,7 +1345,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             if (group_id != 0) {
                 var dirty: ?geometry.RectF = null;
                 var changed = false;
-                for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, index| {
+                for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, index| {
                     if (node.widget.static_text_group_id != group_id or
                         node.widget.text_selection == null)
                     {
@@ -1364,11 +1364,11 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return dirty;
             }
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            if (self.widget_layout_nodes[index].widget.text_selection == null) return null;
-            self.widget_layout_nodes[index].widget.text_selection = null;
+            if (self.canvasStorage().widget_layout_nodes[index].widget.text_selection == null) return null;
+            self.canvasStorage().widget_layout_nodes[index].widget.text_selection = null;
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
-            return self.canvasWidgetDirtyBounds(index, self.widget_layout_nodes[index].frame);
+            return self.canvasWidgetDirtyBounds(index, self.canvasStorage().widget_layout_nodes[index].frame);
         }
 
         /// The text a copy shortcut should place on the clipboard: the
@@ -1378,7 +1378,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         pub fn canvasWidgetCopyText(self: *const RuntimeView, group_buffer: []u8) ?[]const u8 {
             if (self.canvas_widget_focused_id != 0) {
                 if (self.canvasWidgetNodeIndexById(self.canvas_widget_focused_id)) |index| {
-                    const focused = self.widget_layout_nodes[index].widget;
+                    const focused = self.canvasStorage().widget_layout_nodes[index].widget;
                     if (!focused.state.disabled and focused.kind == .terminal) {
                         if (focused.terminal.grid) |grid| {
                             if (grid.selection_active) return grid.selection_text;
@@ -1409,7 +1409,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             );
             if (start >= end or end - start > output.len) return null;
             var copied: usize = 0;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count]) |node| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count]) |node| {
                 const widget = node.widget;
                 if (widget.static_text_group_id != group_id) {
                     continue;
@@ -1433,7 +1433,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
 
         fn canvasWidgetSelectionSliceById(self: *const RuntimeView, id: canvas.ObjectId, editable_only: bool) ?[]const u8 {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (widget.state.disabled) return null;
             if (editable_only and !canvasWidgetEditableTextKind(widget.kind)) return null;
             const range = canvas.widgetTextClipboardState(widget).selection orelse return null;
@@ -1444,13 +1444,13 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             try validateCanvasWidgetTextStorageRewrite(self, edited_index, next_state);
             const text_changed = !std.mem.eql(
                 u8,
-                self.widget_layout_nodes[edited_index].widget.text,
+                self.canvasStorage().widget_layout_nodes[edited_index].widget.text,
                 next_state.text,
             );
             const scratch = canvas_widget_text_edit_scratch.get();
             var temp_len: usize = 0;
 
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 const text = if (index == edited_index) next_state.text else node.widget.text;
                 scratch.text_ranges[index] = try appendWidgetTextStorageRange(&scratch.rewrite_buffer, &temp_len, text);
                 scratch.label_ranges[index] = try appendWidgetTextStorageRange(&scratch.rewrite_buffer, &temp_len, node.widget.semantics.label);
@@ -1459,7 +1459,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
 
             @memcpy(self.widget_text_bytes[0..temp_len], scratch.rewrite_buffer[0..temp_len]);
             self.widget_text_len = temp_len;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, index| {
                 const text_range = scratch.text_ranges[index];
                 const label_range = scratch.label_ranges[index];
                 const command_range = scratch.command_ranges[index];
@@ -1467,14 +1467,14 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 node.widget.semantics.label = self.widget_text_bytes[label_range.start..label_range.end];
                 node.widget.command = self.widget_text_bytes[command_range.start..command_range.end];
             }
-            self.widget_layout_nodes[edited_index].widget.text_selection = next_state.selection;
-            self.widget_layout_nodes[edited_index].widget.text_composition = next_state.composition;
+            self.canvasStorage().widget_layout_nodes[edited_index].widget.text_selection = next_state.selection;
+            self.canvasStorage().widget_layout_nodes[edited_index].widget.text_composition = next_state.composition;
             if (text_changed) {
-                if (!self.widget_layout_nodes[edited_index].widget.hasCodeDiff()) {
-                    self.widget_layout_nodes[edited_index].widget.code_content_width_generation = 0;
+                if (!self.canvasStorage().widget_layout_nodes[edited_index].widget.hasCodeDiff()) {
+                    self.canvasStorage().widget_layout_nodes[edited_index].widget.code_content_width_generation = 0;
                 }
                 canvas.cacheTextInputContentWidthForWidget(
-                    &self.widget_layout_nodes[edited_index].widget,
+                    &self.canvasStorage().widget_layout_nodes[edited_index].widget,
                     self.widget_tokens,
                 );
             }
@@ -1485,7 +1485,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         /// charges these exact three slices for every retained node.
         fn validateCanvasWidgetTextStorageRewrite(self: *const RuntimeView, edited_index: usize, next_state: canvas.TextEditState) anyerror!void {
             var required_len: usize = 0;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 const text = if (index == edited_index) next_state.text else node.widget.text;
                 const values = [_][]const u8{
                     text,
@@ -1501,7 +1501,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
 
         pub fn setCanvasWidgetTextValue(self: *RuntimeView, id: canvas.ObjectId, text: []const u8) anyerror!?geometry.RectF {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (!canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return null;
             if (std.mem.eql(u8, widget.text, text) and widget.text_composition == null and textSelectionCollapsedAt(widget.text_selection, text.len)) return null;
 
@@ -1517,7 +1517,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             self.scrollCanvasTextInputCaretIntoView(index);
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
-            return self.canvasWidgetDirtyBounds(index, self.widget_layout_nodes[index].frame);
+            return self.canvasWidgetDirtyBounds(index, self.canvasStorage().widget_layout_nodes[index].frame);
         }
     };
 }

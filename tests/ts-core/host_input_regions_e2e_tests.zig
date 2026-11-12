@@ -33,7 +33,7 @@ const Pair = struct {
     fn install(self: *Pair, nodes: []const sdk.canvas.WidgetLayoutNode) void {
         for ([_]*Harness{ self.left, self.right }) |h| {
             const view = &h.runtime.views[0];
-            @memcpy(view.widget_layout_nodes[0..nodes.len], nodes);
+            @memcpy(view.canvasStorage().widget_layout_nodes[0..nodes.len], nodes);
             view.widget_layout_node_count = nodes.len;
         }
     }
@@ -232,14 +232,14 @@ test "compiled host input regions preserve native stamp capability gates and fai
         for ([_]*Harness{ pair.left, pair.right }) |h| {
             h.null_platform.gpu_surface_scroll_drivers = supported;
             const view = &h.runtime.views[0];
-            sdk.runtime.testing.stampHostInputRegions(&h.runtime, view.widget_layout_nodes[0..view.widget_layout_node_count], view.canvas_widget_surface_scope_policy);
+            sdk.runtime.testing.stampHostInputRegions(&h.runtime, view.canvasStorage().widget_layout_nodes[0..view.widget_layout_node_count], view.canvas_widget_surface_scope_policy);
         }
         try pair.same();
     }
     try pair.sync();
     for ([_]*Harness{ pair.left, pair.right }) |h| {
         h.runtime.options.platform.services.set_gpu_surface_scroll_drivers_fn = refuseDrivers;
-        h.runtime.views[0].widget_layout_nodes[0].widget.value = 24;
+        h.runtime.views[0].canvasStorage().widget_layout_nodes[0].widget.value = 24;
     }
     try pair.sync();
     try std.testing.expect(calls[0] > 0);

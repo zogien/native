@@ -957,6 +957,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
 
         fn publishAutomation(self: *Runtime) anyerror!void {
             const server = self.options.automation orelse return;
+            try self.ensureAutomationStorage();
             try server.publish(automationSnapshot(self, server.title));
         }
 
