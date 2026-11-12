@@ -343,7 +343,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 .cancel_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_cancel_composition, ""),
                 .select => {
                     const node_index = self.views[index].canvasWidgetNodeIndexById(action.id) orelse return error.InvalidCommand;
-                    if (self.views[index].widget_layout_nodes[node_index].widget.kind == .radio) {
+                    if (self.views[index].canvasStorage().widget_layout_nodes[node_index].widget.kind == .radio) {
                         // Radio selection is activation, not an echo-only
                         // retained-state write: drive the same Space path
                         // as keyboard and pointer input so a documented
@@ -440,9 +440,9 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 const view = &self.views[index];
                 const node_index = view.canvasWidgetNodeIndexById(tween.id);
                 const active = view.findCanvasWidgetLayoutTween(tween.id);
-                const current = if (node_index) |i| view.widget_layout_nodes[i].widget.value else 0;
+                const current = if (node_index) |i| view.canvasStorage().widget_layout_nodes[i].widget.value else 0;
                 const flags = @as(u8, @intFromBool(tween.id != 0)) | (@as(u8, @intFromBool(std.math.isFinite(tween.to))) << 1) |
-                    (@as(u8, @intFromBool(if (node_index) |i| view.widget_layout_nodes[i].widget.kind == .split else false)) << 2) |
+                    (@as(u8, @intFromBool(if (node_index) |i| view.canvasStorage().widget_layout_nodes[i].widget.kind == .split else false)) << 2) |
                     (@as(u8, @intFromBool(active != null)) << 3) | (@as(u8, @intFromBool(self.appearance.reduce_motion)) << 4) |
                     (@as(u8, @intFromBool(view.canvas_widget_layout_tween_count < view.canvas_widget_layout_tweens.len)) << 5) |
                     (@as(u8, @intFromBool(announce)) << 6);
@@ -470,8 +470,8 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             if (tween.id == 0) return error.InvalidCommand;
             if (!std.math.isFinite(tween.to)) return error.InvalidCommand;
             const node_index = self.views[index].canvasWidgetNodeIndexById(tween.id) orelse return error.InvalidCommand;
-            if (self.views[index].widget_layout_nodes[node_index].widget.kind != .split) return error.InvalidCommand;
-            const current = self.views[index].widget_layout_nodes[node_index].widget.value;
+            if (self.views[index].canvasStorage().widget_layout_nodes[node_index].widget.kind != .split) return error.InvalidCommand;
+            const current = self.views[index].canvasStorage().widget_layout_nodes[node_index].widget.value;
 
             const snap = self.appearance.reduce_motion or tween.duration_ms == 0;
             if (self.views[index].findCanvasWidgetLayoutTween(tween.id)) |active| {
@@ -554,11 +554,11 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const pressed_id = self.views[index].canvas_widget_pressed_id;
             if (pressed_id == 0) return 0;
             const divider_index = self.views[index].canvasWidgetNodeIndexById(pressed_id) orelse return 0;
-            const divider = self.views[index].widget_layout_nodes[divider_index];
+            const divider = self.views[index].canvasStorage().widget_layout_nodes[divider_index];
             if (divider.widget.kind != .split_divider) return 0;
             const parent_index = divider.parent_index orelse return 0;
             if (parent_index >= self.views[index].widget_layout_node_count) return 0;
-            return self.views[index].widget_layout_nodes[parent_index].widget.id;
+            return self.views[index].canvasStorage().widget_layout_nodes[parent_index].widget.id;
         }
 
         /// What `setCanvasWidgetLayout` should do about DISCLOSURE
@@ -791,7 +791,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                     tween.move_count = plan.move_count;
                     for (tween.moves[0..tween.move_count]) |move| {
                         if (move.node_index >= view.widget_layout_node_count) continue;
-                        const node = &view.widget_layout_nodes[move.node_index];
+                        const node = &view.canvasStorage().widget_layout_nodes[move.node_index];
                         node.frame.y = move.from_y;
                         node.frame.height = move.from_height;
                         node.widget.frame = node.frame;
@@ -816,7 +816,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             var moved = false;
             for (tween.moves[0..tween.move_count]) |*move| {
                 if (move.node_index >= view.widget_layout_node_count) continue;
-                const node = &view.widget_layout_nodes[move.node_index];
+                const node = &view.canvasStorage().widget_layout_nodes[move.node_index];
                 move.to_y = node.frame.y;
                 move.to_height = node.frame.height;
                 const pose = if (view.widget_tokens.widget_motion_policy) |policy| motion_policy.pose(policy, 2, tween.progress, move.from_y, move.to_y, move.from_height, move.to_height) else motion_policy.Pose{ .done = tween.progress >= 1, .a = move.from_y + (move.to_y - move.from_y) * tween.progress, .b = move.from_height + (move.to_height - move.from_height) * tween.progress };
@@ -867,7 +867,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             var dirty: ?geometry.RectF = null;
             for (tween.moves[0..tween.move_count]) |move| {
                 if (move.node_index >= view.widget_layout_node_count) continue;
-                const node = &view.widget_layout_nodes[move.node_index];
+                const node = &view.canvasStorage().widget_layout_nodes[move.node_index];
                 const pose = if (view.widget_tokens.widget_motion_policy) |policy| motion_policy.pose(policy, 1, progress, move.from_y, move.to_y, move.from_height, move.to_height) else motion_policy.Pose{ .done = done, .a = if (done) move.to_y else move.from_y + (move.to_y - move.from_y) * progress, .b = if (done) move.to_height else move.from_height + (move.to_height - move.from_height) * progress };
                 const y = pose.a;
                 const height = pose.b;
@@ -987,7 +987,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                     // model already holds the target it declared, and
                     // echoing the parked fraction every settle would
                     // rebuild-and-re-arm forever.
-                    if (dirty == null and self.views[view_index].widget_layout_nodes[node_index].widget.value == tween.spec.to) {
+                    if (dirty == null and self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget.value == tween.spec.to) {
                         self.views[view_index].noteCanvasWidgetResizeEvent(tween.spec.id);
                     }
                     // removeCanvasWidgetLayoutTween swap-removes, so the

@@ -50,10 +50,10 @@ test "compiled scene observation preserves complete summary diffs duplicate firs
         view.canvas_revision = 0;
         try view.copyCanvasDisplayList(.{ .commands = &commands });
         view.presented_canvas_command_count = 4;
-        view.presented_canvas_commands[0] = .{ .id = if (before == 0) null else before, .bounds = .init(1, 2, -4, 6) };
-        view.presented_canvas_commands[1] = .{ .id = 8, .bounds = null };
-        view.presented_canvas_commands[2] = .{ .id = if (before == 0) null else before, .bounds = .init(100, 200, 4, 6) };
-        view.presented_canvas_commands[3] = .{ .bounds = .init(-0.0, 2, 3, 4) };
+        view.canvasStorage().presented_canvas_commands[0] = .{ .id = if (before == 0) null else before, .bounds = .init(1, 2, -4, 6) };
+        view.canvasStorage().presented_canvas_commands[1] = .{ .id = 8, .bounds = null };
+        view.canvasStorage().presented_canvas_commands[2] = .{ .id = if (before == 0) null else before, .bounds = .init(100, 200, 4, 6) };
+        view.canvasStorage().presented_canvas_commands[3] = .{ .bounds = .init(-0.0, 2, 3, 4) };
         view.canvas_revision = if (variant == 1) huge else max;
         view.presented_canvas_revision = if (variant == 0) view.canvas_revision else view.canvas_revision -% 1;
         for ([_]usize{ 0, 1, 2, 3, 4, 5, 6, 16 }) |capacity| {
@@ -98,7 +98,7 @@ test "compiled scene observation preserves lazy native bounds order including th
     view.canvas_revision = huge;
     view.presented_canvas_revision = huge - 1;
     view.presented_canvas_command_count = 1;
-    view.presented_canvas_commands[0] = .{ .id = huge, .bounds = .init(1, 2, 3, 4) };
+    view.canvasStorage().presented_canvas_commands[0] = .{ .id = huge, .bounds = .init(1, 2, 3, 4) };
     for (0..4) |capacity| {
         var expected: [4]c.DiffChange = @splat(sentinel);
         var actual = expected;
@@ -142,10 +142,10 @@ test "compiled scene observation copies complete presented summary and unkeyed s
         try right.runtime.views[0].copyPresentedCanvasSummaryWithPolicy(.{ .commands = &commands }, .init(64.25, 48.5), 1.75, observed);
         const a = &left.runtime.views[0];
         const b = &right.runtime.views[0];
-        try exact(a.presented_canvas_commands[0..a.presented_canvas_command_count], b.presented_canvas_commands[0..b.presented_canvas_command_count]);
+        try exact(a.canvasStorage().presented_canvas_commands[0..a.presented_canvas_command_count], b.canvasStorage().presented_canvas_commands[0..b.presented_canvas_command_count]);
         inline for (.{ "presented_canvas_valid", "presented_canvas_surface_size", "presented_canvas_scale", "presented_canvas_revision", "presented_canvas_has_unkeyed", "presented_canvas_command_count" }) |field| try exact(@field(a, field), @field(b, field));
         core.rt.frameReset();
-        try exact(a.presented_canvas_commands[0..a.presented_canvas_command_count], b.presented_canvas_commands[0..b.presented_canvas_command_count]);
+        try exact(a.canvasStorage().presented_canvas_commands[0..a.presented_canvas_command_count], b.canvasStorage().presented_canvas_commands[0..b.presented_canvas_command_count]);
     }
 }
 test "compiled scene observation preserves exact dirty projection union and float32 presentation colors" {

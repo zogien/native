@@ -80,6 +80,13 @@ test "compiled widget retention autofocus level held removal remount duplicate a
     defer std.testing.allocator.destroy(candidate);
     reference.* = .{};
     candidate.* = .{};
+    // A standalone view owns no canvas storage until it adopts a block, as
+    // the runtime does for each gpu-surface view it creates.
+    const Storage = std.meta.Child(std.meta.Child(@TypeOf(reference.canvas_storage)));
+    reference.adoptCanvasStorage(try std.testing.allocator.create(Storage));
+    defer reference.releaseOwnedBuffers(std.testing.allocator);
+    candidate.adoptCanvasStorage(try std.testing.allocator.create(Storage));
+    defer candidate.releaseOwnedBuffers(std.testing.allocator);
     var nodes: [24]canvas.WidgetLayoutNode = undefined;
     for (&nodes, 0..) |*value, i| {
         value.* = node(.text_field, @as(u64, i) + 9007199254740993);

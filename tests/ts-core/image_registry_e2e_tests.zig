@@ -43,7 +43,7 @@ const Pair = struct {
         for (self.left.runtime.views[0..self.left.runtime.view_count], self.right.runtime.views[0..self.right.runtime.view_count]) |x, y| {
             try exact(x.presented_canvas_valid, y.presented_canvas_valid);
             try exact(x.gpu_canvas_frame_requested, y.gpu_canvas_frame_requested);
-            try exact(x.canvas_frame_image_cache[0..x.canvas_frame_image_cache_count], y.canvas_frame_image_cache[0..y.canvas_frame_image_cache_count]);
+            try exact(x.canvasStorage().canvas_frame_image_cache[0..x.canvas_frame_image_cache_count], y.canvasStorage().canvas_frame_image_cache[0..y.canvas_frame_image_cache_count]);
         }
         try exact(self.left.null_platform.gpu_surface_frame_request_count, self.right.null_platform.gpu_surface_frame_request_count);
     }

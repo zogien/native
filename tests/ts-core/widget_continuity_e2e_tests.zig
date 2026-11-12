@@ -121,16 +121,16 @@ test "compiled widget continuity retained adoption source jumps axis revocation 
             const view = &h.runtime.views[0];
             try view.copyWidgetLayoutTree(tree, &h.runtime.canvas_widget_copy_scratch);
             if (step == 0) {
-                view.widget_scroll_states[0].velocity_y = -23.125;
-                view.widget_scroll_states[0].velocity_x = 31.25;
+                view.canvasStorage().widget_scroll_states[0].velocity_y = -23.125;
+                view.canvasStorage().widget_scroll_states[0].velocity_x = 31.25;
             }
         }
         core.rt.frameReset();
         const a = &left.runtime.views[0];
         const b = &right.runtime.views[0];
         try exact(a.widgetLayoutTree().nodes, b.widgetLayoutTree().nodes);
-        try exact(@as([]const c.ScrollState, a.widget_scroll_states[0..2]), @as([]const c.ScrollState, b.widget_scroll_states[0..2]));
-        try exact(a.widget_semantics_nodes[0..a.widget_semantics_node_count], b.widget_semantics_nodes[0..b.widget_semantics_node_count]);
+        try exact(@as([]const c.ScrollState, a.canvasStorage().widget_scroll_states[0..2]), @as([]const c.ScrollState, b.canvasStorage().widget_scroll_states[0..2]));
+        try exact(a.canvasStorage().widget_semantics_nodes[0..a.widget_semantics_node_count], b.canvasStorage().widget_semantics_nodes[0..b.widget_semantics_node_count]);
     }
     const overflow = try std.testing.allocator.alloc(u8, c.max_widget_text_bytes_per_view + 1);
     defer std.testing.allocator.free(overflow);
@@ -139,10 +139,10 @@ test "compiled widget continuity retained adoption source jumps axis revocation 
     for ([_]*Harness{ left, right }) |h| {
         const view = &h.runtime.views[0];
         const adoptions = view.canvas_widget_layout_adoptions;
-        const before = view.widget_scroll_states[0];
+        const before = view.canvasStorage().widget_scroll_states[0];
         try std.testing.expectError(error.WidgetTextTooLarge, view.copyWidgetLayoutTree(tree, &h.runtime.canvas_widget_copy_scratch));
         try std.testing.expectEqual(adoptions, view.canvas_widget_layout_adoptions);
-        try exact(before, view.widget_scroll_states[0]);
-        try std.testing.expectEqualStrings("unchanged\x00\xff", view.widget_layout_nodes[1].widget.text);
+        try exact(before, view.canvasStorage().widget_scroll_states[0]);
+        try std.testing.expectEqualStrings("unchanged\x00\xff", view.canvasStorage().widget_layout_nodes[1].widget.text);
     }
 }

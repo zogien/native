@@ -181,7 +181,7 @@ test "compiled document width traversal owns first retained adoption before disp
             core.rt.frameReset();
         }
         var rejected = layout;
-        rejected.nodes = try arena.allocator().alloc(c.WidgetLayoutNode, h.runtime.views[0].widget_layout_nodes.len + 1);
+        rejected.nodes = try arena.allocator().alloc(c.WidgetLayoutNode, h.runtime.views[0].canvasStorage().widget_layout_nodes.len + 1);
         rejected.text_run_policy = rejectedAdoptionOwner;
         const before_rejection = adoption_calls;
         try std.testing.expectError(error.WidgetNodeLimitReached, h.runtime.setCanvasWidgetLayout(1, "canvas", rejected));

@@ -228,7 +228,8 @@ pub const PresentedCanvasCommand = struct {
 pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
     return struct {
         pub fn canvasDisplayList(self: *const RuntimeView) canvas.DisplayList {
-            return .{ .commands = self.canvas_commands[0..self.canvas_command_count] };
+            const storage = self.canvas_storage orelse return .{ .commands = &.{} };
+            return .{ .commands = storage.canvas_commands[0..self.canvas_command_count] };
         }
 
         pub fn validateCanvasWidgetDisplayListChrome(self: *const RuntimeView, chrome: CanvasWidgetDisplayListChrome) anyerror!void {
@@ -238,31 +239,38 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn canvasFrameResourceCache(self: *const RuntimeView) []const canvas.RenderResourceCacheEntry {
-            return self.canvas_frame_resource_cache[0..self.canvas_frame_resource_cache_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.canvas_frame_resource_cache[0..self.canvas_frame_resource_cache_count];
         }
 
         pub fn canvasFramePathGeometryCache(self: *const RuntimeView) []const canvas.RenderPathGeometryCacheEntry {
-            return self.canvas_frame_path_geometry_cache[0..self.canvas_frame_path_geometry_cache_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.canvas_frame_path_geometry_cache[0..self.canvas_frame_path_geometry_cache_count];
         }
 
         pub fn canvasFrameImageCache(self: *const RuntimeView) []const canvas.RenderImageCacheEntry {
-            return self.canvas_frame_image_cache[0..self.canvas_frame_image_cache_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.canvas_frame_image_cache[0..self.canvas_frame_image_cache_count];
         }
 
         pub fn canvasFrameLayerCache(self: *const RuntimeView) []const canvas.RenderLayerCacheEntry {
-            return self.canvas_frame_layer_cache[0..self.canvas_frame_layer_cache_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.canvas_frame_layer_cache[0..self.canvas_frame_layer_cache_count];
         }
 
         pub fn canvasFrameVisualEffectCache(self: *const RuntimeView) []const canvas.VisualEffectCacheEntry {
-            return self.canvas_frame_visual_effect_cache[0..self.canvas_frame_visual_effect_cache_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.canvas_frame_visual_effect_cache[0..self.canvas_frame_visual_effect_cache_count];
         }
 
         pub fn canvasRenderAnimations(self: *const RuntimeView) []const canvas.CanvasRenderAnimation {
-            return self.canvas_render_animations[0..self.canvas_render_animation_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.canvas_render_animations[0..self.canvas_render_animation_count];
         }
 
         pub fn canvasFrameRenderOverrides(self: *const RuntimeView) []const canvas.CanvasRenderOverride {
-            return self.canvas_frame_render_overrides[0..self.canvas_frame_render_override_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.canvas_frame_render_overrides[0..self.canvas_frame_render_override_count];
         }
 
         pub fn canvasFramePipelineCache(self: *const RuntimeView) []const canvas.RenderPipelineCacheEntry {
@@ -270,16 +278,18 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn canvasFrameGlyphAtlasCache(self: *const RuntimeView) []const canvas.GlyphAtlasCacheEntry {
-            return self.canvas_frame_glyph_atlas_cache[0..self.canvas_frame_glyph_atlas_cache_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.canvas_frame_glyph_atlas_cache[0..self.canvas_frame_glyph_atlas_cache_count];
         }
 
         pub fn canvasFrameTextLayoutCache(self: *const RuntimeView) []const canvas.TextLayoutCacheEntry {
-            return self.canvas_frame_text_layout_cache[0..self.canvas_frame_text_layout_cache_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.canvas_frame_text_layout_cache[0..self.canvas_frame_text_layout_cache_count];
         }
 
         pub fn copyCanvasDisplayList(self: *RuntimeView, display_list: canvas.DisplayList) anyerror!void {
             _ = try CanvasResourceCounts.fromDisplayList(display_list);
-            if (display_list.commands.len > 0 and display_list.commands.ptr == self.canvas_commands[0..].ptr) {
+            if (display_list.commands.len > 0 and display_list.commands.ptr == self.canvasStorage().canvas_commands[0..].ptr) {
                 self.canvas_revision += 1;
                 return;
             }
@@ -291,27 +301,27 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             self.canvas_text_len = 0;
 
             for (display_list.commands) |command| {
-                self.canvas_commands[self.canvas_command_count] = try self.copyCanvasCommand(command);
+                self.canvasStorage().canvas_commands[self.canvas_command_count] = try self.copyCanvasCommand(command);
                 self.canvas_command_count += 1;
             }
             self.canvas_revision += 1;
         }
 
         pub fn copyCanvasFrameResourceCache(self: *RuntimeView, entries: []const canvas.RenderResourceCacheEntry) anyerror!void {
-            if (entries.len > self.canvas_frame_resource_cache.len) return error.RenderResourceListFull;
-            @memcpy(self.canvas_frame_resource_cache[0..entries.len], entries);
+            if (entries.len > self.canvasStorage().canvas_frame_resource_cache.len) return error.RenderResourceListFull;
+            @memcpy(self.canvasStorage().canvas_frame_resource_cache[0..entries.len], entries);
             self.canvas_frame_resource_cache_count = entries.len;
         }
 
         pub fn copyCanvasFramePathGeometryCache(self: *RuntimeView, entries: []const canvas.RenderPathGeometryCacheEntry) anyerror!void {
-            if (entries.len > self.canvas_frame_path_geometry_cache.len) return error.PathGeometryListFull;
-            @memcpy(self.canvas_frame_path_geometry_cache[0..entries.len], entries);
+            if (entries.len > self.canvasStorage().canvas_frame_path_geometry_cache.len) return error.PathGeometryListFull;
+            @memcpy(self.canvasStorage().canvas_frame_path_geometry_cache[0..entries.len], entries);
             self.canvas_frame_path_geometry_cache_count = entries.len;
         }
 
         pub fn copyCanvasFrameImageCache(self: *RuntimeView, entries: []const canvas.RenderImageCacheEntry) anyerror!void {
-            if (entries.len > self.canvas_frame_image_cache.len) return error.ImageListFull;
-            @memcpy(self.canvas_frame_image_cache[0..entries.len], entries);
+            if (entries.len > self.canvasStorage().canvas_frame_image_cache.len) return error.ImageListFull;
+            @memcpy(self.canvasStorage().canvas_frame_image_cache[0..entries.len], entries);
             self.canvas_frame_image_cache_count = entries.len;
         }
 
@@ -322,29 +332,29 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         /// skip the upload needed to recreate that resource.
         pub fn removeCanvasFrameImageCacheId(self: *RuntimeView, image_id: canvas.ImageId) void {
             var kept: usize = 0;
-            for (self.canvas_frame_image_cache[0..self.canvas_frame_image_cache_count]) |entry| {
+            for (self.canvasStorage().canvas_frame_image_cache[0..self.canvas_frame_image_cache_count]) |entry| {
                 if (entry.key.image_id == image_id) continue;
-                self.canvas_frame_image_cache[kept] = entry;
+                self.canvasStorage().canvas_frame_image_cache[kept] = entry;
                 kept += 1;
             }
             self.canvas_frame_image_cache_count = kept;
         }
 
         pub fn copyCanvasFrameLayerCache(self: *RuntimeView, entries: []const canvas.RenderLayerCacheEntry) anyerror!void {
-            if (entries.len > self.canvas_frame_layer_cache.len) return error.LayerListFull;
-            @memcpy(self.canvas_frame_layer_cache[0..entries.len], entries);
+            if (entries.len > self.canvasStorage().canvas_frame_layer_cache.len) return error.LayerListFull;
+            @memcpy(self.canvasStorage().canvas_frame_layer_cache[0..entries.len], entries);
             self.canvas_frame_layer_cache_count = entries.len;
         }
 
         pub fn copyCanvasFrameVisualEffectCache(self: *RuntimeView, entries: []const canvas.VisualEffectCacheEntry) anyerror!void {
-            if (entries.len > self.canvas_frame_visual_effect_cache.len) return error.VisualEffectListFull;
-            @memcpy(self.canvas_frame_visual_effect_cache[0..entries.len], entries);
+            if (entries.len > self.canvasStorage().canvas_frame_visual_effect_cache.len) return error.VisualEffectListFull;
+            @memcpy(self.canvasStorage().canvas_frame_visual_effect_cache[0..entries.len], entries);
             self.canvas_frame_visual_effect_cache_count = entries.len;
         }
 
         pub fn copyCanvasRenderAnimations(self: *RuntimeView, animations: []const canvas.CanvasRenderAnimation) anyerror!void {
-            if (animations.len > self.canvas_render_animations.len) return error.RenderAnimationListFull;
-            @memcpy(self.canvas_render_animations[0..animations.len], animations);
+            if (animations.len > self.canvasStorage().canvas_render_animations.len) return error.RenderAnimationListFull;
+            @memcpy(self.canvasStorage().canvas_render_animations[0..animations.len], animations);
             self.canvas_render_animation_count = animations.len;
             self.canvas_render_animation_dirty_bounds_count = 0;
         }
@@ -353,13 +363,13 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             if (animation.id == 0) return error.InvalidViewOptions;
             var index: usize = 0;
             while (index < self.canvas_render_animation_count) : (index += 1) {
-                if (self.canvas_render_animations[index].id == animation.id) {
-                    self.canvas_render_animations[index] = animation;
+                if (self.canvasStorage().canvas_render_animations[index].id == animation.id) {
+                    self.canvasStorage().canvas_render_animations[index] = animation;
                     return;
                 }
             }
-            if (self.canvas_render_animation_count >= self.canvas_render_animations.len) return error.RenderAnimationListFull;
-            self.canvas_render_animations[self.canvas_render_animation_count] = animation;
+            if (self.canvas_render_animation_count >= self.canvasStorage().canvas_render_animations.len) return error.RenderAnimationListFull;
+            self.canvasStorage().canvas_render_animations[self.canvas_render_animation_count] = animation;
             self.canvas_render_animation_count += 1;
         }
 
@@ -367,7 +377,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             var len: usize = 0;
             for (self.canvasRenderAnimations()) |animation| {
                 if (animation.id == id) continue;
-                self.canvas_render_animations[len] = animation;
+                self.canvasStorage().canvas_render_animations[len] = animation;
                 len += 1;
             }
             self.canvas_render_animation_count = len;
@@ -418,8 +428,8 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn copyCanvasFrameRenderOverrides(self: *RuntimeView, overrides: []const canvas.CanvasRenderOverride) anyerror!void {
-            if (overrides.len > self.canvas_frame_render_overrides.len) return error.RenderOverrideListFull;
-            @memcpy(self.canvas_frame_render_overrides[0..overrides.len], overrides);
+            if (overrides.len > self.canvasStorage().canvas_frame_render_overrides.len) return error.RenderOverrideListFull;
+            @memcpy(self.canvasStorage().canvas_frame_render_overrides[0..overrides.len], overrides);
             self.canvas_frame_render_override_count = overrides.len;
         }
 
@@ -427,7 +437,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             var len: usize = 0;
             for (self.canvasFrameRenderOverrides()) |override| {
                 if (canvasRenderOverrideNoop(override)) continue;
-                self.canvas_frame_render_overrides[len] = override;
+                self.canvasStorage().canvas_frame_render_overrides[len] = override;
                 len += 1;
             }
             self.canvas_frame_render_override_count = len;
@@ -451,7 +461,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                     self.removeCanvasRenderAnimationDirtyBounds(animation.id);
                     continue;
                 }
-                self.canvas_render_animations[len] = animation;
+                self.canvasStorage().canvas_render_animations[len] = animation;
                 len += 1;
             }
             self.canvas_render_animation_count = len;
@@ -472,14 +482,14 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn copyCanvasFrameGlyphAtlasCache(self: *RuntimeView, entries: []const canvas.GlyphAtlasCacheEntry) anyerror!void {
-            if (entries.len > self.canvas_frame_glyph_atlas_cache.len) return error.GlyphAtlasListFull;
-            @memcpy(self.canvas_frame_glyph_atlas_cache[0..entries.len], entries);
+            if (entries.len > self.canvasStorage().canvas_frame_glyph_atlas_cache.len) return error.GlyphAtlasListFull;
+            @memcpy(self.canvasStorage().canvas_frame_glyph_atlas_cache[0..entries.len], entries);
             self.canvas_frame_glyph_atlas_cache_count = entries.len;
         }
 
         pub fn copyCanvasFrameTextLayoutCache(self: *RuntimeView, entries: []const canvas.TextLayoutCacheEntry) anyerror!void {
-            const count = @min(entries.len, self.canvas_frame_text_layout_cache.len);
-            @memcpy(self.canvas_frame_text_layout_cache[0..count], entries[0..count]);
+            const count = @min(entries.len, self.canvasStorage().canvas_frame_text_layout_cache.len);
+            @memcpy(self.canvasStorage().canvas_frame_text_layout_cache[0..count], entries[0..count]);
             self.canvas_frame_text_layout_cache_count = count;
         }
 
@@ -634,31 +644,21 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             self.presented_canvas_has_unkeyed = false;
 
             for (display_list.commands) |command| {
-                if (self.presented_canvas_command_count >= self.presented_canvas_commands.len) return error.CanvasCommandLimitReached;
+                if (self.presented_canvas_command_count >= self.canvasStorage().presented_canvas_commands.len) return error.CanvasCommandLimitReached;
                 const id = command.objectId();
                 // `bounds()` re-derives text layout for wrapped runs;
                 // compute it once for both the summary and the unkeyed
                 // check.
                 const command_bounds = command.bounds();
-                self.presented_canvas_commands[self.presented_canvas_command_count] = .{
+                self.canvasStorage().presented_canvas_commands[self.presented_canvas_command_count] = .{
                     .id = id,
                     .bounds = command_bounds,
                 };
                 if (owner == null and id == null and command_bounds != null) self.presented_canvas_has_unkeyed = true;
                 self.presented_canvas_command_count += 1;
             }
-            if (owner) |policy| self.presented_canvas_has_unkeyed = scene_policy.summaryHasUnkeyed(self.presented_canvas_commands[0..self.presented_canvas_command_count], policy);
+            if (owner) |policy| self.presented_canvas_has_unkeyed = scene_policy.summaryHasUnkeyed(self.canvasStorage().presented_canvas_commands[0..self.presented_canvas_command_count], policy);
             self.presented_canvas_revision = self.canvas_revision;
-        }
-
-        pub fn copyPresentedCanvasSummaryFrom(self: *RuntimeView, source: *const RuntimeView) void {
-            self.presented_canvas_valid = source.presented_canvas_valid;
-            self.presented_canvas_command_count = source.presented_canvas_command_count;
-            self.presented_canvas_revision = source.presented_canvas_revision;
-            self.presented_canvas_surface_size = source.presented_canvas_surface_size;
-            self.presented_canvas_scale = source.presented_canvas_scale;
-            self.presented_canvas_has_unkeyed = source.presented_canvas_has_unkeyed;
-            @memcpy(self.presented_canvas_commands[0..source.presented_canvas_command_count], source.presented_canvas_commands[0..source.presented_canvas_command_count]);
         }
 
         pub fn currentCanvasHasUnkeyed(self: *const RuntimeView) bool {
@@ -687,7 +687,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             // either way — the indexed lookup resolves to the
             // lowest-index match exactly like the scans.
             const current_commands = self.canvasDisplayList().commands;
-            const presented = self.presented_canvas_commands[0..self.presented_canvas_command_count];
+            const presented = self.canvasStorage().presented_canvas_commands[0..self.presented_canvas_command_count];
             const use_index = (current_commands.len >= canvas.plan_key_index.min_entries_for_index or
                 presented.len >= canvas.plan_key_index.min_entries_for_index) and
                 canvas.plan_key_index.fitsHashSlots(summary_id_index_slots, current_commands.len) and
@@ -783,7 +783,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         };
 
         pub fn presentedCanvasCommandById(self: *const RuntimeView, id: canvas.ObjectId) ?PresentedCanvasCommandRef {
-            for (self.presented_canvas_commands[0..self.presented_canvas_command_count], 0..) |command, index| {
+            for (self.canvasStorage().presented_canvas_commands[0..self.presented_canvas_command_count], 0..) |command, index| {
                 if (command.id == id) return .{ .index = index, .command = command };
             }
             return null;
@@ -859,38 +859,38 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
 
         pub fn copyCanvasGradientStops(self: *RuntimeView, stops: []const canvas.GradientStop) anyerror![]const canvas.GradientStop {
             const end = self.canvas_gradient_stop_count + stops.len;
-            if (end > self.canvas_gradient_stops.len) return error.CanvasGradientStopLimitReached;
+            if (end > self.canvasStorage().canvas_gradient_stops.len) return error.CanvasGradientStopLimitReached;
             const start = self.canvas_gradient_stop_count;
-            @memcpy(self.canvas_gradient_stops[start..end], stops);
+            @memcpy(self.canvasStorage().canvas_gradient_stops[start..end], stops);
             self.canvas_gradient_stop_count = end;
-            return self.canvas_gradient_stops[start..end];
+            return self.canvasStorage().canvas_gradient_stops[start..end];
         }
 
         pub fn copyCanvasPathElements(self: *RuntimeView, elements: []const canvas.PathElement) anyerror![]const canvas.PathElement {
             const end = self.canvas_path_element_count + elements.len;
-            if (end > self.canvas_path_elements.len) return error.CanvasPathElementLimitReached;
+            if (end > self.canvasStorage().canvas_path_elements.len) return error.CanvasPathElementLimitReached;
             const start = self.canvas_path_element_count;
-            @memcpy(self.canvas_path_elements[start..end], elements);
+            @memcpy(self.canvasStorage().canvas_path_elements[start..end], elements);
             self.canvas_path_element_count = end;
-            return self.canvas_path_elements[start..end];
+            return self.canvasStorage().canvas_path_elements[start..end];
         }
 
         pub fn copyCanvasGlyphs(self: *RuntimeView, glyphs: []const canvas.Glyph) anyerror![]const canvas.Glyph {
             const end = self.canvas_glyph_count + glyphs.len;
-            if (end > self.canvas_glyphs.len) return error.CanvasGlyphLimitReached;
+            if (end > self.canvasStorage().canvas_glyphs.len) return error.CanvasGlyphLimitReached;
             const start = self.canvas_glyph_count;
-            @memcpy(self.canvas_glyphs[start..end], glyphs);
+            @memcpy(self.canvasStorage().canvas_glyphs[start..end], glyphs);
             self.canvas_glyph_count = end;
-            return self.canvas_glyphs[start..end];
+            return self.canvasStorage().canvas_glyphs[start..end];
         }
 
         pub fn copyCanvasText(self: *RuntimeView, text: []const u8) anyerror![]const u8 {
             const end = self.canvas_text_len + text.len;
-            if (end > self.canvas_text_bytes.len) return error.CanvasTextTooLarge;
+            if (end > self.canvasStorage().canvas_text_bytes.len) return error.CanvasTextTooLarge;
             const start = self.canvas_text_len;
-            @memcpy(self.canvas_text_bytes[start..end], text);
+            @memcpy(self.canvasStorage().canvas_text_bytes[start..end], text);
             self.canvas_text_len = end;
-            return self.canvas_text_bytes[start..end];
+            return self.canvasStorage().canvas_text_bytes[start..end];
         }
     };
 }

@@ -71,7 +71,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
             if (!canvasWidgetScrollDriversSupported(self)) return;
             const view = &self.views[view_index];
             if (host_regions.plan(view.canvas_widget_surface_scope_policy, .drivers, .{
-                .nodes = view.widget_layout_nodes[0..view.widget_layout_node_count],
+                .nodes = view.canvasStorage().widget_layout_nodes[0..view.widget_layout_node_count],
                 .tokens = view.widget_tokens,
                 .frame = view.frame,
                 .supported = true,
@@ -79,7 +79,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                 .tracked_ids = view.scroll_driver_ids[0..view.scroll_driver_count],
                 .tracked_offsets = view.scroll_driver_offsets[0..view.scroll_driver_count],
             })) |program| {
-                program.stamp(view.widget_layout_nodes[0..view.widget_layout_node_count]);
+                program.stamp(view.canvasStorage().widget_layout_nodes[0..view.widget_layout_node_count]);
                 self.options.platform.services.setGpuSurfaceScrollDrivers(view.window_id, view.label, program.drivers[0..program.driver_count], program.occluders[0..program.occluder_count]) catch |err| {
                     if (err != error.UnsupportedService) scroll_driver_log.warn("scroll driver sync failed for view '{s}': {s}", .{ view.label, @errorName(err) });
                     return;
@@ -117,7 +117,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
             var occluder_overflow = false;
             const layout_tree = view.widgetLayoutTree();
             const view_local = geometry.RectF.init(0, 0, view.frame.normalized().width, view.frame.normalized().height);
-            for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
+            for (view.canvasStorage().widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
                 const anchored_surface = node.widget.layout.anchor != null and node.widget.kind != .tooltip;
                 const modal_surface = switch (node.widget.kind) {
                     .dialog, .drawer, .sheet => node.widget.scrim,
@@ -141,7 +141,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                 occluders[0] = .{ .frame = view_local };
                 occluder_count = 1;
             }
-            for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
+            for (view.canvasStorage().widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
                 if (!canvasWidgetScrollDriverEligible(node.*)) continue;
                 node.widget.runtime_flags.native_scroll = true;
                 if (count >= drivers.len) continue;
@@ -301,17 +301,17 @@ fn transformedOccluderFrame(node: canvas.WidgetLayoutNode) geometry.RectF {
 fn windowSurfaceRootIndex(view: anytype, node_index: usize) ?usize {
     var current: ?usize = node_index;
     while (current) |index| {
-        if (canvas.widgetEscapesAncestorClips(view.widget_layout_nodes[index].widget)) return index;
-        current = view.widget_layout_nodes[index].parent_index;
+        if (canvas.widgetEscapesAncestorClips(view.canvasStorage().widget_layout_nodes[index].widget)) return index;
+        current = view.canvasStorage().widget_layout_nodes[index].parent_index;
     }
     return null;
 }
 
 fn nodeIsAncestor(view: anytype, ancestor: usize, node: usize) bool {
-    var current = view.widget_layout_nodes[node].parent_index;
+    var current = view.canvasStorage().widget_layout_nodes[node].parent_index;
     while (current) |index| {
         if (index == ancestor) return true;
-        current = view.widget_layout_nodes[index].parent_index;
+        current = view.canvasStorage().widget_layout_nodes[index].parent_index;
     }
     return false;
 }
@@ -319,10 +319,10 @@ fn nodeIsAncestor(view: anytype, ancestor: usize, node: usize) bool {
 /// The widget id of the nearest ancestor node that is itself
 /// driver-eligible, or 0 at the top of the scrollable chain.
 fn nearestAncestorDriverId(view: anytype, node_index: usize) u64 {
-    var current = view.widget_layout_nodes[node_index].parent_index;
+    var current = view.canvasStorage().widget_layout_nodes[node_index].parent_index;
     while (current) |index| {
-        if (canvasWidgetScrollDriverEligible(view.widget_layout_nodes[index])) return view.widget_layout_nodes[index].widget.id;
-        current = view.widget_layout_nodes[index].parent_index;
+        if (canvasWidgetScrollDriverEligible(view.canvasStorage().widget_layout_nodes[index])) return view.canvasStorage().widget_layout_nodes[index].widget.id;
+        current = view.canvasStorage().widget_layout_nodes[index].parent_index;
     }
     return 0;
 }

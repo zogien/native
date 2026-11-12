@@ -99,7 +99,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
     return struct {
         pub fn widgetLayoutTree(self: *const RuntimeView) canvas.WidgetLayoutTree {
             return .{
-                .nodes = self.widget_layout_nodes[0..self.widget_layout_node_count],
+                .nodes = if (self.canvas_storage) |storage| storage.widget_layout_nodes[0..self.widget_layout_node_count] else &.{},
                 .root_bounds = self.widget_layout_root_bounds,
                 .semantic_policy = self.widget_tokens.intrinsic_layout_policy,
                 .audit_policy = self.widget_tokens.widget_audit_policy,
@@ -114,22 +114,25 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn widgetSemantics(self: *const RuntimeView) []const canvas.WidgetSemanticsNode {
-            return self.widget_semantics_nodes[0..self.widget_semantics_node_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.widget_semantics_nodes[0..self.widget_semantics_node_count];
         }
 
         pub fn widgetSourceTextEntries(self: *const RuntimeView) []const CanvasWidgetSourceTextEntry {
-            return self.widget_source_text_entries[0..self.widget_source_text_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.widget_source_text_entries[0..self.widget_source_text_count];
         }
 
         pub fn widgetSourceScrollEntries(self: *const RuntimeView) []const canvas_widget_runtime.CanvasWidgetSourceScrollEntry {
-            return self.widget_source_scroll_entries[0..self.widget_source_scroll_count];
+            const storage = self.canvas_storage orelse return &.{};
+            return storage.widget_source_scroll_entries[0..self.widget_source_scroll_count];
         }
 
         pub fn copyCanvasWidgetSourceScroll(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
             const entries = canvas_widget_runtime.collectCanvasWidgetScrollOffsetEntriesWithPolicy(
                 layout.retention_policy orelse self.widget_tokens.widget_retention_policy,
                 layout.nodes,
-                &self.widget_source_scroll_entries,
+                &self.canvasStorage().widget_source_scroll_entries,
             );
             self.widget_source_scroll_count = entries.len;
         }
@@ -173,24 +176,24 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn widgetSourceControlEntries(self: *const RuntimeView) []const canvas_widget_runtime.CanvasWidgetSourceControlEntry {
-            return self.widget_source_control_entries[0..self.widget_source_control_count];
+            return self.canvasStorage().widget_source_control_entries[0..self.widget_source_control_count];
         }
 
         pub fn copyCanvasWidgetSourceControls(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
             const entries = canvas_widget_runtime.collectCanvasWidgetSourceControlEntriesWithPolicy(
                 layout.retention_policy orelse self.widget_tokens.widget_retention_policy,
                 layout.nodes,
-                &self.widget_source_control_entries,
+                &self.canvasStorage().widget_source_control_entries,
             );
             self.widget_source_control_count = entries.len;
         }
 
         pub fn copyCanvasWidgetSourceText(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
-            if (retention.collect(layout.retention_policy orelse self.widget_tokens.widget_retention_policy, .source_text, layout.nodes, @as([]const CanvasWidgetSourceTextEntry, &.{}), self.widget_source_text_entries.len, 0)) |plan| {
+            if (retention.collect(layout.retention_policy orelse self.widget_tokens.widget_retention_policy, .source_text, layout.nodes, @as([]const CanvasWidgetSourceTextEntry, &.{}), self.canvasStorage().widget_source_text_entries.len, 0)) |plan| {
                 for (plan.entries[0..plan.count], 0..) |entry, i| {
                     const widget = layout.nodes[entry.node].widget;
                     const fingerprint = canvasWidgetSourceTextFingerprint(widget.text);
-                    self.widget_source_text_entries[i] = .{ .id = widget.id, .kind = widget.kind, .text_len = fingerprint.len, .text_hash = fingerprint.hash, .text_selection = widget.text_selection };
+                    self.canvasStorage().widget_source_text_entries[i] = .{ .id = widget.id, .kind = widget.kind, .text_len = fingerprint.len, .text_hash = fingerprint.hash, .text_selection = widget.text_selection };
                 }
                 self.widget_source_text_count = plan.count;
                 return;
@@ -212,7 +215,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 entry_count += 1;
             }
 
-            @memcpy(self.widget_source_text_entries[0..entry_count], entries[0..entry_count]);
+            @memcpy(self.canvasStorage().widget_source_text_entries[0..entry_count], entries[0..entry_count]);
             self.widget_source_text_count = entry_count;
         }
 
@@ -220,13 +223,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// 1024-node budget; callers pass the Runtime's shared
         /// `canvas_widget_copy_scratch` (the event loop is single-threaded).
         pub fn copyWidgetLayoutTree(self: *RuntimeView, layout: canvas.WidgetLayoutTree, scratch: *canvas_widget_runtime.CanvasWidgetCopyScratch) anyerror!void {
-            if (layout.nodes.len > self.widget_layout_nodes.len) return error.WidgetNodeLimitReached;
+            if (layout.nodes.len > self.canvasStorage().widget_layout_nodes.len) return error.WidgetNodeLimitReached;
             var anchored_count: usize = 0;
             for (layout.nodes) |node| {
                 if (canvas.widgetIsAnchored(node.widget)) anchored_count += 1;
             }
             if (anchored_count > canvas_limits.max_canvas_widget_anchored_per_view) return error.WidgetAnchoredSurfaceLimitReached;
-            if (layout.nodes.len > 0 and layout.nodes.ptr == self.widget_layout_nodes[0..].ptr) {
+            if (layout.nodes.len > 0 and layout.nodes.ptr == self.canvasStorage().widget_layout_nodes[0..].ptr) {
                 self.widget_tokens.text_run_policy = layout.text_run_policy orelse self.widget_tokens.text_run_policy;
                 self.widget_layout_root_bounds = layout.root_bounds;
                 self.widget_revision += 1;
@@ -252,7 +255,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             const previous_scroll_states = collectCanvasWidgetScrollReconcileEntries(
                 self.widget_tokens.widget_retention_policy,
                 self.widgetLayoutTree().nodes,
-                self.widget_scroll_states[0..self.widget_layout_node_count],
+                self.canvasStorage().widget_scroll_states[0..self.widget_layout_node_count],
                 &scratch.scroll_entries,
             );
             var previous_text_len: usize = 0;
@@ -301,14 +304,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                     if (self.canvas_widget_focus_return_policy) |policy| {
                         focus_return_id = compiledCanvasWidgetFocusReturn(self, policy, focused_index, true) orelse 0;
                     } else {
-                        var current: ?usize = self.widget_layout_nodes[focused_index].parent_index;
+                        var current: ?usize = self.canvasStorage().widget_layout_nodes[focused_index].parent_index;
                         while (current) |ancestor_index| {
-                            const ancestor = self.widget_layout_nodes[ancestor_index].widget;
+                            const ancestor = self.canvasStorage().widget_layout_nodes[ancestor_index].widget;
                             if (canvas.widgetIsAnchored(ancestor) and canvasWidgetDismissibleSurfaceKind(ancestor.kind)) {
                                 focus_return_id = self.canvasWidgetAnchorTriggerFocusId(ancestor_index) orelse 0;
                                 break;
                             }
-                            current = self.widget_layout_nodes[ancestor_index].parent_index;
+                            current = self.canvasStorage().widget_layout_nodes[ancestor_index].parent_index;
                         }
                     }
                 }
@@ -343,19 +346,19 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 const text_reconciled = if (reconcile_plan) |*plan| canvas_widget_runtime.canvasWidgetLayoutNodeWithPlannedText(node, plan.entries[layout_index], &index_scratch.texts) else canvasWidgetLayoutNodeWithTextReconcileState(node, layout, layout_index, &index_scratch.texts);
                 const text_copy = try copyWidgetLayoutNodeWithContinuity(self, text_reconciled, &index_scratch.semantics, if (continuity_plan) |plan| plan.actions[layout_index] else null);
                 const copy = if (reconcile_plan) |*plan| canvas_widget_runtime.canvasWidgetLayoutNodeWithPlannedControl(text_copy, plan.entries[layout_index]) else canvasWidgetLayoutNodeWithControlReconcileState(text_copy, layout, layout_index, &index_scratch.controls, &index_scratch.source_controls);
-                self.widget_layout_nodes[self.widget_layout_node_count] = copy;
-                self.widget_scroll_states[self.widget_layout_node_count] = canvas_widget_runtime.canvasWidgetScrollStateWithPlan(copy, previous_scroll_states, if (continuity_plan) |plan| plan.actions[layout_index] else null);
+                self.canvasStorage().widget_layout_nodes[self.widget_layout_node_count] = copy;
+                self.canvasStorage().widget_scroll_states[self.widget_layout_node_count] = canvas_widget_runtime.canvasWidgetScrollStateWithPlan(copy, previous_scroll_states, if (continuity_plan) |plan| plan.actions[layout_index] else null);
                 self.widget_layout_node_count += 1;
             }
 
             try clampCanvasWidgetLayoutScrollOffsets(
-                self.widget_layout_nodes[0..self.widget_layout_node_count],
-                self.widget_scroll_states[0..self.widget_layout_node_count],
+                self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count],
+                self.canvasStorage().widget_scroll_states[0..self.widget_layout_node_count],
                 self.widget_layout_root_bounds,
                 self.widget_tokens,
             );
             clampCanvasWidgetLayoutTextOffsets(
-                self.widget_layout_nodes[0..self.widget_layout_node_count],
+                self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count],
                 self.widget_tokens,
             );
 
@@ -367,8 +370,8 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             self.pruneCanvasTooltipIntent();
             self.applyCanvasTooltipVisibility();
 
-            const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
-            canvas_widget_runtime.applyCanvasWidgetSourceScrollSemanticsWithPolicy(self.widget_tokens.widget_continuity_policy, self.widget_semantics_nodes[0..semantics.len], &index_scratch.semantics);
+            const semantics = try self.widgetLayoutTree().collectSemantics(&self.canvasStorage().widget_semantics_nodes);
+            canvas_widget_runtime.applyCanvasWidgetSourceScrollSemanticsWithPolicy(self.widget_tokens.widget_continuity_policy, self.canvasStorage().widget_semantics_nodes[0..semantics.len], &index_scratch.semantics);
             self.widget_semantics_node_count = semantics.len;
             if (self.canvas_widget_focused_id != 0 and self.widgetLayoutTree().focusTargetById(self.canvas_widget_focused_id) == null) {
                 const return_id = if (focus_return_id != 0 and self.widgetLayoutTree().focusTargetById(focus_return_id) != null) focus_return_id else 0;
@@ -417,7 +420,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// everything else resolves through the kind mapping.
         pub fn canvasWidgetCursorForId(self: *const RuntimeView, id: canvas.ObjectId) platform.Cursor {
             const index = self.canvasWidgetNodeIndexById(id) orelse return .arrow;
-            const node = self.widget_layout_nodes[index];
+            const node = self.canvasStorage().widget_layout_nodes[index];
             if (node.widget.semantics.role == .link and !node.widget.state.disabled) {
                 return platformCursorFromCanvas(.pointing_hand);
             }
@@ -558,7 +561,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         pub fn dismissCanvasWidgetSurfaceFromEscape(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             if (focused_id != 0) {
                 if (self.canvasWidgetNodeIndexById(focused_id)) |focused_index| {
-                    const focused_widget = self.widget_layout_nodes[focused_index].widget;
+                    const focused_widget = self.canvasStorage().widget_layout_nodes[focused_index].widget;
                     if (canvasWidgetEditableTextKind(focused_widget.kind) and focused_widget.text_composition != null) return null;
                     if (try self.dismissCanvasWidgetSurfaceForTargetIndex(focused_index)) |dismissal| return dismissal;
                 }
@@ -616,12 +619,12 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             const surface_index = focused_surface_index orelse
                 canvasWidgetTopmostAnchoredSurfaceIndexInScope(self, .interactive) orelse return null;
             if (self.canvas_widget_surface_scope_policy) |policy| {
-                const anchor = if (canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget))
-                    self.widget_layout_nodes[surface_index].parent_index
+                const anchor = if (canvas.widgetIsAnchored(self.canvasStorage().widget_layout_nodes[surface_index].widget))
+                    self.canvasStorage().widget_layout_nodes[surface_index].parent_index
                 else
                     null;
                 const facts = @as(u8, @intFromBool(self.canvasWidgetRouteDescendsFromIndex(route, surface_index))) |
-                    (@as(u8, @intFromBool(canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget))) << 1) |
+                    (@as(u8, @intFromBool(canvas.widgetIsAnchored(self.canvasStorage().widget_layout_nodes[surface_index].widget))) << 1) |
                     (@as(u8, @intFromBool(anchor != null)) << 2) |
                     (@as(u8, @intFromBool(if (anchor) |index| self.canvasWidgetRouteDescendsFromIndex(route, index) else false)) << 3);
                 if (compiledCanvasSurfaceDismissalAction(policy, 1, facts) == 0) return null;
@@ -633,8 +636,8 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // trigger's own toggle gesture: skip the outside-dismiss so a
             // click on the open picker's trigger dispatches exactly one
             // Msg (the toggle), never dismiss-then-reopen.
-            if (canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget)) {
-                if (self.widget_layout_nodes[surface_index].parent_index) |anchor_index| {
+            if (canvas.widgetIsAnchored(self.canvasStorage().widget_layout_nodes[surface_index].widget)) {
+                if (self.canvasStorage().widget_layout_nodes[surface_index].parent_index) |anchor_index| {
                     if (self.canvasWidgetRouteDescendsFromIndex(route, anchor_index)) return null;
                 }
             }
@@ -645,14 +648,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (self.canvas_widget_surface_scope_policy) |policy| {
                 const present = surface_index < self.widget_layout_node_count;
                 const facts = @as(u8, @intFromBool(present)) |
-                    (@as(u8, @intFromBool(present and self.widget_layout_nodes[surface_index].widget.semantics.hidden)) << 1);
+                    (@as(u8, @intFromBool(present and self.canvasStorage().widget_layout_nodes[surface_index].widget.semantics.hidden)) << 1);
                 if (compiledCanvasSurfaceDismissalAction(policy, 0, facts) == 0) return null;
             }
             if (surface_index >= self.widget_layout_node_count) return null;
-            const surface = self.widget_layout_nodes[surface_index].widget;
+            const surface = self.canvasStorage().widget_layout_nodes[surface_index].widget;
             if (surface.semantics.hidden) return null;
             const dirty = self.canvasWidgetDirtyBounds(surface_index, surface.frame) orelse surface.frame;
-            self.widget_layout_nodes[surface_index].widget.semantics.hidden = true;
+            self.canvasStorage().widget_layout_nodes[surface_index].widget.semantics.hidden = true;
             // A dismissed anchored tooltip leaves the intent machine too,
             // or the next visibility stamp would undo the dismissal. No
             // warm window: Escape is a deliberate dismissal, not the
@@ -826,12 +829,12 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             var current: ?usize = target_index;
             while (current) |index| {
                 if (index >= self.widget_layout_node_count) return null;
-                const widget = self.widget_layout_nodes[index].widget;
+                const widget = self.canvasStorage().widget_layout_nodes[index].widget;
                 if (canvasWidgetDismissibleSurfaceKind(widget.kind) and !widget.semantics.hidden) {
                     return if (canvasWidgetAnchoredSurfaceKindInScope(widget.kind, scope)) index else null;
                 }
                 if (canvasWidgetAnchoredChildIndexInScope(self, index, scope)) |surface_index| return surface_index;
-                current = self.widget_layout_nodes[index].parent_index;
+                current = self.canvasStorage().widget_layout_nodes[index].parent_index;
             }
             return null;
         }
@@ -854,7 +857,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             }
             var found: ?usize = null;
             var found_order: ?canvas.WidgetPaintOrder = null;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (node.parent_index != anchor_index) continue;
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
                 if (!canvasWidgetAnchoredSurfaceKindInScope(node.widget.kind, scope)) continue;
@@ -879,7 +882,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 return surfacePlanIndex(&plan, 2 + trigger_index * 6 + 4);
             }
             if (canvasWidgetAnchoredMenuChildIndex(self, trigger_index)) |surface_index| return surface_index;
-            const parent_index = self.widget_layout_nodes[trigger_index].parent_index orelse return null;
+            const parent_index = self.canvasStorage().widget_layout_nodes[trigger_index].parent_index orelse return null;
             const surface_index = canvasWidgetAnchoredMenuChildIndex(self, parent_index) orelse return null;
             return if (surface_index == trigger_index) null else surface_index;
         }
@@ -898,7 +901,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (trigger_index >= self.widget_layout_node_count) return null;
             if (self.canvas_widget_tooltip_policy) |policy|
                 return compiledCanvasTooltipBinding(policy, self.widgetLayoutTree(), trigger_index, null, 0, 0);
-            return canvasWidgetOwnedTooltipIndexInNodes(self.widget_layout_nodes[0..self.widget_layout_node_count], trigger_index);
+            return canvasWidgetOwnedTooltipIndexInNodes(self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], trigger_index);
         }
 
         /// The ID of the anchored tooltip `owner_id` owns in the
@@ -914,7 +917,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (owner_id == 0) return 0;
             const owner_index = self.canvasWidgetNodeIndexById(owner_id) orelse return 0;
             const tooltip_index = self.canvasWidgetOwnedTooltipIndex(owner_index) orelse return 0;
-            return self.widget_layout_nodes[tooltip_index].widget.id;
+            return self.canvasStorage().widget_layout_nodes[tooltip_index].widget.id;
         }
 
         /// Stamp hover-intent visibility onto every ANCHORED tooltip
@@ -924,7 +927,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// are never touched. Runs at tree adoption (each rebuild) and
         /// after every intent transition.
         pub fn applyCanvasTooltipVisibility(self: *RuntimeView) void {
-            self.applyCanvasTooltipVisibilityToNodes(self.widget_layout_nodes[0..self.widget_layout_node_count]);
+            self.applyCanvasTooltipVisibilityToNodes(self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count]);
         }
 
         /// The same stamp over an arbitrary node slice, against the
@@ -1207,13 +1210,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// focusable row for an ArrowDown entry or the last for ArrowUp —
         /// the open-menu keymap shared by picker and menu-button triggers.
         pub fn canvasWidgetMenuSurfaceEntryId(self: *const RuntimeView, surface_index: usize, from_end: bool) ?canvas.ObjectId {
-            if (surface_index < self.widget_layout_node_count and self.widget_layout_nodes[surface_index].widget.interaction_policy != null) {
+            if (surface_index < self.widget_layout_node_count and self.canvasStorage().widget_layout_nodes[surface_index].widget.interaction_policy != null) {
                 const target = canvas_widget_runtime.canvasWidgetCompiledMenuFocus(self.widgetLayoutTree(), surface_index, if (from_end) 3 else 2) orelse return null;
                 return target.id;
             }
             var first: ?canvas.ObjectId = null;
             var last: ?canvas.ObjectId = null;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, node_index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, node_index| {
                 if (node.widget.kind != .menu_item and node.widget.kind != .list_item) continue;
                 if (!self.canvasWidgetNodeIndexDescendsFrom(node_index, surface_index)) continue;
                 if (self.widgetLayoutTree().focusTargetById(node.widget.id) == null) continue;
@@ -1232,11 +1235,11 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (surface_index >= self.widget_layout_node_count) return null;
             if (self.canvas_widget_focus_return_policy) |policy|
                 return compiledCanvasWidgetFocusReturn(self, policy, surface_index, false);
-            if (!canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget)) return null;
-            const anchor_index = self.widget_layout_nodes[surface_index].parent_index orelse return null;
-            const anchor_id = self.widget_layout_nodes[anchor_index].widget.id;
+            if (!canvas.widgetIsAnchored(self.canvasStorage().widget_layout_nodes[surface_index].widget)) return null;
+            const anchor_index = self.canvasStorage().widget_layout_nodes[surface_index].parent_index orelse return null;
+            const anchor_id = self.canvasStorage().widget_layout_nodes[anchor_index].widget.id;
             if (self.widgetLayoutTree().focusTargetById(anchor_id) != null) return anchor_id;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, node_index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, node_index| {
                 if (node.parent_index != anchor_index or node_index == surface_index) continue;
                 if (self.widgetLayoutTree().focusTargetById(node.widget.id) != null) return node.widget.id;
             }
@@ -1260,7 +1263,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             }
             var found: ?usize = null;
             var found_order: ?canvas.WidgetPaintOrder = null;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
                 if (!canvasWidgetAnchoredSurfaceKindInScope(node.widget.kind, scope)) continue;
                 if (canvasWidgetNodeHiddenInTree(self, index)) continue;
@@ -1280,8 +1283,8 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             var current: ?usize = node_index;
             while (current) |index| {
                 if (index >= self.widget_layout_node_count) return true;
-                if (self.widget_layout_nodes[index].widget.semantics.hidden) return true;
-                current = self.widget_layout_nodes[index].parent_index;
+                if (self.canvasStorage().widget_layout_nodes[index].widget.semantics.hidden) return true;
+                current = self.canvasStorage().widget_layout_nodes[index].parent_index;
             }
             return false;
         }
@@ -1560,7 +1563,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
 
         pub fn canvasWidgetFocusTargetAtScopedIndex(self: *const RuntimeView, surface_index: usize, index: usize) ?canvas.WidgetFocusTarget {
             if (!self.canvasWidgetNodeIndexDescendsFrom(index, surface_index)) return null;
-            const id = self.widget_layout_nodes[index].widget.id;
+            const id = self.canvasStorage().widget_layout_nodes[index].widget.id;
             return self.widgetLayoutTree().focusTargetById(id);
         }
 
@@ -1575,14 +1578,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             while (current) |index| {
                 if (index >= self.widget_layout_node_count) return false;
                 if (index == ancestor_index) return true;
-                current = self.widget_layout_nodes[index].parent_index;
+                current = self.canvasStorage().widget_layout_nodes[index].parent_index;
             }
             return false;
         }
 
         pub fn canvasWidgetNodeIndexById(self: *const RuntimeView, id: canvas.ObjectId) ?usize {
             if (id == 0) return null;
-            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+            for (self.canvasStorage().widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (node.widget.id == id) return index;
             }
             return null;
@@ -1590,7 +1593,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
 
         pub fn canvasWidgetCommand(self: *const RuntimeView, id: canvas.ObjectId) ?[]const u8 {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
-            const widget = self.widget_layout_nodes[index].widget;
+            const widget = self.canvasStorage().widget_layout_nodes[index].widget;
             if (widget.command.len == 0) return null;
             return widget.command;
         }
@@ -1600,7 +1603,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 .increment => "arrowright",
                 .decrement => "arrowleft",
             };
-            return switch (self.widget_layout_nodes[index].widget.kind) {
+            return switch (self.canvasStorage().widget_layout_nodes[index].widget.kind) {
                 .grid, .scroll_view, .list, .data_grid, .table => switch (direction) {
                     // Page keys step the vertical axis on every keymap
                     // except the horizontal-only one (which mirrors the
@@ -1630,7 +1633,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// horizontal-only regions, whose keymap already maps the page
         /// keys sideways — keep the page keys.
         fn canvasWidgetStepAxisHorizontal(self: *const RuntimeView, index: usize) bool {
-            const node = self.widget_layout_nodes[index];
+            const node = self.canvasStorage().widget_layout_nodes[index];
             if (node.widget.kind != .scroll_view or node.widget.scroll_axes != .both) return false;
             const viewport = node.frame.inset(node.widget.layout.padding).normalized();
             if (viewport.isEmpty()) return false;
@@ -1643,7 +1646,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn refreshCanvasWidgetSemantics(self: *RuntimeView) anyerror!void {
-            const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
+            const semantics = try self.widgetLayoutTree().collectSemantics(&self.canvasStorage().widget_semantics_nodes);
             self.widget_semantics_node_count = semantics.len;
         }
 
@@ -1676,9 +1679,9 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         pub fn copyWidgetContextMenu(self: *RuntimeView, items: []const canvas.WidgetContextMenuItem) anyerror![]const canvas.WidgetContextMenuItem {
             if (items.len == 0) return &.{};
             const end = self.widget_context_menu_len + items.len;
-            if (end > self.widget_context_menu_items.len) return error.WidgetContextMenuLimitReached;
+            if (end > self.canvasStorage().widget_context_menu_items.len) return error.WidgetContextMenuLimitReached;
             const start = self.widget_context_menu_len;
-            for (items, self.widget_context_menu_items[start..end]) |item, *entry| {
+            for (items, self.canvasStorage().widget_context_menu_items[start..end]) |item, *entry| {
                 entry.* = .{
                     .label = try self.copyWidgetText(item.label),
                     .enabled = item.enabled,
@@ -1686,7 +1689,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 };
             }
             self.widget_context_menu_len = end;
-            return self.widget_context_menu_items[start..end];
+            return self.canvasStorage().widget_context_menu_items[start..end];
         }
 
         /// Retain a `.chart` widget's plot data: series entries, their
@@ -1702,16 +1705,16 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 return copy;
             }
             const end = self.widget_chart_series_len + data.series.len;
-            if (end > self.widget_chart_series_entries.len) return error.WidgetChartSeriesLimitReached;
+            if (end > self.canvasStorage().widget_chart_series_entries.len) return error.WidgetChartSeriesLimitReached;
             const start = self.widget_chart_series_len;
             self.widget_chart_series_len = end;
-            for (data.series, self.widget_chart_series_entries[start..end]) |series, *entry| {
+            for (data.series, self.canvasStorage().widget_chart_series_entries[start..end]) |series, *entry| {
                 entry.* = series;
                 entry.values = try copyWidgetChartPoints(self, series.values);
                 entry.low = try copyWidgetChartPoints(self, series.low);
                 entry.label = try self.copyWidgetText(series.label);
             }
-            copy.series = self.widget_chart_series_entries[start..end];
+            copy.series = self.canvasStorage().widget_chart_series_entries[start..end];
             return copy;
         }
 
@@ -1721,23 +1724,23 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         fn copyWidgetChartLabels(self: *RuntimeView, labels: []const []const u8) anyerror![]const []const u8 {
             if (labels.len == 0) return &.{};
             const end = self.widget_chart_x_labels_len + labels.len;
-            if (end > self.widget_chart_x_labels.len) return error.WidgetChartLabelsLimitReached;
+            if (end > self.canvasStorage().widget_chart_x_labels.len) return error.WidgetChartLabelsLimitReached;
             const start = self.widget_chart_x_labels_len;
             self.widget_chart_x_labels_len = end;
-            for (labels, self.widget_chart_x_labels[start..end]) |label, *entry| {
+            for (labels, self.canvasStorage().widget_chart_x_labels[start..end]) |label, *entry| {
                 entry.* = try self.copyWidgetText(label);
             }
-            return self.widget_chart_x_labels[start..end];
+            return self.canvasStorage().widget_chart_x_labels[start..end];
         }
 
         fn copyWidgetChartPoints(self: *RuntimeView, points: []const f32) anyerror![]const f32 {
             if (points.len == 0) return &.{};
             const end = self.widget_chart_points_len + points.len;
-            if (end > self.widget_chart_points.len) return error.WidgetChartPointsLimitReached;
+            if (end > self.canvasStorage().widget_chart_points.len) return error.WidgetChartPointsLimitReached;
             const start = self.widget_chart_points_len;
-            @memcpy(self.widget_chart_points[start..end], points);
+            @memcpy(self.canvasStorage().widget_chart_points[start..end], points);
             self.widget_chart_points_len = end;
-            return self.widget_chart_points[start..end];
+            return self.canvasStorage().widget_chart_points[start..end];
         }
 
         pub fn copyWidgetText(self: *RuntimeView, text: []const u8) anyerror![]const u8 {
@@ -1761,9 +1764,9 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         ) anyerror![]const canvas.TextSpan {
             if (spans.len == 0) return &.{};
             const end = self.widget_span_len + spans.len;
-            if (end > self.widget_span_entries.len) return error.WidgetSpanLimitReached;
+            if (end > self.canvasStorage().widget_span_entries.len) return error.WidgetSpanLimitReached;
             const start = self.widget_span_len;
-            for (spans, self.widget_span_entries[start..end]) |span, *entry| {
+            for (spans, self.canvasStorage().widget_span_entries[start..end]) |span, *entry| {
                 entry.* = span;
                 entry.text = if (subsliceOffset(source_text, span.text)) |offset|
                     copied_text[offset .. offset + span.text.len]
@@ -1772,7 +1775,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 entry.link = try self.copyWidgetText(span.link);
             }
             self.widget_span_len = end;
-            return self.widget_span_entries[start..end];
+            return self.canvasStorage().widget_span_entries[start..end];
         }
     };
 }

@@ -612,14 +612,7 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         self.disarmMediaSurfaceWakes();
         self.releaseDialogs();
-        for (self.views[0..self.view_count]) |*view| {
-            if (view.widget_text_bytes_heap_owned) self.owned_allocator.free(view.widget_text_bytes);
-            if (view.canvas_widget_text_history_bytes_heap_owned) self.owned_allocator.free(view.canvas_widget_text_history_bytes);
-            view.widget_text_bytes = &.{};
-            view.widget_text_bytes_heap_owned = false;
-            view.canvas_widget_text_history_bytes = &.{};
-            view.canvas_widget_text_history_bytes_heap_owned = false;
-        }
+        for (self.views[0..self.view_count]) |*view| view.releaseOwnedBuffers(self.owned_allocator);
         self.view_count = 0;
         if (self.targetless_ime_preedit.len > 0) {
             self.owned_allocator.free(self.targetless_ime_preedit);

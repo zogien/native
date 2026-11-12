@@ -9,7 +9,7 @@ pub fn run(self: anytype, policy: programs.Policy, comptime mode: programs.Mode,
     var facts: u32 = if (allow_rubberband) 128 else 0;
     var node: canvas.WidgetLayoutNode = undefined;
     if (index < self.widget_layout_node_count) {
-        node = self.widget_layout_nodes[index];
+        node = self.canvasStorage().widget_layout_nodes[index];
         facts |= programs.nodeFacts(node);
     }
     var viewport: geometry.RectF = undefined;
@@ -72,15 +72,15 @@ pub fn run(self: anytype, policy: programs.Policy, comptime mode: programs.Mode,
             },
             .zero_velocity => next_axis.velocity = 0,
             .store_axis => {
-                self.widget_scroll_states[index] = current.withAxis(axis, next_axis);
+                self.canvasStorage().widget_scroll_states[index] = current.withAxis(axis, next_axis);
                 if (next_axis.offset != current_axis.offset) facts |= 512;
             },
             .compare_axis => if (next_axis.offset != current_axis.offset) {
                 facts |= 512;
             },
             .write_axis => switch (axis) {
-                .vertical => self.widget_layout_nodes[index].widget.value = next_axis.offset,
-                .horizontal => self.widget_layout_nodes[index].widget.value_x = next_axis.offset,
+                .vertical => self.canvasStorage().widget_layout_nodes[index].widget.value = next_axis.offset,
+                .horizontal => self.canvasStorage().widget_layout_nodes[index].widget.value_x = next_axis.offset,
             },
             .translate_axis => self.translateCanvasWidgetScrollDescendants(index, if (axis == .vertical) .{ .dy = -(next_axis.offset - current_axis.offset) } else .{ .dx = -(next_axis.offset - current_axis.offset) }),
             .event => self.noteCanvasWidgetScrollEvent(node.widget.id),
@@ -98,22 +98,22 @@ pub fn run(self: anytype, policy: programs.Policy, comptime mode: programs.Mode,
             .target_y => next = next.withAxis(.vertical, target(node.widget, current.axis(.vertical), source)),
             .target_x => next = next.withAxis(.horizontal, target(node.widget, current.axis(.horizontal), source)),
             .store_state => {
-                self.widget_scroll_states[index] = next;
+                self.canvasStorage().widget_scroll_states[index] = next;
                 if (mode == .kinetic) {
                     if (moved.dx != 0 or moved.dy != 0) facts |= 512;
                 } else if (next.offset_y != current.offset_y or next.offset_x != current.offset_x) facts |= 512;
             },
             .write_both => {
-                self.widget_layout_nodes[index].widget.value = next.offset_y;
-                self.widget_layout_nodes[index].widget.value_x = next.offset_x;
+                self.canvasStorage().widget_layout_nodes[index].widget.value = next.offset_y;
+                self.canvasStorage().widget_layout_nodes[index].widget.value_x = next.offset_x;
             },
             .translate_both => {
                 const offset = if (mode == .kinetic) moved else geometry.OffsetF.init(next.offset_x - current.offset_x, next.offset_y - current.offset_y);
                 self.translateCanvasWidgetScrollDescendants(index, .{ .dx = -offset.dx, .dy = -offset.dy });
             },
             .clear_velocities => {
-                self.widget_scroll_states[index].velocity_y = 0;
-                self.widget_scroll_states[index].velocity_x = 0;
+                self.canvasStorage().widget_scroll_states[index].velocity_y = 0;
+                self.canvasStorage().widget_scroll_states[index].velocity_x = 0;
             },
             .probe_y => {
                 facts &= ~@as(u32, 1024);

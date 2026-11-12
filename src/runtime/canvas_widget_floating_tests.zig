@@ -800,7 +800,7 @@ fn installTooltipToolbar(harness: anytype, app: App, arena: std.mem.Allocator) !
     var button_count: usize = 0;
     var tooltip_count: usize = 0;
     const view = &harness.runtime.views[0];
-    for (view.widget_layout_nodes[0..view.widget_layout_node_count]) |node| {
+    for (view.canvasStorage().widget_layout_nodes[0..view.widget_layout_node_count]) |node| {
         switch (node.widget.kind) {
             .button => {
                 toolbar.button_ids[button_count] = node.widget.id;
@@ -842,7 +842,7 @@ fn tooltipFrame(harness: anytype, app: App, timestamp_ns: u64) !void {
 fn tooltipHidden(harness: anytype, tooltip_id: canvas.ObjectId) !bool {
     const view = &harness.runtime.views[0];
     const node_index = view.canvasWidgetNodeIndexById(tooltip_id) orelse return error.TestUnexpectedResult;
-    return view.widget_layout_nodes[node_index].widget.semantics.hidden;
+    return view.canvasStorage().widget_layout_nodes[node_index].widget.semantics.hidden;
 }
 
 const tooltip_t0: u64 = 10_000_000_000;
@@ -1020,7 +1020,7 @@ test "tooltip-delay zero restores the instant hover show" {
 fn tooltipNodeFrame(harness: anytype, widget_id: canvas.ObjectId) !geometry.RectF {
     const view = &harness.runtime.views[0];
     const node_index = view.canvasWidgetNodeIndexById(widget_id) orelse return error.TestUnexpectedResult;
-    return view.widget_layout_nodes[node_index].frame;
+    return view.canvasStorage().widget_layout_nodes[node_index].frame;
 }
 
 test "pointer travels into hoverable tooltip content and it stays open until leaving both" {
@@ -3151,7 +3151,7 @@ fn tooltipHoverInWindow(harness: anytype, app: App, window_id: platform.WindowId
 fn tooltipHiddenInView(harness: anytype, view_index: usize, tooltip_id: canvas.ObjectId) !bool {
     const view = &harness.runtime.views[view_index];
     const node_index = view.canvasWidgetNodeIndexById(tooltip_id) orelse return error.TestUnexpectedResult;
-    return view.widget_layout_nodes[node_index].widget.semantics.hidden;
+    return view.canvasStorage().widget_layout_nodes[node_index].widget.semantics.hidden;
 }
 
 test "app deactivation hides the focus-shown tooltip and reactivation reveals nothing" {

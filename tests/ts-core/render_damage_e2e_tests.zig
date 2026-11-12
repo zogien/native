@@ -46,7 +46,17 @@ test "compiled effective scale widening preserves complete dirty backing state a
 }
 const Entry = testing.DamageCurrentCommand;
 fn patchParity(keys: []const u64, fingerprints: []const u64, bounds: []const geometry.RectF, current: []const Entry) !void {
-    const View = struct { canvas_packet_baseline_count: usize, canvas_packet_baseline_keys: []const u64, canvas_packet_baseline_fingerprints: []const u64, canvas_packet_baseline_bounds: []const geometry.RectF };
+    const View = struct {
+        canvas_packet_baseline_count: usize,
+        canvas_packet_baseline_keys: []const u64,
+        canvas_packet_baseline_fingerprints: []const u64,
+        canvas_packet_baseline_bounds: []const geometry.RectF,
+        /// The damage reference reads the baseline buffers through
+        /// `canvasStorage()`; this mirror keeps them inline.
+        pub fn canvasStorage(self: *const @This()) *const @This() {
+            return self;
+        }
+    };
     var view = View{ .canvas_packet_baseline_count = keys.len, .canvas_packet_baseline_keys = keys, .canvas_packet_baseline_fingerprints = fingerprints, .canvas_packet_baseline_bounds = bounds };
     const a = try std.testing.allocator.alloc(bool, keys.len * 2 + current.len);
     defer std.testing.allocator.free(a);
@@ -211,9 +221,9 @@ test "both runtime damage consumers preserve complete incremental frames retaine
                 const plan = try (canvas.DisplayList{ .commands = &.{command} }).renderPlan(&render);
                 const gpu_command = canvas.canvasGpuCommandFromRenderCommand(plan.commands[0], i);
                 const fingerprint = canvas.canvasGpuCommandFingerprint(gpu_command);
-                target.canvas_packet_baseline_keys[i] = canvas.canvasGpuPacketCommandKey(gpu_command, fingerprint);
-                target.canvas_packet_baseline_fingerprints[i] = fingerprint;
-                target.canvas_packet_baseline_bounds[i] = plan.commands[0].bounds;
+                target.canvasStorage().canvas_packet_baseline_keys[i] = canvas.canvasGpuPacketCommandKey(gpu_command, fingerprint);
+                target.canvasStorage().canvas_packet_baseline_fingerprints[i] = fingerprint;
+                target.canvasStorage().canvas_packet_baseline_bounds[i] = plan.commands[0].bounds;
             }
         }
         const options = canvas.CanvasFrameOptions{ .frame_index = 9007199254740993 + phase, .timestamp_ns = 33, .surface_size = .init(160, 120), .scale = 1.3, .full_repaint = phase == 0 };

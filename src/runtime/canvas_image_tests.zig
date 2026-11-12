@@ -389,41 +389,45 @@ fn registeredPixelsById(runtime: *core.Runtime, id: canvas.ImageId) ?[]const u8 
 }
 
 test "a fresh runtime allocates zero registered-image bytes until the first registration" {
-    // Count every runtime-allocator call: construction, startup, and
-    // view creation perform NONE — slot buffer storage is on-demand at
-    // a slot's first registration. (The regression pinned here: an
-    // embedded pool put 16 x 1 MiB = 16 MiB in every Runtime before
-    // any image existed; the media-texture-pool regression's twin.)
+    // Count every runtime-allocator call: construction and startup
+    // perform none, view creation allocates only the view's own canvas
+    // storage (pinned in view_storage_tests), and registered-image slot
+    // buffer storage is on-demand at a slot's first registration. (The
+    // regression pinned here: an embedded pool put 16 x 1 MiB = 16 MiB
+    // in every Runtime before any image existed; the media-texture-pool
+    // regression's twin.)
     var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const harness = try startedGpuHarnessWithRuntimeAllocator(std.testing.allocator, counting.allocator());
     defer harness.destroy(std.testing.allocator);
     var app_state: RegistryApp = .{};
     try harness.start(app_state.app());
+    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
     _ = try harness.runtime.createView(.{
         .window_id = 1,
         .label = "canvas",
         .kind = .gpu_surface,
         .frame = geometry.RectF.init(0, 0, 240, 140),
     });
-    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    const view_allocations = counting.allocations;
+    const view_bytes = counting.allocated_bytes;
 
-    // The first registration is the first allocation: exactly one,
-    // exactly the slot budget (freed by Runtime.deinit through
+    // The first registration is the registry's first allocation: exactly
+    // one, exactly the slot budget (freed by Runtime.deinit through
     // harness.destroy — the leak-checked test allocator backs it).
     const red = [_]u8{ 255, 0, 0, 255 };
     try harness.runtime.registerCanvasImage(1, 1, 1, &red);
-    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
-    try std.testing.expectEqual(canvas_limits.max_registered_canvas_image_pixel_bytes, counting.allocated_bytes);
+    try std.testing.expectEqual(view_allocations + 1, counting.allocations);
+    try std.testing.expectEqual(view_bytes + canvas_limits.max_registered_canvas_image_pixel_bytes, counting.allocated_bytes);
 
     // Replacing an id's pixels reuses the slot buffer: the count stays
-    // one — the allocation is per used slot, not per registration.
+    // put — the allocation is per used slot, not per registration.
     const blue = [_]u8{ 0, 0, 255, 255 };
     try harness.runtime.registerCanvasImage(1, 1, 1, &blue);
-    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
+    try std.testing.expectEqual(view_allocations + 1, counting.allocations);
 
     // A second id claims a second slot: one more allocation.
     try harness.runtime.registerCanvasImage(2, 1, 1, &red);
-    try std.testing.expectEqual(@as(usize, 2), counting.allocations);
+    try std.testing.expectEqual(view_allocations + 2, counting.allocations);
 
     // Unregister keeps vacated buffers for reuse (deinit is the only
     // free), so churn never touches the allocator again: the footprint
@@ -432,7 +436,7 @@ test "a fresh runtime allocates zero registered-image bytes until the first regi
     try std.testing.expect(harness.runtime.unregisterCanvasImage(2));
     try harness.runtime.registerCanvasImage(3, 1, 1, &blue);
     try harness.runtime.registerCanvasImage(4, 1, 1, &red);
-    try std.testing.expectEqual(@as(usize, 2), counting.allocations);
+    try std.testing.expectEqual(view_allocations + 2, counting.allocations);
 }
 
 test "raised registered-image budget stays lazy and sizes each used slot" {

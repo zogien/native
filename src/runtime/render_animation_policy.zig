@@ -137,11 +137,11 @@ pub fn finishFrame(view: anytype, timestamp_ns: u64, policy: Policy) bool {
     const result = invoke(policy, request, output);
     var retained: usize = 0;
     for (0..count) |i| {
-        const value = view.canvas_render_animations[i];
+        const value = view.canvasStorage().canvas_render_animations[i];
         if (result[32 + i] & 1 == 0) {
             view.removeCanvasRenderAnimationDirtyBounds(value.id);
         } else {
-            view.canvas_render_animations[retained] = value;
+            view.canvasStorage().canvas_render_animations[retained] = value;
             retained += 1;
         }
     }
@@ -160,7 +160,7 @@ fn compactOverrides(view: anytype, policy: Policy) void {
     const result = invoke(policy, request, output);
     var retained: usize = 0;
     for (0..count) |i| if (result[32 + i] & 1 != 0) {
-        view.canvas_frame_render_overrides[retained] = view.canvas_frame_render_overrides[i];
+        view.canvasStorage().canvas_frame_render_overrides[retained] = view.canvasStorage().canvas_frame_render_overrides[i];
         retained += 1;
     };
     view.canvas_frame_render_override_count = retained;

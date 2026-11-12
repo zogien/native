@@ -405,13 +405,13 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             if (view.widget_tokens.widget_motion_policy) |policy| {
                 const id = view.canvas_widget_focused_id;
                 const index = view.canvasWidgetNodeIndexById(id);
-                const selection = if (index) |i| canvas.widgetTextSelectionRange(view.widget_layout_nodes[i].widget) else null;
+                const selection = if (index) |i| canvas.widgetTextSelectionRange(view.canvasStorage().widget_layout_nodes[i].widget) else null;
                 const flags = @as(u8, @intFromBool(view.focused)) | (@as(u8, @intFromBool(id != 0)) << 1) |
                     (@as(u8, @intFromBool(view.canvas_widget_focus_visible_id == id)) << 2) |
                     (@as(u8, @intFromBool(view.canEditCanvasWidgetText(id))) << 3) |
                     (@as(u8, @intFromBool(index != null)) << 4) |
-                    (@as(u8, @intFromBool(if (selection) |range| range.isCollapsed(view.widget_layout_nodes[index.?].widget.text.len) else false)) << 5);
-                const command_id = if (index) |i| canvas.textCaretCommandId(view.widget_layout_nodes[i].widget.kind, id) else 0;
+                    (@as(u8, @intFromBool(if (selection) |range| range.isCollapsed(view.canvasStorage().widget_layout_nodes[index.?].widget.text.len) else false)) << 5);
+                const command_id = if (index) |i| canvas.textCaretCommandId(view.canvasStorage().widget_layout_nodes[i].widget.kind, id) else 0;
                 const plan = motion_policy.caret(policy, flags, view.canvas_widget_caret_blink_id, command_id, canvasRenderAnimationStartNsForView(view));
                 if (plan.remove) {
                     view.removeCanvasRenderAnimation(view.canvas_widget_caret_blink_id);
@@ -419,7 +419,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 }
                 if (!plan.arm) return;
                 view.replaceCanvasRenderAnimation(.{ .id = plan.id, .start_ns = plan.start, .duration_ms = caret_blink_sweep_ms, .easing = .standard, .from_opacity = 1, .to_opacity = 0, .loop = .ping_pong }) catch return;
-                view.replaceCanvasRenderAnimationDirtyBounds(plan.id, view.widget_layout_nodes[index.?].frame) catch {};
+                view.replaceCanvasRenderAnimationDirtyBounds(plan.id, view.canvasStorage().widget_layout_nodes[index.?].frame) catch {};
                 view.canvas_widget_caret_blink_id = plan.id;
                 return;
             }
@@ -648,14 +648,14 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             if (focused_id == 0 or view.canvas_widget_focus_visible_id != focused_id) return null;
             if (!view.canEditCanvasWidgetText(focused_id)) return null;
             const node_index = view.canvasWidgetNodeIndexById(focused_id) orelse return null;
-            const widget = view.widget_layout_nodes[node_index].widget;
+            const widget = view.canvasStorage().widget_layout_nodes[node_index].widget;
             // Mirror the emitters' caret gate: a caret line is drawn only
             // for a collapsed selection.
             const selection = canvas.widgetTextSelectionRange(widget) orelse return null;
             if (!selection.isCollapsed(widget.text.len)) return null;
             return .{
                 .command_id = canvas.textCaretCommandId(widget.kind, widget.id),
-                .bounds = view.widget_layout_nodes[node_index].frame,
+                .bounds = view.canvasStorage().widget_layout_nodes[node_index].frame,
             };
         }
     };

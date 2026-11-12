@@ -583,7 +583,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     (@as(u8, @intFromBool(view.canvas_widget_focus_visible_id == id)) << 1);
                 var kind: u16 = 0;
                 if (view.canvasWidgetNodeIndexById(id)) |node_index| {
-                    const widget = view.widget_layout_nodes[node_index].widget;
+                    const widget = view.canvasStorage().widget_layout_nodes[node_index].widget;
                     facts |= 4 | (@as(u8, @intFromBool(widget.semantics.role == .treeitem)) << 3);
                     kind = canvas.widgetKindCode(widget.kind);
                 }
@@ -596,7 +596,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (stage == 0 and id == 0) return false;
             if (view.canvas_widget_focus_visible_id == id) return false;
             const node_index = view.canvasWidgetNodeIndexById(id) orelse return false;
-            const widget = view.widget_layout_nodes[node_index].widget;
+            const widget = view.canvasStorage().widget_layout_nodes[node_index].widget;
             return widget.kind == .list_item and widget.semantics.role != .treeitem;
         }
 
@@ -1671,10 +1671,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 const hovered_index = view.canvasWidgetNodeIndexById(next_hovered_id) orelse break :blk null;
                 break :blk view.canvasWidgetOwnedTooltipIndex(hovered_index);
             };
-            const tooltip_id: canvas.ObjectId = if (tooltip_index) |node_index| view.widget_layout_nodes[node_index].widget.id else 0;
+            const tooltip_id: canvas.ObjectId = if (tooltip_index) |node_index| view.canvasStorage().widget_layout_nodes[node_index].widget.id else 0;
 
             if (view.canvas_widget_tooltip_policy != null) {
-                const delay_ns = if (tooltip_index) |i| canvasTooltipShowDelayNs(view.widget_layout_nodes[i].widget, view.widget_tokens) else 0;
+                const delay_ns = if (tooltip_index) |i| canvasTooltipShowDelayNs(view.canvasStorage().widget_layout_nodes[i].widget, view.widget_tokens) else 0;
                 const facts: u16 = @as(u16, @intFromBool(view.canvas_tooltip_shown_id != 0)) |
                     (@as(u16, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 1) |
                     (@as(u16, @intFromBool(tooltip_id != 0)) << 2) |
@@ -1755,7 +1755,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 if (view.canvas_tooltip_shown_id != tooltip_id and tooltip_id != 0 and !held_by_content and
                     canvasTooltipIntentActionAllowed(self, view_index))
                 {
-                    const delay_ns = canvasTooltipShowDelayNs(view.widget_layout_nodes[node_index].widget, view.widget_tokens);
+                    const delay_ns = canvasTooltipShowDelayNs(view.canvasStorage().widget_layout_nodes[node_index].widget, view.widget_tokens);
                     if (delay_ns == 0 or now_ns < view.canvas_tooltip_warm_until_ns) {
                         view.canvas_tooltip_shown_id = tooltip_id;
                         view.canvas_tooltip_shown_owner_id = next_hovered_id;
@@ -1877,7 +1877,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const value = point orelse return false;
             if (view.canvas_tooltip_shown_id == 0 or view.canvas_tooltip_shown_from_focus) return false;
             const node_index = view.canvasWidgetNodeIndexById(view.canvas_tooltip_shown_id) orelse return false;
-            return view.widget_layout_nodes[node_index].frame.containsPoint(value);
+            return view.canvasStorage().widget_layout_nodes[node_index].frame.containsPoint(value);
         }
 
         /// Whether `point` sits inside the transit corridor between the
@@ -1891,10 +1891,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (view.canvas_tooltip_shown_id == 0 or view.canvas_tooltip_shown_from_focus) return false;
             const apex = view.canvas_tooltip_pointer_from;
             if (view.canvasWidgetNodeIndexById(view.canvas_tooltip_shown_id)) |node_index| {
-                if (canvasTooltipTravelFanContains(apex, view.widget_layout_nodes[node_index].frame, value)) return true;
+                if (canvasTooltipTravelFanContains(apex, view.canvasStorage().widget_layout_nodes[node_index].frame, value)) return true;
             }
             if (view.canvasWidgetNodeIndexById(view.canvas_tooltip_shown_owner_id)) |node_index| {
-                if (canvasTooltipTravelFanContains(apex, view.widget_layout_nodes[node_index].frame, value)) return true;
+                if (canvasTooltipTravelFanContains(apex, view.canvasStorage().widget_layout_nodes[node_index].frame, value)) return true;
             }
             return false;
         }
@@ -2198,7 +2198,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 const focused_index = view.canvasWidgetNodeIndexById(focus_visible_id) orelse break :blk null;
                 break :blk view.canvasWidgetOwnedTooltipIndex(focused_index);
             };
-            const tooltip_id: canvas.ObjectId = if (tooltip_index) |node_index| view.widget_layout_nodes[node_index].widget.id else 0;
+            const tooltip_id: canvas.ObjectId = if (tooltip_index) |node_index| view.canvasStorage().widget_layout_nodes[node_index].widget.id else 0;
 
             if (view.applyCompiledCanvasTooltipIntent(.focus, tooltip_id, focus_visible_id, canvasTooltipIntentActionAllowed(self, view_index))) |changed| {
                 if (changed) try commitCanvasTooltipVisibility(self, view_index);
@@ -2274,7 +2274,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const tooltip_id: canvas.ObjectId = blk: {
                 const target_index = view.canvasWidgetNodeIndexById(target.id) orelse break :blk 0;
                 const tooltip_index = view.canvasWidgetOwnedTooltipIndex(target_index) orelse break :blk 0;
-                break :blk view.widget_layout_nodes[tooltip_index].widget.id;
+                break :blk view.canvasStorage().widget_layout_nodes[tooltip_index].widget.id;
             };
             if (tooltip_id == 0) return;
             if (view.applyCompiledCanvasTooltipIntent(.activation, tooltip_id, target.id, false)) |changed| {
@@ -2326,7 +2326,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         fn commitCanvasTooltipVisibility(self: *Runtime, view_index: usize) anyerror!void {
             const view = &self.views[view_index];
             var dirty: ?geometry.RectF = null;
-            for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |node, node_index| {
+            for (view.canvasStorage().widget_layout_nodes[0..view.widget_layout_node_count], 0..) |node, node_index| {
                 if (node.widget.kind != .tooltip) continue;
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
                 const hidden = node.widget.id == 0 or node.widget.id != view.canvas_tooltip_shown_id;
@@ -2619,7 +2619,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             };
             const focused_index = self.views[index].canvasWidgetNodeIndexById(self.views[index].canvas_widget_focused_id);
             const action = (if (focused_index) |node_index|
-                canvas.widgetKeyboardClipboardActionForWidget(self.views[index].widget_layout_nodes[node_index].widget, keyboard)
+                canvas.widgetKeyboardClipboardActionForWidget(self.views[index].canvasStorage().widget_layout_nodes[node_index].widget, keyboard)
             else
                 canvas.widgetKeyboardClipboardAction(keyboard)) orelse return;
 
@@ -2641,7 +2641,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     const event = keyboard_event orelse return;
                     const target = event.target orelse return;
                     const node_index = self.views[index].canvasWidgetNodeIndexById(target.id) orelse return;
-                    const widget = self.views[index].widget_layout_nodes[node_index].widget;
+                    const widget = self.views[index].canvasStorage().widget_layout_nodes[node_index].widget;
                     if (widget.kind == .terminal and !widget.state.disabled and widget.terminal.pty != 0) {
                         // A terminal paste is committed input, but it must
                         // stay distinct from typing: the session's paste
@@ -2678,7 +2678,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
 
         fn canvasWidgetEditableSelectionText(self: *Runtime, view_index: usize, target: canvas.WidgetFocusTarget) ?[]const u8 {
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(target.id) orelse return null;
-            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            const widget = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
             if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return null;
             const range = canvas.widgetTextClipboardState(widget).selection orelse return null;
             return widget.text[range.start..range.end];
@@ -2800,7 +2800,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             }
             if (target_id == 0) return;
             const target_index = self.views[index].canvasWidgetNodeIndexById(target_id) orelse return;
-            const target_widget = self.views[index].widget_layout_nodes[target_index].widget;
+            const target_widget = self.views[index].canvasStorage().widget_layout_nodes[target_index].widget;
             const mirrors_editable_selection =
                 canvas_widget_runtime.canvasWidgetEditableTextKind(target_widget.kind) and
                 !target_widget.state.disabled;
@@ -2840,7 +2840,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // divergent model mirror must still hear the selection the
             // user established.
             if (mirrors_editable_selection) {
-                const edited_widget = self.views[index].widget_layout_nodes[target_index].widget;
+                const edited_widget = self.views[index].canvasStorage().widget_layout_nodes[target_index].widget;
                 const selection = edited_widget.text_selection orelse canvas.TextSelection.collapsed(edited_widget.text.len);
                 pointer_event.edit = .{ .set_selection = selection };
             }
@@ -2859,7 +2859,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// clear). Returns whether the press was consumed.
         fn applyCanvasWidgetClearButtonPress(self: *Runtime, index: usize, target_id: canvas.ObjectId, point: geometry.PointF) anyerror!bool {
             const node_index = self.views[index].canvasWidgetNodeIndexById(target_id) orelse return false;
-            const widget = self.views[index].widget_layout_nodes[node_index].widget;
+            const widget = self.views[index].canvasStorage().widget_layout_nodes[node_index].widget;
             const hit_rect = canvas.textInputClearButtonHitRect(widget, self.views[index].widget_tokens) orelse return false;
             if (!hit_rect.containsPoint(point)) return false;
             const dirty = try self.views[index].applyCanvasWidgetTextEdit(target_id, .clear) orelse return true;
@@ -2916,7 +2916,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const target = keyboard_event.target orelse return;
 
             const radio_selection = if (target.kind == .radio)
-                if (canvas.widgetKeyboardControlIntent(self.views[index].widget_layout_nodes[target.index].widget, keyboard_event.keyboard)) |intent|
+                if (canvas.widgetKeyboardControlIntent(self.views[index].canvasStorage().widget_layout_nodes[target.index].widget, keyboard_event.keyboard)) |intent|
                     intent.kind == .select
                 else
                     false
@@ -3013,7 +3013,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         pub fn dispatchCanvasWidgetCommandForId(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId) anyerror!void {
             if (view_index >= self.view_count) return error.ViewNotFound;
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(id) orelse return;
-            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            const widget = self.views[view_index].canvasStorage().widget_layout_nodes[node_index].widget;
             const eligible = compiledCanvasCommandActivation(&self.views[view_index], 0, 0, 0, 0, widget.kind) orelse canvasWidgetCommandable(widget.kind);
             if (!eligible) return;
             const command = self.views[view_index].canvasWidgetCommand(id) orelse return;
@@ -3354,10 +3354,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // placement; a selection the widget already carries survives.
             const node_index = view.canvasWidgetNodeIndexById(target_id);
             const caret_facts: u16 = @as(u16, if (target_id != 0) 1 else 0) | @as(u16, if (view.canEditCanvasWidgetText(target_id)) 2 else 0) |
-                @as(u16, if (node_index != null and view.widget_layout_nodes[node_index.?].widget.text_selection == null) 4 else 0);
+                @as(u16, if (node_index != null and view.canvasStorage().widget_layout_nodes[node_index.?].widget.text_selection == null) 4 else 0);
             if (keyboard_focus.decide(view.canvas_widget_surface_scope_policy, .{ .stage = .caret, .facts = caret_facts }) != 0) {
                 if (node_index) |editable_index| {
-                    const widget = &view.widget_layout_nodes[editable_index].widget;
+                    const widget = &view.canvasStorage().widget_layout_nodes[editable_index].widget;
                     widget.text_selection = canvas.TextSelection.collapsed(widget.text.len);
                     try self.views[view_index].refreshCanvasWidgetSemantics();
                     self.views[view_index].widget_revision += 1;

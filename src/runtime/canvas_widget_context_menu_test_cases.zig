@@ -608,7 +608,7 @@ pub fn Cases(comptime policy: ?*const fn ([]const u8, []u8) usize) type {
 
             // Establish the view's live static selection the way click-drag does.
             harness.runtime.views[0].canvas_widget_selected_text_id = 2;
-            harness.runtime.views[0].widget_layout_nodes[1].widget.text_selection = .{ .anchor = 0, .focus = 7 };
+            harness.runtime.views[0].canvasStorage().widget_layout_nodes[1].widget.text_selection = .{ .anchor = 0, .focus = 7 };
 
             try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 24));
             try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);

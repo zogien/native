@@ -1431,7 +1431,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         const view = &self.views[index];
                         const baseline_count = view.canvas_packet_baseline_count;
                         const scratch = canvas_frame_scratch.get();
-                        refinement = canvas.RenderDamagePolicy.patch(view.canvas_packet_baseline_keys[0..baseline_count], view.canvas_packet_baseline_fingerprints[0..baseline_count], view.canvas_packet_baseline_bounds[0..baseline_count], current, scratch.packet_baseline_matched[0..baseline_count], scratch.packet_baseline_stable[0..baseline_count], scratch.packet_upsert[0..current.len], owner, planning_workspace.?);
+                        refinement = canvas.RenderDamagePolicy.patch(view.canvasStorage().canvas_packet_baseline_keys[0..baseline_count], view.canvasStorage().canvas_packet_baseline_fingerprints[0..baseline_count], view.canvasStorage().canvas_packet_baseline_bounds[0..baseline_count], current, scratch.packet_baseline_matched[0..baseline_count], scratch.packet_baseline_stable[0..baseline_count], scratch.packet_upsert[0..current.len], owner, planning_workspace.?);
                     }
                 }
                 const result = canvas.RenderDamagePolicy.finalize(.{
@@ -1866,8 +1866,8 @@ fn findCanvasPacketBaselineIndex(keys: []const u64, sorted: []const u32, key: u6
 /// patch-vs-full BEFORE paying for the encode.
 fn computeCanvasPacketPatchStats(view: anytype, current: []const CanvasPacketCurrentCommand, policy: ?canvas.GpuPacketPreparationPolicy.Policy) CanvasPacketPatchStats {
     const baseline_count = view.canvas_packet_baseline_count;
-    const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
-    const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
+    const baseline_keys = view.canvasStorage().canvas_packet_baseline_keys[0..baseline_count];
+    const baseline_fingerprints = view.canvasStorage().canvas_packet_baseline_fingerprints[0..baseline_count];
 
     const scratch = canvas_frame_scratch.get();
     if (policy) |owner| {
@@ -1948,9 +1948,9 @@ const CanvasPacketPatchDirty = struct {
 
 fn canvasPacketPatchDirtyBounds(view: anytype, current: []const CanvasPacketCurrentCommand) ?CanvasPacketPatchDirty {
     const baseline_count = view.canvas_packet_baseline_count;
-    const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
-    const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
-    const baseline_bounds = view.canvas_packet_baseline_bounds[0..baseline_count];
+    const baseline_keys = view.canvasStorage().canvas_packet_baseline_keys[0..baseline_count];
+    const baseline_fingerprints = view.canvasStorage().canvas_packet_baseline_fingerprints[0..baseline_count];
+    const baseline_bounds = view.canvasStorage().canvas_packet_baseline_bounds[0..baseline_count];
 
     const scratch = canvas_frame_scratch.get();
     const baseline_sorted = scratch.packet_baseline_sort[0..baseline_count];
@@ -2010,7 +2010,7 @@ fn writeCanvasPacketPatchBinary(
     writer: *std.Io.Writer,
 ) !void {
     const baseline_count = view.canvas_packet_baseline_count;
-    const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
+    const baseline_keys = view.canvasStorage().canvas_packet_baseline_keys[0..baseline_count];
     const scratch = canvas_frame_scratch.get();
     const matched = scratch.packet_baseline_matched[0..baseline_count];
     const upserts = scratch.packet_upsert[0..current.len];
@@ -2094,9 +2094,9 @@ fn adoptCanvasPixelPresentBaseline(view: anytype, current: []const CanvasPacketC
 
 fn adoptCanvasBaselineEntries(view: anytype, current: []const CanvasPacketCurrentCommand, surface_size: geometry.SizeF, scale: f32) void {
     for (current, 0..) |entry, index| {
-        view.canvas_packet_baseline_keys[index] = entry.key;
-        view.canvas_packet_baseline_fingerprints[index] = entry.fingerprint;
-        view.canvas_packet_baseline_bounds[index] = entry.bounds;
+        view.canvasStorage().canvas_packet_baseline_keys[index] = entry.key;
+        view.canvasStorage().canvas_packet_baseline_fingerprints[index] = entry.fingerprint;
+        view.canvasStorage().canvas_packet_baseline_bounds[index] = entry.bounds;
     }
     view.canvas_packet_baseline_count = current.len;
     view.canvas_packet_baseline_surface_size = surface_size;
@@ -2273,7 +2273,7 @@ fn canvasRenderAnimationScheduleDirtyBounds(view: anytype, animations: []const c
     var bounds: ?geometry.RectF = null;
     var found_any = false;
 
-    for (view.canvas_frame_render_overrides[0..view.canvas_frame_render_override_count]) |override| {
+    for (view.canvasStorage().canvas_frame_render_overrides[0..view.canvas_frame_render_override_count]) |override| {
         const rect = canvasCommandBoundsById(display_list, override.id) orelse continue;
         found_any = true;
         bounds = unionRects(bounds, rect);

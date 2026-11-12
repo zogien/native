@@ -966,8 +966,10 @@ fn startedGpuHarnessWithRuntimeAllocator(gpa: std.mem.Allocator, runtime_allocat
 }
 
 test "a fresh runtime allocates zero media-texture bytes until an adoption happens" {
-    // Count every runtime-allocator call: construction, startup, frames,
-    // and even a live CLAIM with staged pushes perform NONE — texture
+    // Count every runtime-allocator call: construction and startup
+    // perform none, the gpu-surface view allocates only its own canvas
+    // storage (pinned in view_storage_tests), and from there frames and
+    // even a live CLAIM with staged pushes perform NONE — texture
     // buffer storage is on-demand at first adoption. (The regression
     // pinned here: an embedded pool at the frame budget put 4 x 8 MiB =
     // 32 MiB in every Runtime — the docs wasm preview host carries one
@@ -985,11 +987,13 @@ test "a fresh runtime allocates zero media-texture bytes until an adoption happe
         .kind = .gpu_surface,
         .frame = geometry.RectF.init(0, 0, 240, 140),
     });
+    const view_allocations = counting.allocations;
+    const view_bytes = counting.allocated_bytes;
     const producer = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
     defer producer.release();
     const red = solidFrame(.{ 255, 0, 0, 255 });
     try producer.pushFrame(2, 2, &red);
-    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    try std.testing.expectEqual(view_allocations, counting.allocations);
 
     // Even an allocator that refuses everything leaves the channel
     // operational: the adoption drops THIS frame loudly and the next
@@ -997,27 +1001,27 @@ test "a fresh runtime allocates zero media-texture bytes until an adoption happe
     // allocator itself turns refusing (ownership never moves; only the
     // backing behavior changes), because swapping options.allocator
     // would retarget nothing.
-    counting.fail_index = 0;
+    counting.fail_index = counting.alloc_index;
     try dispatchFrame(harness, app, 1);
     try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) == null);
 
-    // The first adoption is the first allocation: exactly one, exactly
-    // the frame budget (freed by Runtime.deinit through
+    // The first adoption is the media path's first allocation: exactly
+    // one, exactly the frame budget (freed by Runtime.deinit through
     // harness.destroy — the leak-checked test allocator backs it).
     counting.fail_index = std.math.maxInt(usize);
     const green = solidFrame(.{ 0, 255, 0, 255 });
     try producer.pushFrame(2, 2, &green);
     try dispatchFrame(harness, app, 2);
     try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) != null);
-    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
-    try std.testing.expectEqual(canvas_limits.max_media_surface_pixel_bytes, counting.allocated_bytes);
+    try std.testing.expectEqual(view_allocations + 1, counting.allocations);
+    try std.testing.expectEqual(view_bytes + canvas_limits.max_media_surface_pixel_bytes, counting.allocated_bytes);
 
     // A second adoption of the SAME entry reuses the buffer: the count
-    // stays one — the allocation is per used channel, not per frame.
+    // stays put — the allocation is per used channel, not per frame.
     const blue = solidFrame(.{ 0, 0, 255, 255 });
     try producer.pushFrame(2, 2, &blue);
     try dispatchFrame(harness, app, 3);
-    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
+    try std.testing.expectEqual(view_allocations + 1, counting.allocations);
 }
 
 test "media buffer ownership freezes at init: a mutated options.allocator sees zero activity" {
@@ -1038,13 +1042,14 @@ test "media buffer ownership freezes at init: a mutated options.allocator sees z
         .kind = .gpu_surface,
         .frame = geometry.RectF.init(0, 0, 240, 140),
     });
+    const view_allocations = frozen.allocations;
     const producer = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
     defer producer.release();
     const red = solidFrame(.{ 255, 0, 0, 255 });
     try producer.pushFrame(2, 2, &red);
     try dispatchFrame(harness, app, 1);
     try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) != null);
-    try std.testing.expectEqual(@as(usize, 1), frozen.allocations);
+    try std.testing.expectEqual(view_allocations + 1, frozen.allocations);
 
     // Sabotage: swap options.allocator AFTER the adoption allocated.
     // fail_index = 0 poisons the swapped-in allocator (any allocation
@@ -1053,9 +1058,11 @@ test "media buffer ownership freezes at init: a mutated options.allocator sees z
     var poisoned = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     harness.runtime.options.allocator = poisoned.allocator();
 
+    // Everything the frozen allocator handed out (the view's canvas
+    // storage and the texture buffer) goes back to it.
     harness.runtime.deinit();
-    try std.testing.expectEqual(@as(usize, 1), frozen.deallocations);
-    try std.testing.expectEqual(canvas_limits.max_media_surface_pixel_bytes, frozen.freed_bytes);
+    try std.testing.expectEqual(frozen.allocations, frozen.deallocations);
+    try std.testing.expectEqual(frozen.allocated_bytes, frozen.freed_bytes);
     try std.testing.expectEqual(@as(usize, 0), poisoned.allocations);
     try std.testing.expectEqual(@as(usize, 0), poisoned.deallocations);
     try std.testing.expectEqual(@as(usize, 0), poisoned.freed_bytes);
@@ -1091,7 +1098,7 @@ test "an adoption-OOM drop retries with byte-identical pixels on the next push" 
     // frame drops loudly, nothing is adopted.
     const still = solidFrame(.{ 21, 22, 23, 255 });
     try producer.pushFrame(2, 2, &still);
-    counting.fail_index = 0;
+    counting.fail_index = counting.alloc_index;
     try dispatchFrame(harness, app, 1);
     try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) == null);
 

@@ -161,7 +161,7 @@ test "runtime next canvas frame retains and evicts glyph atlas cache" {
     try std.testing.expectEqual(@as(usize, 0), changed_frame.glyph_atlas_cache_plan.retainCount());
     try std.testing.expectEqual(@as(usize, 1), changed_frame.glyph_atlas_cache_plan.evictCount());
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_cache_count);
-    try std.testing.expectEqual(@as(u32, 'B'), harness.runtime.views[0].canvas_frame_glyph_atlas_cache[0].key.glyph_id);
+    try std.testing.expectEqual(@as(u32, 'B'), harness.runtime.views[0].canvasStorage().canvas_frame_glyph_atlas_cache[0].key.glyph_id);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_upload_count);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_evict_count);
     try std.testing.expectEqual(@as(usize, 1), changed_frame.text_layout_cache_plan.uploadCount());
