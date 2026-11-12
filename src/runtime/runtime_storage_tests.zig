@@ -1,11 +1,13 @@
 //! Allocation discipline of the runtime's on-demand storage outside the
 //! views: the automation snapshot buffers, each window's source copy and
-//! shell layout, and each status item's menu rows.
+//! shell layout, and each status item's menu rows; plus the size budgets
+//! that keep capacity-sized storage out of the Runtime itself.
 
 const std = @import("std");
 const geometry = @import("geometry");
 const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
+const runtime_view = @import("view.zig");
 const runtime_automation_snapshot = @import("automation_snapshot.zig");
 const runtime_state = @import("state.zig");
 const shell_layout = @import("shell_layout.zig");
@@ -26,6 +28,20 @@ const StorageApp = struct {
         return .{ .context = self, .name = "runtime-storage", .source = platform.WebViewSource.html("<h1>Storage</h1>") };
     }
 };
+
+test "capacity-sized storage stays out of the Runtime and its view slots" {
+    // Budgets, not exact sizes. Every app, test harness, and docs preview
+    // tile constructs a whole Runtime, so storage that scales with a
+    // capacity limit (per-view canvas buffers, the shared canvas scratch,
+    // automation snapshot buffers, window source copies, shell layouts,
+    // status item menus) is allocated on demand instead of embedded. When
+    // these budgets were set the Runtime was about 1.3 MiB, 32 view slots
+    // of about 30 KiB each plus bookkeeping. A change that embeds
+    // capacity-sized storage again fails here: move that storage behind a
+    // pointer allocated when its owner first needs it.
+    try std.testing.expect(@sizeOf(core.Runtime) <= 2 * 1024 * 1024);
+    try std.testing.expect(@sizeOf(runtime_view.RuntimeView) <= 48 * 1024);
+}
 
 fn harnessWithRuntimeAllocator(runtime_allocator: std.mem.Allocator) !*TestHarness() {
     const harness = try TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(240, 140) });
