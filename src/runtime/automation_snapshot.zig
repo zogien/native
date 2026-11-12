@@ -18,10 +18,34 @@ const widgetRoleName = widget_bridge.widgetRoleName;
 const canvasWidgetActions = widget_bridge.canvasWidgetActions;
 const canvasTextRange = widget_bridge.canvasTextRange;
 
+/// The automation snapshot's buffers that size with everything a runtime
+/// could hold: every view, every widget of every view, every declared
+/// context-menu item, every tray item. The snapshot Input only references
+/// runtime-owned memory, so these outlive one snapshot call. Snapshots
+/// happen only under the automation server, session recording and
+/// replay, and tests, so the runtime allocates this block from its
+/// init-frozen `owned_allocator` on the first snapshot and keeps it until
+/// `deinit`; an app that is never snapshotted never pays for it.
+pub const AutomationSnapshotStorage = struct {
+    automation_views: [automation.snapshot.max_views]platform.ViewInfo = undefined,
+    automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
+    /// Snapshot-side storage for per-widget declared context-menu items
+    /// (the snapshot Input only references runtime-owned memory; labels
+    /// alias the views' bounded menu storage). Sized so every view can
+    /// list its full per-view item budget — the snapshot never truncates
+    /// menus the runtime accepted.
+    automation_widget_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view * platform.max_views]automation.snapshot.WidgetContextMenuItem = undefined,
+    automation_tray_items: [platform.max_status_items * platform.max_tray_items]automation.snapshot.TrayItem = undefined,
+};
+
 pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
     return struct {
         pub fn automationSnapshot(self: *Runtime, title: []const u8) automation.snapshot.Input {
             if (self.snapshot_policy == null) return @import("automation_snapshot_reference.zig").RuntimeAutomationSnapshot(Runtime).automationSnapshot(self, title);
+            // Callers that can report failure allocate the buffers first;
+            // this entry point cannot fail, so a refusal here is fatal,
+            // like the frame planner's per-thread scratch.
+            self.ensureAutomationStorage() catch @panic("out of memory allocating the automation snapshot buffers");
             const count = bounded(self, self.window_count, self.automation_windows.len);
             if (count == 0) {
                 self.automation_windows[0] = .{ .id = 1, .title = title, .bounds = geometry.RectF.fromSize(self.surface.size), .focused = true };
@@ -56,8 +80,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .bounds = window.info.frame,
                     .focused = window.info.focused,
                 };
-                if (view_count < self.automation_views.len) {
-                    const views = self.listViews(window.info.id, self.automation_views[view_count..]);
+                if (view_count < self.automationStorage().automation_views.len) {
+                    const views = self.listViews(window.info.id, self.automationStorage().automation_views[view_count..]);
                     view_count += views.len;
                 }
                 appendAutomationWidgets(self, window.info.id, &widget_count, &menu_item_count);
@@ -65,8 +89,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             return .{
                 .serialization_policy = self.snapshot_policy,
                 .windows = self.automation_windows[0..count],
-                .views = self.automation_views[0..view_count],
-                .widgets = self.automation_widgets[0..widget_count],
+                .views = self.automationStorage().automation_views[0..view_count],
+                .widgets = self.automationStorage().automation_widgets[0..widget_count],
                 .commands = self.options.commands,
                 .menus = self.options.menus,
                 .diagnostics = automationDiagnostics(self),
@@ -92,9 +116,9 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             var item_offset: usize = 0;
             for (self.status_items) |status_item| {
                 if (snapshot_policy.plan(self.snapshot_policy, .bounded, .{ .flags = @intFromBool(status_item.active), .words = .{ 1, self.automation_trays.len - tray_count, 0, 0, 0, 0, 0, 0 } }).flags != 0) continue;
-                const count = bounded(self, status_item.item_count, self.automation_tray_items.len - item_offset);
+                const count = bounded(self, status_item.item_count, self.automationStorage().automation_tray_items.len - item_offset);
                 for (status_item.items[0..count], 0..) |item, index| {
-                    self.automation_tray_items[item_offset + index] = .{
+                    self.automationStorage().automation_tray_items[item_offset + index] = .{
                         .id = item.id,
                         .label = item.label,
                         .command = item.command,
@@ -113,7 +137,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .id = status_item.id,
                     .visible = status_item.visible,
                     .title = status_item.title,
-                    .items = self.automation_tray_items[item_offset .. item_offset + count],
+                    .items = self.automationStorage().automation_tray_items[item_offset .. item_offset + count],
                 };
                 tray_count += 1;
                 item_offset += count;
@@ -212,10 +236,10 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 if (snapshot_policy.plan(self.snapshot_policy, .view, .{ .flags = bit(view.open, 1) | bit(view.kind == .gpu_surface, 2), .words = .{ view.window_id, window_id, 0, 0, 0, 0, 0, 0 } }).flags == 0) continue;
                 const layout = view.widgetLayoutTree();
                 const semantics = view.widgetSemantics();
-                const count = bounded(self, semantics.len, self.automation_widgets.len - widget_count.*);
+                const count = bounded(self, semantics.len, self.automationStorage().automation_widgets.len - widget_count.*);
                 for (semantics[0..count]) |node| {
                     const state = widgetProjection(self, view, semantics, node);
-                    self.automation_widgets[widget_count.*] = .{
+                    self.automationStorage().automation_widgets[widget_count.*] = .{
                         .window_id = view.window_id,
                         .view_label = view.label,
                         .id = node.id,
@@ -272,8 +296,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             const declared = node.widget.context_menu;
             if (declared.len == 0) return &.{};
             const start = menu_item_count.*;
-            const count = bounded(self, declared.len, self.automation_widget_menu_items.len - start);
-            for (declared[0..count], self.automation_widget_menu_items[start .. start + count]) |item, *slot| {
+            const count = bounded(self, declared.len, self.automationStorage().automation_widget_menu_items.len - start);
+            for (declared[0..count], self.automationStorage().automation_widget_menu_items[start .. start + count]) |item, *slot| {
                 slot.* = .{
                     .label = item.label,
                     .enabled = item.enabled,
@@ -281,7 +305,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 };
             }
             menu_item_count.* = start + count;
-            return self.automation_widget_menu_items[start .. start + count];
+            return self.automationStorage().automation_widget_menu_items[start .. start + count];
         }
 
         fn bit(value: bool, mask: u32) u32 {

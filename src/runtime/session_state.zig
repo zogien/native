@@ -19,6 +19,10 @@ pub fn RuntimeSessionState(comptime Runtime: type) type {
         /// honest: 0 means "no fingerprint", and replay treats a 0-0
         /// comparison as a match of unknowns, never silently as proof.
         pub fn sessionStateFingerprint(self: *Runtime) u64 {
+            // The fingerprint hashes an automation snapshot, whose buffers
+            // are allocated on first use; without them there is no
+            // fingerprint to report.
+            self.ensureAutomationStorage() catch return 0;
             const input = self.automationSnapshot("session");
             var buffer: [512]u8 = undefined;
             var hashing = std.Io.Writer.Hashing(std.hash.Wyhash).initHasher(std.hash.Wyhash.init(0), &buffer);

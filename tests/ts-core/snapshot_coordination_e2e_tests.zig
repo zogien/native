@@ -187,7 +187,7 @@ test "compiled snapshot runtime projection preserves complete snapshots menus me
     try exact(expected, actual);
     try std.testing.expect(actual.widgets.len != 0 and actual.trays.len == 1 and actual.audio != null and actual.video != null and actual.frame_profile != null);
     try std.testing.expect(actual.windows.ptr == &right.runtime.automation_windows);
-    try std.testing.expect(actual.widgets.ptr == &right.runtime.automation_widgets);
+    try std.testing.expect(actual.widgets.ptr == &right.runtime.automationStorage().automation_widgets);
     for (lanes) |rt| {
         rt.window_count = 0;
         rt.audio_active = false;

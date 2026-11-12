@@ -364,15 +364,10 @@ pub const Runtime = struct {
     /// Snapshot-side storage for the frame profile's per-stage stats
     /// (the snapshot Input only references runtime-owned memory).
     automation_frame_profile_stages: [runtime_frame_profile.frame_profile_stage_count]automation.snapshot.FrameProfileStage = undefined,
-    automation_views: [automation.snapshot.max_views]platform.ViewInfo = undefined,
-    automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
-    /// Snapshot-side storage for per-widget declared context-menu items
-    /// (the snapshot Input only references runtime-owned memory; labels
-    /// alias the views' bounded menu storage). Sized so every view can
-    /// list its full per-view item budget — the snapshot never truncates
-    /// menus the runtime accepted.
-    automation_widget_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view * platform.max_views]automation.snapshot.WidgetContextMenuItem = undefined,
-    automation_tray_items: [platform.max_status_items * platform.max_tray_items]automation.snapshot.TrayItem = undefined,
+    /// The snapshot buffers that size with every view, widget, menu item,
+    /// and tray item the runtime could hold (see `AutomationSnapshotStorage`):
+    /// allocated by the first snapshot, kept until `deinit`, null before.
+    automation_storage: ?*runtime_automation_snapshot.AutomationSnapshotStorage = null,
     automation_trays: [platform.max_status_items]automation.snapshot.Tray = undefined,
     /// Handshake for the `provenance` verb: cleared before the query is
     /// evented to the app, set by the app's response publish — so the
@@ -586,6 +581,10 @@ pub const Runtime = struct {
             self.owned_allocator.destroy(scratch);
             self.canvas_scratch = null;
         }
+        if (self.automation_storage) |storage| {
+            self.owned_allocator.destroy(storage);
+            self.automation_storage = null;
+        }
         if (self.targetless_ime_preedit.len > 0) {
             self.owned_allocator.free(self.targetless_ime_preedit);
             self.targetless_ime_preedit = &.{};
@@ -651,6 +650,21 @@ pub const Runtime = struct {
     pub fn ensureCanvasScratch(self: *Runtime) !void {
         if (self.canvas_scratch != null) return;
         self.canvas_scratch = try self.owned_allocator.create(runtime_canvas_scratch.CanvasScratch);
+    }
+
+    /// The automation snapshot buffers (see `AutomationSnapshotStorage`).
+    /// They exist from the first snapshot on.
+    pub fn automationStorage(self: *const Runtime) *runtime_automation_snapshot.AutomationSnapshotStorage {
+        return self.automation_storage.?;
+    }
+
+    /// Allocate the automation snapshot buffers if this runtime has none
+    /// yet. Entry points that can report failure call this before they
+    /// take a snapshot; `automationSnapshot` itself cannot fail and
+    /// treats a refusal as fatal.
+    pub fn ensureAutomationStorage(self: *Runtime) !void {
+        if (self.automation_storage != null) return;
+        self.automation_storage = try self.owned_allocator.create(runtime_automation_snapshot.AutomationSnapshotStorage);
     }
 
     fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {
