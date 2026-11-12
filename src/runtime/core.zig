@@ -271,7 +271,10 @@ pub const Runtime = struct {
     video_duration_ms: u64 = 0,
     video_width: u64 = 0,
     video_height: u64 = 0,
-    shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
+    /// Per-window shell layouts, each allocated from `owned_allocator`
+    /// when its window first binds shell views and freed when the window
+    /// goes; the first `shell_layout_count` entries are live.
+    shell_layouts: [platform.max_windows]*RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
     shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
     view_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -524,15 +527,9 @@ pub const Runtime = struct {
         // The profile rings exceed the small-default copy bound above;
         // assign explicitly so the disabled state is never undefined.
         self.frame_profile = .{};
-        // Status rows exceed the small-default copy bound. Initialize their
-        // ownership metadata without touching unused menu payload buffers.
-        for (&self.status_items) |*item| {
-            item.id = 0;
-            item.active = false;
-            item.visible = true;
-            item.title = "";
-            item.item_count = 0;
-        }
+        // Status rows hold their menu payload on the heap (allocated per
+        // created status item), so every row starts empty and owns nothing.
+        for (&self.status_items) |*item| item.* = .{};
         // The dialog broker's result buffer exceeds the copy bound too;
         // reset its bookkeeping and leave the buffer alone.
         self.dialog_broker.reset();
@@ -584,6 +581,18 @@ pub const Runtime = struct {
         if (self.automation_storage) |storage| {
             self.owned_allocator.destroy(storage);
             self.automation_storage = null;
+        }
+        for (self.windows[0..self.window_count]) |*window| {
+            if (window.source_storage) |storage| self.owned_allocator.destroy(storage);
+            window.source_storage = null;
+            window.source = null;
+        }
+        for (self.shell_layouts[0..self.shell_layout_count]) |layout| self.owned_allocator.destroy(layout);
+        self.shell_layout_count = 0;
+        for (&self.status_items) |*status_item| {
+            if (status_item.items) |items| self.owned_allocator.destroy(items);
+            status_item.items = null;
+            status_item.item_count = 0;
         }
         if (self.targetless_ime_preedit.len > 0) {
             self.owned_allocator.free(self.targetless_ime_preedit);

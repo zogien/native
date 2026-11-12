@@ -966,11 +966,12 @@ fn startedGpuHarnessWithRuntimeAllocator(gpa: std.mem.Allocator, runtime_allocat
 }
 
 test "a fresh runtime allocates zero media-texture bytes until an adoption happens" {
-    // Count every runtime-allocator call: construction and startup
-    // perform none, the gpu-surface view allocates only its own canvas
-    // storage (pinned in view_storage_tests), and from there frames and
-    // even a live CLAIM with staged pushes perform NONE — texture
-    // buffer storage is on-demand at first adoption. (The regression
+    // Count every runtime-allocator call. Startup and the gpu-surface
+    // view allocate only what they own (the window's source copy, the
+    // view's canvas storage; pinned in runtime_storage_tests and
+    // view_storage_tests), and from there frames and even a live CLAIM
+    // with staged pushes perform NONE — texture buffer storage is
+    // on-demand at first adoption. (The regression
     // pinned here: an embedded pool at the frame budget put 4 x 8 MiB =
     // 32 MiB in every Runtime — the docs wasm preview host carries one
     // Runtime per component tile — before any producer existed; the

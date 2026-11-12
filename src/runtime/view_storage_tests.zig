@@ -60,14 +60,16 @@ test "canvas storage exists only for live gpu-surface views, the shared scratch 
     var app_state: StorageApp = .{};
     try harness.start(app_state.app());
 
-    // Construction and startup allocate nothing.
-    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    // Startup creates no canvas storage (the main window's source copy
+    // is pinned in runtime_storage_tests); count from here.
     try std.testing.expect(harness.runtime.canvas_scratch == null);
+    const start_allocations = counting.allocations;
+    const start_bytes = counting.allocated_bytes;
 
     // A native-control view never owns canvas storage, and its canvas
     // reads are honestly empty.
     _ = try harness.runtime.createView(.{ .window_id = 1, .label = "toolbar", .kind = .toolbar, .frame = geometry.RectF.init(0, 0, 240, 40) });
-    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    try std.testing.expectEqual(start_allocations, counting.allocations);
     try std.testing.expect(harness.runtime.canvas_scratch == null);
     const toolbar = viewByLabel(harness, "toolbar");
     try std.testing.expect(toolbar.canvas_storage == null);
@@ -78,19 +80,20 @@ test "canvas storage exists only for live gpu-surface views, the shared scratch 
     // The first gpu-surface view brings the shared scratch and its own
     // storage block; every later one costs exactly one storage block.
     try createCanvasView(harness, "first");
-    try std.testing.expectEqual(@as(usize, 2), counting.allocations);
-    try std.testing.expectEqual(scratch_bytes + storage_bytes, counting.allocated_bytes);
+    try std.testing.expectEqual(start_allocations + 2, counting.allocations);
+    try std.testing.expectEqual(start_bytes + scratch_bytes + storage_bytes, counting.allocated_bytes);
     try std.testing.expect(harness.runtime.canvas_scratch != null);
     try createCanvasView(harness, "second");
-    try std.testing.expectEqual(@as(usize, 3), counting.allocations);
-    try std.testing.expectEqual(scratch_bytes + 2 * storage_bytes, counting.allocated_bytes);
+    try std.testing.expectEqual(start_allocations + 3, counting.allocations);
+    try std.testing.expectEqual(start_bytes + scratch_bytes + 2 * storage_bytes, counting.allocated_bytes);
 
     // Closing a gpu-surface view returns its block; closing the
     // native-control view frees nothing. The scratch stays for the
     // runtime's lifetime.
+    const freed_before = counting.freed_bytes;
     try harness.runtime.closeView(1, "first");
     try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
-    try std.testing.expectEqual(storage_bytes, counting.freed_bytes);
+    try std.testing.expectEqual(freed_before + storage_bytes, counting.freed_bytes);
     try harness.runtime.closeView(1, "toolbar");
     try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
     try std.testing.expect(harness.runtime.canvas_scratch != null);
@@ -182,7 +185,7 @@ test "removing a view moves later views with their storage and every slice into 
 }
 
 test "a gpu-surface view whose storage cannot be allocated is refused before the platform sees it" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const harness = try harnessWithRuntimeAllocator(failing.allocator());
     defer harness.destroy(std.testing.allocator);
     var app_state: StorageApp = .{};
@@ -191,6 +194,7 @@ test "a gpu-surface view whose storage cannot be allocated is refused before the
     const platform_views = harness.null_platform.view_count;
 
     // Refused at the shared scratch: nothing exists afterwards.
+    failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, createCanvasView(harness, "canvas"));
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.view_count);
     try std.testing.expectEqual(platform_views, harness.null_platform.view_count);

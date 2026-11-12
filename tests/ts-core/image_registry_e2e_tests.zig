@@ -153,6 +153,8 @@ test "compiled image registry preserves allocation failure state and the origina
         sdk.Runtime.initAt(&h.runtime, .{ .platform = h.null_platform.platform(), .trace_sink = h.trace_sink.sink(), .allocator = counting.allocator(), .environ = std.testing.environ });
         h.runtime.dispatch_error_policy = .propagate;
         try h.start(.{ .context = h, .name = "image-registry", .source = sdk.platform.WebViewSource.html("") });
+        // Startup allocates only the window's source copy.
+        const start_allocations = counting.allocations;
         if (compiled) h.runtime.image_registry_policy = observed;
         h.runtime.options.allocator = forbidden.allocator();
         const red = [_]u8{ 255, 0, 0, 255 };
@@ -166,10 +168,10 @@ test "compiled image registry preserves allocation failure state and the origina
         try h.runtime.registerCanvasImage(1, 1, 1, &blue);
         counting.fail_index = std.math.maxInt(usize);
         try h.runtime.registerCanvasImage(2, 1, 1, &red);
-        try std.testing.expectEqual(@as(usize, 2), counting.allocations);
+        try std.testing.expectEqual(start_allocations + 2, counting.allocations);
         try std.testing.expect(h.runtime.unregisterCanvasImage(1));
         try h.runtime.registerCanvasImage(3, 1, 1, &blue);
-        try std.testing.expectEqual(@as(usize, 2), counting.allocations);
+        try std.testing.expectEqual(start_allocations + 2, counting.allocations);
         h.destroy(std.testing.allocator);
         try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
         try std.testing.expectEqual(@as(usize, 0), forbidden.allocations);
@@ -184,6 +186,8 @@ test "compiled image registry preserves media allocation failure and byte-identi
         const h = try Harness.create(std.testing.allocator, .{});
         sdk.Runtime.initAt(&h.runtime, .{ .platform = h.null_platform.platform(), .trace_sink = h.trace_sink.sink(), .allocator = counting.allocator(), .environ = std.testing.environ });
         try h.start(.{ .context = h, .name = "image-registry", .source = sdk.platform.WebViewSource.html("") });
+        // Startup allocates only the window's source copy.
+        const start_allocations = counting.allocations;
         if (compiled) h.runtime.image_registry_policy = observed;
         h.runtime.options.allocator = forbidden.allocator();
         const producer = try h.runtime.acquireMediaSurfaceProducer(29);
@@ -204,7 +208,7 @@ test "compiled image registry preserves media allocation failure and byte-identi
         try std.testing.expectEqualSlices(u8, &pixel, h.runtime.media_surface_pixels[0][0..adopted.byte_len]);
         try producer.pushFrame(1, 1, &pixel);
         h.runtime.adoptMediaSurfaceFrames();
-        try std.testing.expectEqual(@as(usize, 1), counting.allocations);
+        try std.testing.expectEqual(start_allocations + 1, counting.allocations);
         producer.release();
         h.destroy(std.testing.allocator);
         try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);

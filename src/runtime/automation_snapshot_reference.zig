@@ -97,7 +97,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             for (self.status_items) |status_item| {
                 if (!status_item.active or tray_count >= self.automation_trays.len) continue;
                 const count = @min(status_item.item_count, self.automationStorage().automation_tray_items.len - item_offset);
-                for (status_item.items[0..count], 0..) |item, index| {
+                for (status_item.trayItems()[0..count], 0..) |item, index| {
                     self.automationStorage().automation_tray_items[item_offset + index] = .{
                         .id = item.id,
                         .label = item.label,

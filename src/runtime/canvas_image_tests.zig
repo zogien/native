@@ -389,19 +389,19 @@ fn registeredPixelsById(runtime: *core.Runtime, id: canvas.ImageId) ?[]const u8 
 }
 
 test "a fresh runtime allocates zero registered-image bytes until the first registration" {
-    // Count every runtime-allocator call: construction and startup
-    // perform none, view creation allocates only the view's own canvas
-    // storage (pinned in view_storage_tests), and registered-image slot
-    // buffer storage is on-demand at a slot's first registration. (The
-    // regression pinned here: an embedded pool put 16 x 1 MiB = 16 MiB
-    // in every Runtime before any image existed; the media-texture-pool
-    // regression's twin.)
+    // Count every runtime-allocator call. Startup and the gpu-surface
+    // view allocate only what they own (the window's source copy, the
+    // view's canvas storage; pinned in runtime_storage_tests and
+    // view_storage_tests); registered-image slot buffer storage is
+    // on-demand at a slot's first registration. (The regression pinned
+    // here: an embedded pool put 16 x 1 MiB = 16 MiB in every Runtime
+    // before any image existed; the media-texture-pool regression's
+    // twin.)
     var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const harness = try startedGpuHarnessWithRuntimeAllocator(std.testing.allocator, counting.allocator());
     defer harness.destroy(std.testing.allocator);
     var app_state: RegistryApp = .{};
     try harness.start(app_state.app());
-    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
     _ = try harness.runtime.createView(.{
         .window_id = 1,
         .label = "canvas",
@@ -453,12 +453,14 @@ test "raised registered-image budget stays lazy and sizes each used slot" {
     harness.runtime.dispatch_error_policy = .propagate;
     var app_state: RegistryApp = .{};
     try harness.start(app_state.app());
-    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    // Startup allocates only the main window's source copy.
+    const start_allocations = counting.allocations;
+    const start_bytes = counting.allocated_bytes;
 
     const pixel = [_]u8{ 1, 2, 3, 255 };
     try harness.runtime.registerCanvasImage(1, 1, 1, &pixel);
-    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
-    try std.testing.expectEqual(canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling, counting.allocated_bytes);
+    try std.testing.expectEqual(start_allocations + 1, counting.allocations);
+    try std.testing.expectEqual(start_bytes + canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling, counting.allocated_bytes);
 }
 
 test "image slot buffer ownership freezes at init: a mutated options.allocator sees zero activity" {
@@ -472,9 +474,10 @@ test "image slot buffer ownership freezes at init: a mutated options.allocator s
     defer harness.destroy(std.testing.allocator);
     var app_state: RegistryApp = .{};
     try harness.start(app_state.app());
+    const start_allocations = frozen.allocations;
     const red = [_]u8{ 255, 0, 0, 255 };
     try harness.runtime.registerCanvasImage(7, 1, 1, &red);
-    try std.testing.expectEqual(@as(usize, 1), frozen.allocations);
+    try std.testing.expectEqual(start_allocations + 1, frozen.allocations);
 
     // Sabotage: swap options.allocator AFTER the registration
     // allocated. fail_index = 0 poisons the swapped-in allocator (any
@@ -483,9 +486,11 @@ test "image slot buffer ownership freezes at init: a mutated options.allocator s
     var poisoned = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     harness.runtime.options.allocator = poisoned.allocator();
 
+    // Everything the frozen allocator handed out (the window's source
+    // copy and the slot buffer) goes back to it.
     harness.runtime.deinit();
-    try std.testing.expectEqual(@as(usize, 1), frozen.deallocations);
-    try std.testing.expectEqual(canvas_limits.max_registered_canvas_image_pixel_bytes, frozen.freed_bytes);
+    try std.testing.expectEqual(frozen.allocations, frozen.deallocations);
+    try std.testing.expectEqual(frozen.allocated_bytes, frozen.freed_bytes);
     try std.testing.expectEqual(@as(usize, 0), poisoned.allocations);
     try std.testing.expectEqual(@as(usize, 0), poisoned.deallocations);
     try std.testing.expectEqual(@as(usize, 0), poisoned.freed_bytes);
@@ -500,6 +505,7 @@ test "unregister compacts by pointer swap: surviving pixels stay intact and vaca
     defer harness.destroy(std.testing.allocator);
     var app_state: RegistryApp = .{};
     try harness.start(app_state.app());
+    const start_allocations = counting.allocations;
 
     const colors = [_][4]u8{
         .{ 255, 0, 0, 255 },
@@ -510,7 +516,7 @@ test "unregister compacts by pointer swap: surviving pixels stay intact and vaca
     for (colors, 1..) |color, id| {
         try harness.runtime.registerCanvasImage(id, 1, 1, &color);
     }
-    try std.testing.expectEqual(@as(usize, 4), counting.allocations);
+    try std.testing.expectEqual(start_allocations + 4, counting.allocations);
 
     // Removing a middle id compacts the last entry into its slot; every
     // survivor's pixels must read back exactly through the renderer set.
@@ -535,7 +541,7 @@ test "unregister compacts by pointer swap: surviving pixels stay intact and vaca
     const gray = [_]u8{ 90, 90, 90, 255 };
     try harness.runtime.registerCanvasImage(5, 1, 1, &teal);
     try harness.runtime.registerCanvasImage(6, 1, 1, &gray);
-    try std.testing.expectEqual(@as(usize, 4), counting.allocations);
+    try std.testing.expectEqual(start_allocations + 4, counting.allocations);
     try std.testing.expectEqual(@as(usize, 4), harness.runtime.registeredCanvasImageCount());
     try std.testing.expectEqualSlices(u8, &teal, registeredPixelsById(&harness.runtime, 5).?);
     try std.testing.expectEqualSlices(u8, &gray, registeredPixelsById(&harness.runtime, 6).?);

@@ -411,6 +411,10 @@ pub const NullPlatform = struct {
     image_decode: bool = false,
     image_decode_count: usize = 0,
     requested_frames: u32 = 1,
+    /// The source the main webview last loaded, and below, the source
+    /// each window's webview last loaded. Both are borrowed from the
+    /// caller (the runtime's copy of the source) like every service
+    /// argument, so a window's entry is dropped when the window closes.
     loaded_source: ?WebViewSource = null,
     security_policy: security.Policy = .{},
     menus: [max_menus]Menu = undefined,
@@ -1380,6 +1384,12 @@ pub const NullPlatform = struct {
         self.windows[index].hidden = false;
         self.removeViewsForWindow(window_id);
         self.removeWebViewsForWindow(window_id);
+        // A closed window has no webview, so it keeps no source. The
+        // slices are borrowed from the runtime's copy of the window's
+        // source, which the runtime frees once it drops the closed
+        // window's record (a reopen under the same label does that).
+        self.window_sources[index] = null;
+        if (window_id == 1) self.loaded_source = null;
     }
 
     fn minimizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {

@@ -86,7 +86,7 @@ test "compiled command startup admits declarations before OS configuration and a
     }
 }
 
-test "compiled command registry initialization preserves untouched bulk storage" {
+test "compiled command registry initialization starts every status item without menu storage" {
     const runtime = try std.testing.allocator.create(native_sdk.Runtime);
     defer std.testing.allocator.destroy(runtime);
     @memset(std.mem.asBytes(&runtime.status_items), 0xa5);
@@ -100,7 +100,9 @@ test "compiled command registry initialization preserves untouched bulk storage"
         try std.testing.expectEqual(@as(platform.StatusItemId, 0), item.id);
         try std.testing.expectEqual(@as(usize, 0), item.title.len);
         try std.testing.expectEqual(@as(usize, 0), item.item_count);
-        for (std.mem.asBytes(&item.items)) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+        // Menu rows are allocated when a status item is created, so a
+        // fresh runtime owns none, whatever its storage held before.
+        try std.testing.expect(item.items == null);
     }
 }
 
@@ -240,10 +242,10 @@ fn runtimeEqual(left: anytype, right: @TypeOf(left), probes: *[2]RuntimeProbe) !
         try complete(a.id, b.id);
         try complete(a.visible, b.visible);
         try complete(a.title, b.title);
-        try complete(a.items[0..a.item_count], b.items[0..b.item_count]);
+        try complete(a.trayItems(), b.trayItems());
         inline for (.{ a, b }) |item| {
             if (item.title.len > 0) try std.testing.expectEqual(@intFromPtr(item.title_storage[0..].ptr), @intFromPtr(item.title.ptr));
-            for (item.items[0..item.item_count]) |*row| {
+            for (item.trayItems()) |*row| {
                 inline for (.{ "command", "label", "detail", "key" }) |field| {
                     const bytes = @field(row, field);
                     if (bytes.len > 0) try std.testing.expectEqual(@intFromPtr(@field(row, field ++ "_storage")[0..].ptr), @intFromPtr(bytes.ptr));
@@ -283,10 +285,14 @@ test "compiled command runtime preserves full source records snapshots registry 
         harness.runtime.started_timestamp_ns = 0;
         // Unused native payload buffers deliberately have no runtime defaults.
         // Seed fixture bytes so complete retained-row comparisons also cover
-        // unused backing capacity without traversing undefined slice headers.
+        // unused backing capacity without traversing undefined slice headers:
+        // each status item reuses menu storage it already holds, so seed
+        // zeroed rows before any status item is created.
         for (&harness.runtime.status_items) |*item| {
             @memset(&item.title_storage, 0);
-            @memset(std.mem.asBytes(&item.items), 0);
+            const rows = try harness.runtime.owned_allocator.create(std.meta.Child(std.meta.Child(@TypeOf(item.items))));
+            @memset(std.mem.asBytes(rows), 0);
+            item.items = rows;
         }
         harness.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &policies };
         harness.runtime.options.commands = &catalog;

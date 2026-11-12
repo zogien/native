@@ -117,7 +117,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             for (self.status_items) |status_item| {
                 if (snapshot_policy.plan(self.snapshot_policy, .bounded, .{ .flags = @intFromBool(status_item.active), .words = .{ 1, self.automation_trays.len - tray_count, 0, 0, 0, 0, 0, 0 } }).flags != 0) continue;
                 const count = bounded(self, status_item.item_count, self.automationStorage().automation_tray_items.len - item_offset);
-                for (status_item.items[0..count], 0..) |item, index| {
+                for (status_item.trayItems()[0..count], 0..) |item, index| {
                     self.automationStorage().automation_tray_items[item_offset + index] = .{
                         .id = item.id,
                         .label = item.label,
