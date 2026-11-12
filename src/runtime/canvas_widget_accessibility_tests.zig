@@ -1089,7 +1089,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     };
 
     var platform_state: WidgetAccessibilityPlatform = .{};
-    // The Runtime is multi-megabyte; heap-allocate so the test thread's
+    // The Runtime is over a megabyte; heap-allocate so the test thread's
     // stack does not overflow (see TestHarness.create).
     const runtime = try std.testing.allocator.create(Runtime);
     defer std.testing.allocator.destroy(runtime);

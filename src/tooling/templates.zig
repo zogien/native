@@ -3073,8 +3073,8 @@ fn runnerZig() []const u8 {
     \\    const menus = options.resolvedMenus(&menu_storage);
     \\    var command_storage: CommandStorage = .{};
     \\    const commands = options.resolvedCommands(&command_storage);
-    \\    // The Runtime is multi-megabyte; default thread stacks overflow on a
-    \\    // stack instance, so construct it on the heap.
+    \\    // The Runtime is over a megabyte, too large to keep on the main
+    \\    // thread's stack, so construct it on the heap.
     \\    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
@@ -3132,8 +3132,8 @@ fn runnerZig() []const u8 {
     \\    const menus = options.resolvedMenus(&menu_storage);
     \\    var command_storage: CommandStorage = .{};
     \\    const commands = options.resolvedCommands(&command_storage);
-    \\    // The Runtime is multi-megabyte; default thread stacks overflow on a
-    \\    // stack instance, so construct it on the heap.
+    \\    // The Runtime is over a megabyte, too large to keep on the main
+    \\    // thread's stack, so construct it on the heap.
     \\    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
@@ -3191,8 +3191,8 @@ fn runnerZig() []const u8 {
     \\    const menus = options.resolvedMenus(&menu_storage);
     \\    var command_storage: CommandStorage = .{};
     \\    const commands = options.resolvedCommands(&command_storage);
-    \\    // The Runtime is multi-megabyte; default thread stacks overflow on a
-    \\    // stack instance, so construct it on the heap.
+    \\    // The Runtime is over a megabyte, too large to keep on the main
+    \\    // thread's stack, so construct it on the heap.
     \\    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
@@ -3250,8 +3250,8 @@ fn runnerZig() []const u8 {
     \\    const menus = options.resolvedMenus(&menu_storage);
     \\    var command_storage: CommandStorage = .{};
     \\    const commands = options.resolvedCommands(&command_storage);
-    \\    // The Runtime is multi-megabyte; default thread stacks overflow on a
-    \\    // stack instance, so construct it on the heap.
+    \\    // The Runtime is over a megabyte, too large to keep on the main
+    \\    // thread's stack, so construct it on the heap.
     \\    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
@@ -4442,7 +4442,7 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.min_height = manifestShellStartupMinSize(\"min_height\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.close_policy = manifestShellStartupClosePolicy()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "return windowClosePolicy(shell.windows[0])") != null);
-    // The Runtime is multi-megabyte; the generated runner must heap-allocate
+    // The Runtime is over a megabyte; the generated runner must heap-allocate
     // it and construct in place, never build it by value on the stack.
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "std.heap.page_allocator.create(native_sdk.Runtime)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "defer std.heap.page_allocator.destroy(runtime)") != null);

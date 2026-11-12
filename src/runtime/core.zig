@@ -502,10 +502,11 @@ pub const Runtime = struct {
         return self;
     }
 
-    /// Construct in place. The Runtime is tens of megabytes of fixed-capacity
-    /// storage; by-value construction materializes a stack temporary in Debug
-    /// builds that overflows default thread stacks, so every embedding
-    /// constructs through a pointer.
+    /// Construct in place. The Runtime is over a megabyte of fixed-capacity
+    /// bookkeeping (its capacity-sized buffers are allocated on demand);
+    /// by-value construction materializes a stack temporary in Debug builds
+    /// that overflows default thread stacks, so every embedding constructs
+    /// through a pointer.
     pub fn initAt(self: *Runtime, options: Options) void {
         inline for (@typeInfo(Runtime).@"struct".fields) |field| {
             if (comptime fieldHasSmallDefault(field)) {
@@ -1176,8 +1177,9 @@ pub fn TestHarness() type {
         trace_records: [64]trace.Record = undefined,
         trace_sink: trace.BufferSink = undefined,
         runtime: Runtime = undefined,
-        /// The harness embeds the multi-megabyte Runtime, so stack
-        /// instances overflow test threads; create on the heap.
+        /// The harness embeds the Runtime and the null platform, a few
+        /// megabytes together, so stack instances overflow test threads;
+        /// create on the heap.
         pub fn create(gpa: std.mem.Allocator, surface: platform.Surface) !*Self {
             const self = try gpa.create(Self);
             self.init(surface);

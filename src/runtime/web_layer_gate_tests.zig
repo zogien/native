@@ -188,7 +188,7 @@ test "automation drives a native-only session: commands work, webview creation t
     try cwd.createDirPath(std.testing.io, automation_dir);
     defer cwd.deleteTree(std.testing.io, automation_dir) catch {};
 
-    // Heap-hosted: NullPlatform and Runtime are both multi-megabyte.
+    // Heap-hosted: NullPlatform and Runtime are each over a megabyte.
     const null_platform = try std.heap.page_allocator.create(platform.NullPlatform);
     defer std.heap.page_allocator.destroy(null_platform);
     null_platform.* = platform.NullPlatform.init(.{});

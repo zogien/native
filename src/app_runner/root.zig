@@ -864,8 +864,8 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     const menus = options.resolvedMenus(&menu_storage);
     var command_storage: CommandStorage = .{};
     const commands = options.resolvedCommands(&command_storage);
-    // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
+    // The Runtime is over a megabyte, too large to keep on the main
+    // thread's stack, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     // Fonts registered at startup and media-surface texture buffers
@@ -939,8 +939,8 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     const menus = options.resolvedMenus(&menu_storage);
     var command_storage: CommandStorage = .{};
     const commands = options.resolvedCommands(&command_storage);
-    // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
+    // The Runtime is over a megabyte, too large to keep on the main
+    // thread's stack, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     // Fonts registered at startup and media-surface texture buffers
@@ -1011,8 +1011,8 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     const menus = options.resolvedMenus(&menu_storage);
     var command_storage: CommandStorage = .{};
     const commands = options.resolvedCommands(&command_storage);
-    // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
+    // The Runtime is over a megabyte, too large to keep on the main
+    // thread's stack, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     // Fonts registered at startup and media-surface texture buffers
@@ -1094,8 +1094,8 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     const menus = options.resolvedMenus(&menu_storage);
     var command_storage: CommandStorage = .{};
     const commands = options.resolvedCommands(&command_storage);
-    // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
+    // The Runtime is over a megabyte, too large to keep on the main
+    // thread's stack, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     // Fonts registered at startup and media-surface texture buffers
