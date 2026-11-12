@@ -23,6 +23,7 @@ const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
 const runtime_canvas_widget_state = @import("canvas_widget_state.zig");
 const runtime_canvas_widget_runtime = @import("canvas_widget_runtime.zig");
+const runtime_canvas_scratch = @import("canvas_scratch.zig");
 const runtime_frame_profile = @import("frame_profile.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_flow = @import("flow.zig");
@@ -435,46 +436,13 @@ pub const Runtime = struct {
     /// is not). Depth-counted because automation gestures nest input
     /// dispatches.
     canvas_widget_accessibility_defer_depth: usize = 0,
-    // Scratch for setCanvasWidgetLayout's reconcile pass: too large for the
-    // stack at the current node cap, and the event loop is single-threaded.
-    canvas_widget_reconcile_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
-    canvas_widget_source_semantics_scratch: [canvas_limits.max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
-    // More reconcile-pass scratch that outgrew the stack when the widget
-    // budgets quadrupled (256 -> 1024 nodes): previous control/scroll/text reconcile
-    // entries, the previous text byte pool, and the invalidation diff.
-    canvas_widget_reconcile_control_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetControlReconcileEntry = undefined,
-    canvas_widget_reconcile_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetSourceScrollEntry = undefined,
-    canvas_widget_reconcile_text_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetTextReconcileEntry = undefined,
-    canvas_widget_reconcile_text_bytes: [canvas_limits.max_canvas_widget_text_bytes_per_view]u8 = undefined,
-    canvas_widget_invalidations_scratch: [canvas_limits.max_canvas_widget_invalidations_per_view]canvas.WidgetInvalidation = undefined,
-    canvas_widget_copy_scratch: runtime_canvas_widget_runtime.CanvasWidgetCopyScratch = undefined,
+    /// The widget reconcile and frame planning scratch shared by this
+    /// runtime's gpu-surface views (see `CanvasScratch`): allocated with
+    /// the first gpu-surface view, kept until `deinit`, null before.
+    /// Reach it through `canvasScratch()`.
+    canvas_scratch: ?*runtime_canvas_scratch.CanvasScratch = null,
     canvas_widget_display_list_refresh_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_widget_accessibility_publish_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
-    canvas_frame_render_commands: [max_canvas_commands_per_view]canvas.RenderCommand = undefined,
-    canvas_frame_render_batches: [max_canvas_commands_per_view]canvas.RenderBatch = undefined,
-    canvas_frame_pipeline_cache_entries: [max_canvas_pipelines_per_view]canvas.RenderPipelineCacheEntry = undefined,
-    canvas_frame_pipeline_cache_actions: [max_canvas_pipeline_cache_actions_per_view]canvas.RenderPipelineCacheAction = undefined,
-    canvas_frame_path_geometries: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometry = undefined,
-    canvas_frame_path_geometry_cache_entries: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometryCacheEntry = undefined,
-    canvas_frame_path_geometry_cache_actions: [max_canvas_path_geometry_cache_actions_per_view]canvas.RenderPathGeometryCacheAction = undefined,
-    canvas_frame_images: [max_canvas_images_per_view]canvas.RenderImage = undefined,
-    canvas_frame_image_cache_entries: [max_canvas_images_per_view]canvas.RenderImageCacheEntry = undefined,
-    canvas_frame_image_cache_actions: [max_canvas_image_cache_actions_per_view]canvas.RenderImageCacheAction = undefined,
-    canvas_frame_layers: [max_canvas_layers_per_view]canvas.RenderLayer = undefined,
-    canvas_frame_layer_cache_entries: [max_canvas_layers_per_view]canvas.RenderLayerCacheEntry = undefined,
-    canvas_frame_layer_cache_actions: [max_canvas_layer_cache_actions_per_view]canvas.RenderLayerCacheAction = undefined,
-    canvas_frame_resources: [max_canvas_resources_per_view]canvas.RenderResource = undefined,
-    canvas_frame_resource_cache_entries: [max_canvas_resources_per_view]canvas.RenderResourceCacheEntry = undefined,
-    canvas_frame_resource_cache_actions: [max_canvas_resource_cache_actions_per_view]canvas.RenderResourceCacheAction = undefined,
-    canvas_frame_visual_effects: [max_canvas_visual_effects_per_view]canvas.VisualEffect = undefined,
-    canvas_frame_visual_effect_cache_entries: [max_canvas_visual_effects_per_view]canvas.VisualEffectCacheEntry = undefined,
-    canvas_frame_visual_effect_cache_actions: [max_canvas_visual_effect_cache_actions_per_view]canvas.VisualEffectCacheAction = undefined,
-    canvas_frame_glyph_atlas_entries: [max_canvas_glyphs_per_view]canvas.GlyphAtlasEntry = undefined,
-    canvas_frame_glyph_atlas_cache_entries: [max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry = undefined,
-    canvas_frame_glyph_atlas_cache_actions: [max_canvas_glyphs_per_view * 2]canvas.GlyphAtlasCacheAction = undefined,
-    canvas_frame_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined,
-    canvas_frame_render_override_samples: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
-    canvas_frame_render_override_combined: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
     /// Runtime-registered canvas images (see canvas_images.zig): entry
     /// metadata, the per-slot pixel buffers, and the `ReferenceImage`
     /// scratch the frame planner hands to renderers each plan. Each
@@ -614,6 +582,10 @@ pub const Runtime = struct {
         self.releaseDialogs();
         for (self.views[0..self.view_count]) |*view| view.releaseOwnedBuffers(self.owned_allocator);
         self.view_count = 0;
+        if (self.canvas_scratch) |scratch| {
+            self.owned_allocator.destroy(scratch);
+            self.canvas_scratch = null;
+        }
         if (self.targetless_ime_preedit.len > 0) {
             self.owned_allocator.free(self.targetless_ime_preedit);
             self.targetless_ime_preedit = &.{};
@@ -663,6 +635,22 @@ pub const Runtime = struct {
         }
         self.media_surface_entries = [_]runtime_media_surface.MediaSurfaceTextureEntry{.{}} ** canvas_limits.max_media_surface_channels;
         self.media_surface_count = 0;
+    }
+
+    /// The canvas scratch shared by this runtime's gpu-surface views (see
+    /// `CanvasScratch`). It exists from the first gpu-surface view on;
+    /// canvas paths run only for such views, so reaching for it earlier
+    /// is a runtime bug, checked in safe builds.
+    pub fn canvasScratch(self: *const Runtime) *runtime_canvas_scratch.CanvasScratch {
+        return self.canvas_scratch.?;
+    }
+
+    /// Allocate the shared canvas scratch if this runtime has none yet.
+    /// Called before the first gpu-surface view exists, so a refusal
+    /// leaves the runtime exactly as it was.
+    pub fn ensureCanvasScratch(self: *Runtime) !void {
+        if (self.canvas_scratch != null) return;
+        self.canvas_scratch = try self.owned_allocator.create(runtime_canvas_scratch.CanvasScratch);
     }
 
     fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {

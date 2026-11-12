@@ -74,8 +74,8 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // replaced; the focus applies after the new tree lands.
             const autofocus_target = self.views[index].canvasWidgetAutofocusTarget(layout);
             const previous_layout = self.views[index].widgetLayoutTree();
-            const source_semantics = try layout.collectSemantics(&self.canvas_widget_source_semantics_scratch);
-            const reconciled_nodes = &self.canvas_widget_reconcile_nodes;
+            const source_semantics = try layout.collectSemantics(&self.canvasScratch().canvas_widget_source_semantics_scratch);
+            const reconciled_nodes = &self.canvasScratch().canvas_widget_reconcile_nodes;
             var tokens = self.views[index].widget_tokens;
             tokens.text_run_policy = layout.text_run_policy orelse tokens.text_run_policy;
             // Reconcile scratch lives on the Runtime, not the stack: at
@@ -100,10 +100,10 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 self.views[index].widgetSourceScrollEntries(),
                 self.views[index].widgetSourceControlEntries(),
                 reconciled_nodes,
-                &self.canvas_widget_reconcile_control_entries,
-                &self.canvas_widget_reconcile_scroll_entries,
-                &self.canvas_widget_reconcile_text_entries,
-                &self.canvas_widget_reconcile_text_bytes,
+                &self.canvasScratch().canvas_widget_reconcile_control_entries,
+                &self.canvasScratch().canvas_widget_reconcile_scroll_entries,
+                &self.canvasScratch().canvas_widget_reconcile_text_entries,
+                &self.canvasScratch().canvas_widget_reconcile_text_bytes,
                 tokens,
                 armed_tween_ids[0..armed_tween_count],
                 canvasWidgetPressedSplitId(self, index),
@@ -156,7 +156,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // hover re-hit-test nor the register prune can see.
             const adoption_tooltip_bindings = CanvasWidgetEventMethods(Runtime).captureCanvasTooltipAdoptionBindings(self, index);
             self.views[index].applyCanvasTooltipVisibilityToNodesForShownId(reconciled_nodes[0..reconciled_layout.nodes.len], prospective_shown_tooltip_id);
-            const invalidations = try canvas.WidgetLayoutTree.diffWithTokens(previous_layout, reconciled_layout, tokens, &self.canvas_widget_invalidations_scratch);
+            const invalidations = try canvas.WidgetLayoutTree.diffWithTokens(previous_layout, reconciled_layout, tokens, &self.canvasScratch().canvas_widget_invalidations_scratch);
             const previous_render_state = self.views[index].canvasWidgetRenderState();
             const next_render_state = CanvasWidgetEventMethods(Runtime).canvasWidgetRenderStateAfterLayout(previous_render_state, reconciled_layout);
             const render_state_changed = !CanvasWidgetEventMethods(Runtime).canvasWidgetRenderStatesEqual(previous_render_state, next_render_state);
@@ -183,7 +183,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // that hover currency must treat as adopted-and-stale,
             // while the copy's up-front validation rejects with the
             // witness unmoved.
-            try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch);
+            try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvasScratch().canvas_widget_copy_scratch);
             try self.views[index].copyCanvasWidgetSourceText(layout);
             self.views[index].copyCanvasWidgetSourceScroll(layout);
             self.views[index].copyCanvasWidgetSourceControls(layout);

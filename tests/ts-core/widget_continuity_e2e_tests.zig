@@ -119,7 +119,7 @@ test "compiled widget continuity retained adoption source jumps axis revocation 
         if (step == 3) nodes[0].widget.scroll_axes = .both;
         for ([_]*Harness{ left, right }) |h| {
             const view = &h.runtime.views[0];
-            try view.copyWidgetLayoutTree(tree, &h.runtime.canvas_widget_copy_scratch);
+            try view.copyWidgetLayoutTree(tree, &h.runtime.canvasScratch().canvas_widget_copy_scratch);
             if (step == 0) {
                 view.canvasStorage().widget_scroll_states[0].velocity_y = -23.125;
                 view.canvasStorage().widget_scroll_states[0].velocity_x = 31.25;
@@ -140,7 +140,7 @@ test "compiled widget continuity retained adoption source jumps axis revocation 
         const view = &h.runtime.views[0];
         const adoptions = view.canvas_widget_layout_adoptions;
         const before = view.canvasStorage().widget_scroll_states[0];
-        try std.testing.expectError(error.WidgetTextTooLarge, view.copyWidgetLayoutTree(tree, &h.runtime.canvas_widget_copy_scratch));
+        try std.testing.expectError(error.WidgetTextTooLarge, view.copyWidgetLayoutTree(tree, &h.runtime.canvasScratch().canvas_widget_copy_scratch));
         try std.testing.expectEqual(adoptions, view.canvas_widget_layout_adoptions);
         try exact(before, view.canvasStorage().widget_scroll_states[0]);
         try std.testing.expectEqualStrings("unchanged\x00\xff", view.canvasStorage().widget_layout_nodes[1].widget.text);

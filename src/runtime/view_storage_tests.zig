@@ -1,13 +1,15 @@
-//! Allocation discipline of the per-view canvas storage: a runtime owns
-//! a `ViewCanvasStorage` exactly for each live gpu-surface view, from
-//! the view's creation to its removal, and view compaction moves that
-//! storage by pointer.
+//! Allocation discipline of the canvas storage: a runtime owns a
+//! `ViewCanvasStorage` exactly for each live gpu-surface view, from the
+//! view's creation to its removal, plus one shared `CanvasScratch` from
+//! its first gpu-surface view until `deinit`; view compaction moves the
+//! per-view storage by pointer.
 
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const core = @import("core.zig");
 const runtime_view = @import("view.zig");
+const runtime_canvas_scratch = @import("canvas_scratch.zig");
 const support = @import("test_support.zig");
 
 const platform = support.platform;
@@ -15,6 +17,7 @@ const App = support.App;
 const TestHarness = support.TestHarness;
 
 const storage_bytes = @sizeOf(runtime_view.ViewCanvasStorage);
+const scratch_bytes = @sizeOf(runtime_canvas_scratch.CanvasScratch);
 
 const StorageApp = struct {
     fn app(self: *@This()) App {
@@ -50,7 +53,7 @@ fn viewByLabel(harness: *TestHarness(), label: []const u8) *runtime_view.Runtime
     return &harness.runtime.views[index];
 }
 
-test "view canvas storage exists only for live gpu-surface views" {
+test "canvas storage exists only for live gpu-surface views, the shared scratch from the first one on" {
     var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const harness = try harnessWithRuntimeAllocator(counting.allocator());
     defer harness.destroy(std.testing.allocator);
@@ -59,40 +62,47 @@ test "view canvas storage exists only for live gpu-surface views" {
 
     // Construction and startup allocate nothing.
     try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    try std.testing.expect(harness.runtime.canvas_scratch == null);
 
     // A native-control view never owns canvas storage, and its canvas
     // reads are honestly empty.
     _ = try harness.runtime.createView(.{ .window_id = 1, .label = "toolbar", .kind = .toolbar, .frame = geometry.RectF.init(0, 0, 240, 40) });
     try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    try std.testing.expect(harness.runtime.canvas_scratch == null);
     const toolbar = viewByLabel(harness, "toolbar");
     try std.testing.expect(toolbar.canvas_storage == null);
     try std.testing.expectEqual(@as(usize, 0), toolbar.canvasDisplayList().commands.len);
     try std.testing.expectEqual(@as(usize, 0), toolbar.widgetLayoutTree().nodes.len);
     try std.testing.expectEqual(@as(usize, 0), toolbar.widgetSemantics().len);
 
-    // Each gpu-surface view costs exactly one storage block.
+    // The first gpu-surface view brings the shared scratch and its own
+    // storage block; every later one costs exactly one storage block.
     try createCanvasView(harness, "first");
-    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
-    try std.testing.expectEqual(storage_bytes, counting.allocated_bytes);
-    try createCanvasView(harness, "second");
     try std.testing.expectEqual(@as(usize, 2), counting.allocations);
-    try std.testing.expectEqual(2 * storage_bytes, counting.allocated_bytes);
+    try std.testing.expectEqual(scratch_bytes + storage_bytes, counting.allocated_bytes);
+    try std.testing.expect(harness.runtime.canvas_scratch != null);
+    try createCanvasView(harness, "second");
+    try std.testing.expectEqual(@as(usize, 3), counting.allocations);
+    try std.testing.expectEqual(scratch_bytes + 2 * storage_bytes, counting.allocated_bytes);
 
     // Closing a gpu-surface view returns its block; closing the
-    // native-control view frees nothing.
+    // native-control view frees nothing. The scratch stays for the
+    // runtime's lifetime.
     try harness.runtime.closeView(1, "first");
     try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
     try std.testing.expectEqual(storage_bytes, counting.freed_bytes);
     try harness.runtime.closeView(1, "toolbar");
     try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+    try std.testing.expect(harness.runtime.canvas_scratch != null);
 
     // Ownership froze at init: a swapped `options.allocator` sees none
-    // of the remaining frees.
+    // of the remaining frees, and deinit returns everything.
     var poisoned = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     harness.runtime.options.allocator = poisoned.allocator();
     harness.runtime.deinit();
-    try std.testing.expectEqual(@as(usize, 2), counting.deallocations);
-    try std.testing.expectEqual(2 * storage_bytes, counting.freed_bytes);
+    try std.testing.expectEqual(counting.allocations, counting.deallocations);
+    try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+    try std.testing.expect(harness.runtime.canvas_scratch == null);
     try std.testing.expectEqual(@as(usize, 0), poisoned.allocations);
     try std.testing.expectEqual(@as(usize, 0), poisoned.deallocations);
 }
@@ -179,9 +189,20 @@ test "a gpu-surface view whose storage cannot be allocated is refused before the
     try harness.start(app_state.app());
 
     const platform_views = harness.null_platform.view_count;
+
+    // Refused at the shared scratch: nothing exists afterwards.
     try std.testing.expectError(error.OutOfMemory, createCanvasView(harness, "canvas"));
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.view_count);
     try std.testing.expectEqual(platform_views, harness.null_platform.view_count);
+    try std.testing.expect(harness.runtime.canvas_scratch == null);
+
+    // Refused at the view's own storage: the scratch (runtime-lifetime
+    // by design) stays, the view does not exist anywhere.
+    failing.fail_index = failing.alloc_index + 1;
+    try std.testing.expectError(error.OutOfMemory, createCanvasView(harness, "canvas"));
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.view_count);
+    try std.testing.expectEqual(platform_views, harness.null_platform.view_count);
+    try std.testing.expect(harness.runtime.canvas_scratch != null);
 
     // Nothing was half-created: once memory is available the same view
     // is created normally.

@@ -1240,7 +1240,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             frame_options.previous_text_layout_cache = self.views[index].canvasFrameTextLayoutCache();
             const scheduled_render_overrides = try self.views[index].sampleCanvasRenderAnimationsWithPolicy(
                 frame_options.timestamp_ns,
-                &self.canvas_frame_render_override_samples,
+                &self.canvasScratch().canvas_frame_render_override_samples,
                 frame_options.render_override_policy,
             );
             if (frame_options.previous_render_overrides.len == 0) frame_options.previous_render_overrides = self.views[index].canvasFrameRenderOverrides();
@@ -1250,10 +1250,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const render_overrides = if (frame_options.render_override_policy) |owner| blk: {
                 // Empty merging writes nothing and can take the retained no-op
                 // frame path without allocating copied planning buffers.
-                if (scheduled_render_overrides.len == 0 and frame_options.render_overrides.len == 0) break :blk self.canvas_frame_render_override_combined[0..0];
-                cache_workspace = canvas.RenderCacheWorkspace.forFrameWithOverrides(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len, scheduled_render_overrides.len, self.views[index].canvas_render_animation_dirty_bounds_count, self.canvas_frame_render_override_combined.len, self.views[index].canvas_packet_baseline_count);
-                break :blk try canvas.RenderOverridePolicy.merge(scheduled_render_overrides, frame_options.render_overrides, &self.canvas_frame_render_override_combined, owner, &cache_workspace.?);
-            } else try mergeCanvasRenderOverrides(scheduled_render_overrides, frame_options.render_overrides, &self.canvas_frame_render_override_combined);
+                if (scheduled_render_overrides.len == 0 and frame_options.render_overrides.len == 0) break :blk self.canvasScratch().canvas_frame_render_override_combined[0..0];
+                cache_workspace = canvas.RenderCacheWorkspace.forFrameWithOverrides(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len, scheduled_render_overrides.len, self.views[index].canvas_render_animation_dirty_bounds_count, self.canvasScratch().canvas_frame_render_override_combined.len, self.views[index].canvas_packet_baseline_count);
+                break :blk try canvas.RenderOverridePolicy.merge(scheduled_render_overrides, frame_options.render_overrides, &self.canvasScratch().canvas_frame_render_override_combined, owner, &cache_workspace.?);
+            } else try mergeCanvasRenderOverrides(scheduled_render_overrides, frame_options.render_overrides, &self.canvasScratch().canvas_frame_render_override_combined);
             frame_options.render_overrides = render_overrides;
 
             const coordination = canvas.CanvasFrameCoordinationPolicy;
@@ -1620,33 +1620,33 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
         pub fn canvasFrameScratchStorage(self: *Runtime) canvas.CanvasFrameStorage {
             const scratch = canvas_frame_scratch.get();
             return .{
-                .render_commands = &self.canvas_frame_render_commands,
-                .render_batches = &self.canvas_frame_render_batches,
-                .pipeline_cache_entries = &self.canvas_frame_pipeline_cache_entries,
-                .pipeline_cache_actions = &self.canvas_frame_pipeline_cache_actions,
-                .path_geometries = &self.canvas_frame_path_geometries,
-                .path_geometry_cache_entries = &self.canvas_frame_path_geometry_cache_entries,
-                .path_geometry_cache_actions = &self.canvas_frame_path_geometry_cache_actions,
-                .images = &self.canvas_frame_images,
-                .image_cache_entries = &self.canvas_frame_image_cache_entries,
-                .image_cache_actions = &self.canvas_frame_image_cache_actions,
-                .layers = &self.canvas_frame_layers,
-                .layer_cache_entries = &self.canvas_frame_layer_cache_entries,
-                .layer_cache_actions = &self.canvas_frame_layer_cache_actions,
-                .resources = &self.canvas_frame_resources,
-                .resource_cache_entries = &self.canvas_frame_resource_cache_entries,
-                .resource_cache_actions = &self.canvas_frame_resource_cache_actions,
-                .visual_effects = &self.canvas_frame_visual_effects,
-                .visual_effect_cache_entries = &self.canvas_frame_visual_effect_cache_entries,
-                .visual_effect_cache_actions = &self.canvas_frame_visual_effect_cache_actions,
-                .glyph_atlas_entries = &self.canvas_frame_glyph_atlas_entries,
-                .glyph_atlas_cache_entries = &self.canvas_frame_glyph_atlas_cache_entries,
-                .glyph_atlas_cache_actions = &self.canvas_frame_glyph_atlas_cache_actions,
+                .render_commands = &self.canvasScratch().canvas_frame_render_commands,
+                .render_batches = &self.canvasScratch().canvas_frame_render_batches,
+                .pipeline_cache_entries = &self.canvasScratch().canvas_frame_pipeline_cache_entries,
+                .pipeline_cache_actions = &self.canvasScratch().canvas_frame_pipeline_cache_actions,
+                .path_geometries = &self.canvasScratch().canvas_frame_path_geometries,
+                .path_geometry_cache_entries = &self.canvasScratch().canvas_frame_path_geometry_cache_entries,
+                .path_geometry_cache_actions = &self.canvasScratch().canvas_frame_path_geometry_cache_actions,
+                .images = &self.canvasScratch().canvas_frame_images,
+                .image_cache_entries = &self.canvasScratch().canvas_frame_image_cache_entries,
+                .image_cache_actions = &self.canvasScratch().canvas_frame_image_cache_actions,
+                .layers = &self.canvasScratch().canvas_frame_layers,
+                .layer_cache_entries = &self.canvasScratch().canvas_frame_layer_cache_entries,
+                .layer_cache_actions = &self.canvasScratch().canvas_frame_layer_cache_actions,
+                .resources = &self.canvasScratch().canvas_frame_resources,
+                .resource_cache_entries = &self.canvasScratch().canvas_frame_resource_cache_entries,
+                .resource_cache_actions = &self.canvasScratch().canvas_frame_resource_cache_actions,
+                .visual_effects = &self.canvasScratch().canvas_frame_visual_effects,
+                .visual_effect_cache_entries = &self.canvasScratch().canvas_frame_visual_effect_cache_entries,
+                .visual_effect_cache_actions = &self.canvasScratch().canvas_frame_visual_effect_cache_actions,
+                .glyph_atlas_entries = &self.canvasScratch().canvas_frame_glyph_atlas_entries,
+                .glyph_atlas_cache_entries = &self.canvasScratch().canvas_frame_glyph_atlas_cache_entries,
+                .glyph_atlas_cache_actions = &self.canvasScratch().canvas_frame_glyph_atlas_cache_actions,
                 .text_layout_plans = &scratch.text_layout_plans,
                 .text_layout_lines = &scratch.text_layout_lines,
                 .text_layout_cache_entries = &scratch.text_layout_cache_entries,
                 .text_layout_cache_actions = &scratch.text_layout_cache_actions,
-                .changes = &self.canvas_frame_changes,
+                .changes = &self.canvasScratch().canvas_frame_changes,
             };
         }
 

@@ -511,9 +511,11 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         /// The canvas storage a new view of `kind` needs: one block for a
-        /// gpu-surface view, none for any other kind.
+        /// gpu-surface view, none for any other kind. The runtime's shared
+        /// canvas scratch comes with its first gpu-surface view.
         fn allocateViewCanvasStorage(self: *Runtime, kind: platform.ViewKind) !?*runtime_view.ViewCanvasStorage {
             if (kind != .gpu_surface) return null;
+            try self.ensureCanvasScratch();
             return try self.owned_allocator.create(runtime_view.ViewCanvasStorage);
         }
 

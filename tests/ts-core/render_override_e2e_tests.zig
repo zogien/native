@@ -169,8 +169,8 @@ test "both Runtime consumers preserve full override frames damage stored overrid
         try frameEqual(actual, try compiled.runtime.nextCanvasFrame(1, "canvas", options, b.value), observed);
         try exact([_]usize{ 1, 1 }, calls);
         try std.testing.expect(shared_buffers);
-        try exact(@as([]const Override, native.runtime.canvas_frame_render_override_samples[0..1]), @as([]const Override, compiled.runtime.canvas_frame_render_override_samples[0..1]));
-        try exact(@as([]const Override, native.runtime.canvas_frame_render_override_combined[0..1]), @as([]const Override, compiled.runtime.canvas_frame_render_override_combined[0..1]));
+        try exact(@as([]const Override, native.runtime.canvasScratch().canvas_frame_render_override_samples[0..1]), @as([]const Override, compiled.runtime.canvasScratch().canvas_frame_render_override_samples[0..1]));
+        try exact(@as([]const Override, native.runtime.canvasScratch().canvas_frame_render_override_combined[0..1]), @as([]const Override, compiled.runtime.canvasScratch().canvas_frame_render_override_combined[0..1]));
         try exact(sdk.runtime.testing.runtimeViewCanvasFrameRenderOverrides(&native.runtime.views[0]), sdk.runtime.testing.runtimeViewCanvasFrameRenderOverrides(&compiled.runtime.views[0]));
         core.rt.frameReset();
     }
