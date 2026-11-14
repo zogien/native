@@ -780,6 +780,55 @@ pub fn build(b: *std.Build) void {
         dialog_run.expectExitCode(0);
         b.step("test-windows-dialogs", "Verify the Windows host's asynchronous dialogs on their own threads").dependOn(&dialog_run.step);
         test_step.dependOn(&dialog_run.step);
+
+        // Window icons from icon_path against the same production host
+        // (see src/platform/windows/window_icon_test.cpp): a PNG and an
+        // .ico load; a missing path and a file that is not an image leave
+        // the windows on the system default; a relative path resolves
+        // against the working directory in development and against
+        // resources\ beside bin\ in a packaged layout.
+        const icon_mod = b.createModule(.{ .target = loop_target, .optimize = optimize, .link_libc = true });
+        app_build.addWebView2HostIncludes(b, icon_mod, b.path("third_party/webview2/include"), loop_target);
+        icon_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/window_icon_test.cpp"), .flags = &.{"-std=c++17"} });
+        icon_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
+        app_build.linkWindowsHostLibraries(icon_mod, loop_target);
+        const icon_test = b.addExecutable(.{ .name = "windows-window-icon-test", .root_module = icon_mod });
+        icon_test.win32_manifest = b.path("assets/native-sdk.manifest");
+        const icon_step = b.step("test-windows-window-icon", "Verify the Windows host gives every window the icon_path icon");
+        const icon_cases = [_]struct { path: []const u8, exists: bool, expect: []const u8 }{
+            .{ .path = "assets/icon.png", .exists = true, .expect = "icon" },
+            .{ .path = "assets/icon.ico", .exists = true, .expect = "icon" },
+            .{ .path = "missing-window-icon.png", .exists = false, .expect = "none" },
+            .{ .path = "assets/native-sdk.manifest", .exists = true, .expect = "none" },
+        };
+        for (icon_cases) |case| {
+            const icon_run = b.addRunArtifact(icon_test);
+            if (case.exists) icon_run.addFileArg(b.path(case.path)) else icon_run.addArg(case.path);
+            icon_run.addArg(case.expect);
+            icon_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
+            icon_run.expectExitCode(0);
+            icon_step.dependOn(&icon_run.step);
+        }
+        const icon_dev_run = b.addRunArtifact(icon_test);
+        icon_dev_run.setCwd(b.path("."));
+        icon_dev_run.addArgs(&.{ "assets/icon.png", "icon" });
+        icon_dev_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
+        icon_dev_run.expectExitCode(0);
+        icon_step.dependOn(&icon_dev_run.step);
+        // `native package` layout: bin\<exe> and the asset tree in
+        // resources\. The working directory (bin\) has no assets\, so only
+        // the packaged lookup finds the icon.
+        const icon_package = b.addWriteFiles();
+        _ = icon_package.addCopyFile(icon_test.getEmittedBin(), "bin/windows-window-icon-test.exe");
+        _ = icon_package.addCopyFile(b.path("assets/icon.png"), "resources/assets/icon.png");
+        const icon_packaged_run = std.Build.Step.Run.create(b, "run packaged windows-window-icon-test");
+        icon_packaged_run.addFileArg(icon_package.getDirectory().path(b, "bin/windows-window-icon-test.exe"));
+        icon_packaged_run.setCwd(icon_package.getDirectory().path(b, "bin"));
+        icon_packaged_run.addArgs(&.{ "assets/icon.png", "icon" });
+        icon_packaged_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
+        icon_packaged_run.expectExitCode(0);
+        icon_step.dependOn(&icon_packaged_run.step);
+        test_step.dependOn(icon_step);
     }
     const window_drag_tests = b.addSystemCommand(&.{ "node", "--test" });
     window_drag_tests.addFileArg(b.path("scripts/webview-window-drag.test.mjs"));

@@ -873,6 +873,11 @@ struct DeferredWebViewEvent {
     std::wstring url;
 };
 
+struct WindowIconPair {
+    HICON large_icon = nullptr;
+    HICON small_icon = nullptr;
+};
+
 struct Host {
     bool window_drag_initialization_failed = false;
     uint64_t next_window_drag_generation = 1;
@@ -881,6 +886,10 @@ struct Host {
     std::string window_title;
     std::string bundle_id;
     std::string icon_path;
+    /* Window icons loaded from icon_path, one large/small pair per DPI,
+     * shared by every window at that DPI and destroyed with the host
+     * after its windows (applyWindowIcon, destroyWindowIcons). */
+    std::map<UINT, WindowIconPair> window_icons;
     /* The WebView2 user data folder every environment in this host
      * shares, resolved once on first use (webViewUserDataFolder). Empty
      * means WebView2's own default. */
@@ -2815,6 +2824,119 @@ static BOOL adjustWindowRectForDpi(RECT *rect, DWORD style, BOOL menu, DWORD ex_
         reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi")));
     if (adjust) return adjust(rect, style, menu, ex_style, dpi);
     return AdjustWindowRectEx(rect, style, menu, ex_style);
+}
+
+/* -------------------------------------------------------- window icons
+ *
+ * icon_path is the app's icon on every platform (the macOS host makes it
+ * the Dock and app-switcher tile). Windows draws Alt+Tab, the taskbar
+ * preview and the caption from the window's own icon, which only
+ * WM_SETICON (or the class) provides, so each top-level window gets
+ * icon_path at its DPI's large and small sizes. An empty or unreadable
+ * icon_path leaves windows on the system default. */
+
+extern "C" int native_sdk_windows_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height);
+
+/* A 32-bit straight-alpha icon from RGBA pixels. CreateIconIndirect
+ * copies both bitmaps; the mask is empty because the alpha channel
+ * carries the shape. */
+static HICON iconFromRgba(const uint8_t *rgba, int width, int height) {
+    BITMAPV5HEADER header = {};
+    header.bV5Size = sizeof(header);
+    header.bV5Width = width;
+    header.bV5Height = -height;
+    header.bV5Planes = 1;
+    header.bV5BitCount = 32;
+    header.bV5Compression = BI_BITFIELDS;
+    header.bV5RedMask = 0x00FF0000;
+    header.bV5GreenMask = 0x0000FF00;
+    header.bV5BlueMask = 0x000000FF;
+    header.bV5AlphaMask = 0xFF000000;
+    void *bits = nullptr;
+    HBITMAP color = CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO *>(&header), DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!color || !bits) {
+        if (color) DeleteObject(color);
+        return nullptr;
+    }
+    uint8_t *bgra = static_cast<uint8_t *>(bits);
+    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    for (size_t index = 0; index < pixel_count; ++index) {
+        bgra[index * 4 + 0] = rgba[index * 4 + 2];
+        bgra[index * 4 + 1] = rgba[index * 4 + 1];
+        bgra[index * 4 + 2] = rgba[index * 4 + 0];
+        bgra[index * 4 + 3] = rgba[index * 4 + 3];
+    }
+    const size_t mask_stride = ((static_cast<size_t>(width) + 15) / 16) * 2;
+    std::vector<uint8_t> mask_bits(mask_stride * static_cast<size_t>(height), 0);
+    HBITMAP mask = CreateBitmap(width, height, 1, 1, mask_bits.data());
+    HICON icon = nullptr;
+    if (mask) {
+        ICONINFO info = {};
+        info.fIcon = TRUE;
+        info.hbmMask = mask;
+        info.hbmColor = color;
+        icon = CreateIconIndirect(&info);
+        DeleteObject(mask);
+    }
+    DeleteObject(color);
+    return icon;
+}
+
+/* A relative icon_path names a file of the packaged asset tree when the
+ * app runs from a package, as WebView asset roots do (assetRootPath), and
+ * stays relative to the working directory in development. */
+static std::wstring iconFilePath(const std::string &icon_path) {
+    std::wstring path = widen(icon_path);
+    const bool absolute = !icon_path.empty() && (icon_path[0] == '\\' || icon_path[0] == '/' || (icon_path.size() > 1 && icon_path[1] == ':'));
+    if (absolute) return path;
+    const std::wstring &resources = packagedResourcesDirectory();
+    if (resources.empty()) return path;
+    std::wstring relative = path;
+    std::replace(relative.begin(), relative.end(), L'/', L'\\');
+    const std::wstring candidate = resources + L"\\" + relative;
+    return regularFileExists(candidate) ? candidate : path;
+}
+
+/* icon_path at exactly `size` pixels, owned by the host (never LR_SHARED:
+ * DestroyIcon leaves a shared icon alive). An .ico goes through
+ * LoadImageW, which picks the file's best image for the size; any other
+ * file (the PNG the SDK passes by default) is decoded through WIC and
+ * scaled down to the size. */
+static HICON loadWindowIcon(Host *host, int size) {
+    if (size <= 0 || host->icon_path.empty()) return nullptr;
+    const std::wstring path = iconFilePath(host->icon_path);
+    HICON icon = reinterpret_cast<HICON>(LoadImageW(nullptr, path.c_str(), IMAGE_ICON, size, size, LR_LOADFROMFILE));
+    if (icon) return icon;
+    std::string bytes;
+    if (!readFileBytes(path, &bytes) || bytes.empty()) return nullptr;
+    const size_t side = static_cast<size_t>(size);
+    std::vector<uint8_t> rgba(side * side * 4);
+    size_t width = 0;
+    size_t height = 0;
+    if (native_sdk_windows_decode_image(reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size(), rgba.data(), rgba.size(), side * side, &width, &height) != 1) return nullptr;
+    return iconFromRgba(rgba.data(), static_cast<int>(width), static_cast<int>(height));
+}
+
+/* At creation, before the first show, and again on WM_DPICHANGED.
+ * WM_SETICON takes no ownership: the host's pair for this DPI outlives
+ * every window it is set on. */
+static void applyWindowIcon(Host *host, HWND hwnd) {
+    if (!host || !hwnd || host->icon_path.empty()) return;
+    const UINT dpi = dpiForWindow(hwnd);
+    WindowIconPair &icons = host->window_icons[dpi];
+    if (!icons.large_icon) icons.large_icon = loadWindowIcon(host, systemMetricForDpi(SM_CXICON, dpi));
+    if (!icons.small_icon) icons.small_icon = loadWindowIcon(host, systemMetricForDpi(SM_CXSMICON, dpi));
+    if (icons.large_icon) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icons.large_icon));
+    if (icons.small_icon) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icons.small_icon));
+}
+
+/* Only once no window can still draw them. */
+static void destroyWindowIcons(Host *host) {
+    for (auto &entry : host->window_icons) {
+        if (entry.second.large_icon) DestroyIcon(entry.second.large_icon);
+        if (entry.second.small_icon) DestroyIcon(entry.second.small_icon);
+    }
+    host->window_icons.clear();
 }
 
 /* Thickness of the top resize frame (sizing border + padded border) at
@@ -6831,11 +6953,12 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
              * user changed display scaling). Adopt the system-suggested
              * frame — it keeps the window the same LOGICAL size on the
              * new scale — then re-derive everything DPI-dependent: the
-             * hidden-titlebar band (its caption metrics scale with the
-             * monitor), each native child's physical frame, every gpu
-             * surface's logical-size/scale pairing so the runtime
-             * re-rasterizes at the new density, and each explicit child
-             * webview's physical frame. The SetWindowPos WM_SIZE
+             * window's icons (sized per DPI), the hidden-titlebar band
+             * (its caption metrics scale with the monitor), each native
+             * child's physical frame, every gpu surface's
+             * logical-size/scale pairing so the runtime re-rasterizes at
+             * the new density, and each explicit child webview's
+             * physical frame. The SetWindowPos WM_SIZE
              * re-emits kResize, which now carries the new scale. Only
              * per-monitor-DPI-aware processes receive this message. */
             if (host) {
@@ -6843,6 +6966,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 if (suggested) {
                     SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
                 }
+                applyWindowIcon(host, hwnd);
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd && windowUsesHiddenTitlebar(entry.second)) applyHiddenTitlebarFrame(entry.second);
                 }
@@ -7100,6 +7224,7 @@ static bool createNativeWindow(Host *host, Window &window) {
         return false;
     }
     applyMenusToWindow(host, window);
+    applyWindowIcon(host, hwnd);
     /* Before the first show, so a dark-scheme launch never flashes a
      * light caption. */
     applyStandardTitlebarColorScheme(window);
@@ -7572,6 +7697,7 @@ void native_sdk_windows_destroy(Host *host) {
         }
     }
     destroyAllWindows(host);
+    destroyWindowIcons(host);
     gpuSurfaceDestroyFrameWakeTimer(host);
     if (loop_window) DestroyWindow(loop_window);
     const bool com_initialized = host->com_initialized;
