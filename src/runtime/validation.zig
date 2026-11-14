@@ -85,6 +85,8 @@ pub fn validateNotificationOptions(options: platform.NotificationOptions) !void 
     try validateNotificationField(options.action_command, platform.max_notification_action_command_bytes);
     if ((options.action_label.len == 0) != (options.action_command.len == 0)) return error.InvalidNotificationOptions;
     if (options.action_command.len > 0) try validateCommandName(options.action_command);
+    try validateNotificationField(options.activation_command, platform.max_notification_activation_command_bytes);
+    if (options.activation_command.len > 0) try validateCommandName(options.activation_command);
 }
 
 pub fn validateClipboardData(data: platform.ClipboardData) !void {

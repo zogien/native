@@ -564,8 +564,13 @@ export interface NativeSdkNotificationOptions {
   body?: string;
   /** Paired with actionCommand; both must be present or both omitted. */
   actionLabel?: string;
-  /** Normal application command dispatched when the user activates the action. */
+  /** Normal application command dispatched when the user clicks the action button. */
   actionCommand?: string;
+  /**
+   * Normal application command dispatched when the user clicks the
+   * notification itself. Without it, a click only brings the app forward.
+   */
+  activationCommand?: string;
 }
 
 export interface NativeSdkClipboardReadOptions {

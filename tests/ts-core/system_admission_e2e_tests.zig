@@ -87,11 +87,11 @@ test "compiled system admission preserves exact filter accumulation across group
         try compare(reference.validateSaveDialogOptions(options, &buffer), policy.save(compiled, options, &buffer));
     };
 }
-test "compiled system admission preserves notification field order and paired action commands" {
+test "compiled system admission preserves notification field order, paired action commands and activation commands" {
     var bytes: [1025]u8 = @splat('x');
     for ([_]usize{ 0, 1, 127, 128, 129, 1023, 1024, 1025 }) |size| for ([_]bool{ false, true }) |nul| {
         if (size > 0) bytes[size - 1] = if (nul) 0 else 'x';
-        inline for (.{ "id", "title", "subtitle", "body", "action_label", "action_command" }) |member| {
+        inline for (.{ "id", "title", "subtitle", "body", "action_label", "action_command", "activation_command" }) |member| {
             var options = sdk.platform.NotificationOptions{ .title = "Notice" };
             @field(options, member) = bytes[0..size];
             try compare(reference.validateNotificationOptions(options), policy.notification(compiled, options));
@@ -103,6 +103,12 @@ test "compiled system admission preserves notification field order and paired ac
     for ([_][]const u8{ "", ".", "..", "white space", "valid.command", "a/b", "a\\b", "a\n", "a\r", "a\t", "a\x00b", "\xff" }) |value| for ([_][]const u8{ "", "Action", "a\x00" }) |caption| {
         const options = sdk.platform.NotificationOptions{ .title = "Notice", .action_label = caption, .action_command = value };
         try compare(reference.validateNotificationOptions(options), policy.notification(compiled, options));
+        // The activation command is admitted after every other field, so
+        // pair each name with the same action shapes to pin that order.
+        const activated = sdk.platform.NotificationOptions{ .title = "Notice", .action_label = caption, .action_command = if (caption.len > 0) "valid.command" else "", .activation_command = value };
+        try compare(reference.validateNotificationOptions(activated), policy.notification(compiled, activated));
+        const both_invalid = sdk.platform.NotificationOptions{ .title = "Notice", .action_label = "Action", .action_command = value, .activation_command = "a/b" };
+        try compare(reference.validateNotificationOptions(both_invalid), policy.notification(compiled, both_invalid));
     };
 }
 fn state(a: anytype, b: @TypeOf(a)) !void {
@@ -110,7 +116,7 @@ fn state(a: anytype, b: @TypeOf(a)) !void {
     const left = &a.null_platform;
     const right = &b.null_platform;
     inline for (.{ "open_dialog_count", "save_dialog_count", "message_dialog_count", "message_dialog_result" }) |member| try exact(@field(left, member), @field(right, member));
-    inline for (.{ "lastRevealedPath", "lastRecentDocumentPath", "lastClipboardMimeType", "lastClipboardData", "lastNotificationId", "lastNotificationTitle", "lastNotificationSubtitle", "lastNotificationBody", "lastNotificationActionLabel", "lastNotificationActionCommand" }) |name| try exact(@field(sdk.platform.NullPlatform, name)(left), @field(sdk.platform.NullPlatform, name)(right));
+    inline for (.{ "lastRevealedPath", "lastRecentDocumentPath", "lastClipboardMimeType", "lastClipboardData", "lastNotificationId", "lastNotificationTitle", "lastNotificationSubtitle", "lastNotificationBody", "lastNotificationActionLabel", "lastNotificationActionCommand", "lastNotificationActivationCommand" }) |name| try exact(@field(sdk.platform.NullPlatform, name)(left), @field(sdk.platform.NullPlatform, name)(right));
     try exact(left.clipboardWriteCount(), right.clipboardWriteCount());
     try exact(left.notificationCount(), right.notificationCount());
     try exact(left.notificationReplacementCount(), right.notificationReplacementCount());

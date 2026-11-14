@@ -52,8 +52,28 @@ test "notification effect rejects malformed and over-bound requests" {
     fx.showNotification(.{ .title = "Missing command", .action_label = "Open" });
     fx.showNotification(.{ .title = "Missing label", .action_command = "build.open" });
     fx.showNotification(.{ .title = "Invalid command", .action_label = "Open", .action_command = "../open" });
+    const long_command = [_]u8{'x'} ** (platform.max_notification_activation_command_bytes + 1);
+    fx.showNotification(.{ .title = "Invalid activation", .activation_command = "../open" });
+    fx.showNotification(.{ .title = "Long activation", .activation_command = &long_command });
+    fx.showNotification(.{ .title = "Valid action, invalid activation", .action_label = "Open", .action_command = "build.open", .activation_command = "bad\x00command" });
 
     try std.testing.expectEqual(@as(usize, 0), null_platform.notificationCount());
+}
+
+test "notification effect delivers an activation command without an action button" {
+    var null_platform = platform.NullPlatform.init(.{});
+    defer null_platform.deinit();
+    var host = null_platform.platform();
+    var fx = TestEffects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.bindServices(&host.services);
+
+    fx.showNotification(.{ .id = "inbox", .title = "New message", .activation_command = "inbox.open" });
+
+    try std.testing.expectEqual(@as(usize, 1), null_platform.notificationCount());
+    try std.testing.expectEqualStrings("inbox.open", null_platform.lastNotificationActivationCommand());
+    try std.testing.expectEqualStrings("", null_platform.lastNotificationActionLabel());
+    try std.testing.expectEqualStrings("inbox.open", null_platform.activateNotification("inbox", .body).?.notification_command.name);
 }
 
 test "notification effect is inert without a service and during fake execution or replay" {

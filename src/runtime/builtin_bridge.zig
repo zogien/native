@@ -42,6 +42,18 @@ const builtinBridgeErrorMessage = bridge_responses.builtinBridgeErrorMessage;
 const builtinBridgeErrorCode = bridge_responses.builtinBridgeErrorCode;
 const CommandEvent = runtime_api.CommandEvent;
 
+/// Whether a notification request binds an app command to a click on the
+/// notification or on its action button; either needs command permission.
+fn notificationCarriesCommand(payload: []const u8) bool {
+    for ([_][]const u8{ "actionCommand", "activationCommand" }) |field| {
+        var scratch: [@max(platform.max_notification_action_command_bytes, platform.max_notification_activation_command_bytes)]u8 = undefined;
+        var storage = json.StringStorage.init(&scratch);
+        const command = jsonStringField(payload, field, &storage) orelse "";
+        if (command.len > 0) return true;
+    }
+    return false;
+}
+
 fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
     if (value.len > buffer.len) return error.NoSpaceLeft;
     @memcpy(buffer[0..value.len], value);
@@ -231,11 +243,9 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         fn dispatchCompiledOsBridgeCommand(self: *Runtime, request: bridge.Request, origin: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {
             const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .os, request.command);
             if (plan.verb() == .os_showNotification) {
-                var action_scratch: [platform.max_notification_action_command_bytes]u8 = undefined;
-                var action_storage = json.StringStorage.init(&action_scratch);
-                const action_command = jsonStringField(request.payload, "actionCommand", &action_storage) orelse "";
-                const allowed = if (action_command.len > 0) Self.allowsBuiltinBridgeCommand(self, "native-sdk.command.invoke", origin, security.permission_command) else false;
-                const admission = builtin_coordination.notification(self.builtin_coordination_policy.?, action_command.len > 0, allowed);
+                const carries_command = notificationCarriesCommand(request.payload);
+                const allowed = if (carries_command) Self.allowsBuiltinBridgeCommand(self, "native-sdk.command.invoke", origin, security.permission_command) else false;
+                const admission = builtin_coordination.notification(self.builtin_coordination_policy.?, carries_command, allowed);
                 if (admission.notificationDenied()) return bridge.writeErrorResponse(response_buffer, request.id, .permission_denied, admission.message());
             }
             const result = switch (plan.verb()) {
@@ -417,10 +427,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         pub fn dispatchOsBridgeCommand(self: *Runtime, request: bridge.Request, origin: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {
             if (self.builtin_coordination_policy != null) return Self.dispatchCompiledOsBridgeCommand(self, request, origin, result_buffer, response_buffer);
             if (std.mem.eql(u8, request.command, "native-sdk.os.showNotification")) {
-                var action_scratch: [platform.max_notification_action_command_bytes]u8 = undefined;
-                var action_storage = json.StringStorage.init(&action_scratch);
-                const action_command = jsonStringField(request.payload, "actionCommand", &action_storage) orelse "";
-                if (action_command.len > 0 and
+                if (notificationCarriesCommand(request.payload) and
                     !Self.allowsBuiltinBridgeCommand(self, "native-sdk.command.invoke", origin, security.permission_command))
                 {
                     return bridge.writeErrorResponse(response_buffer, request.id, .permission_denied, "Notification actions require command invoke permission");

@@ -6,7 +6,7 @@ pub const Policy = *const fn ([]const u8, []u8) usize;
 pub const Mode = enum(u8) { field, open, save, message, notification, clipboard, filter };
 pub const Field = enum(u8) { reveal, recent, dialog_title, dialog_path, dialog_message, required_button, optional_button, filter_name, extension, notification_id, notification_title, notification_subtitle, notification_body, action_label, action_command, mime, clipboard_bytes, command };
 comptime {
-    if (platform.max_reveal_path_bytes != 4096 or platform.max_recent_document_path_bytes != 4096 or platform.max_dialog_path_bytes != 4096 or platform.max_dialog_title_bytes != 512 or platform.max_dialog_message_bytes != 4096 or platform.max_dialog_button_bytes != 128 or platform.max_dialog_filter_name_bytes != 256 or platform.max_dialog_filter_bytes != 1024 or platform.max_notification_id_bytes != 128 or platform.max_notification_title_bytes != 128 or platform.max_notification_subtitle_bytes != 128 or platform.max_notification_body_bytes != 1024 or platform.max_notification_action_label_bytes != 128 or platform.max_notification_action_command_bytes != 128 or platform.max_clipboard_mime_type_bytes != 128 or platform.max_clipboard_data_bytes != 65536 or reference.max_command_id_bytes != 128) @compileError("update system admission transport bounds");
+    if (platform.max_reveal_path_bytes != 4096 or platform.max_recent_document_path_bytes != 4096 or platform.max_dialog_path_bytes != 4096 or platform.max_dialog_title_bytes != 512 or platform.max_dialog_message_bytes != 4096 or platform.max_dialog_button_bytes != 128 or platform.max_dialog_filter_name_bytes != 256 or platform.max_dialog_filter_bytes != 1024 or platform.max_notification_id_bytes != 128 or platform.max_notification_title_bytes != 128 or platform.max_notification_subtitle_bytes != 128 or platform.max_notification_body_bytes != 1024 or platform.max_notification_action_label_bytes != 128 or platform.max_notification_action_command_bytes != 128 or platform.max_notification_activation_command_bytes != 128 or platform.max_clipboard_mime_type_bytes != 128 or platform.max_clipboard_data_bytes != 65536 or reference.max_command_id_bytes != 128) @compileError("update system admission transport bounds");
 }
 pub const Program = struct {
     status: u32,
@@ -125,7 +125,16 @@ pub fn notification(policy: ?Policy, options: platform.NotificationOptions) !voi
     const kinds = [_]Field{ .notification_id, .notification_title, .notification_subtitle, .notification_body, .action_label, .action_command };
     for (values, kinds, 0..) |value, kind, i| put(&bytes, 32 + i * 4, field(compiled, kind, value));
     put(&bytes, 56, field(compiled, .command, options.action_command));
+    put(&bytes, 60, activationVerdict(compiled, options.activation_command));
     try plan(compiled, &bytes).admit();
+}
+/// The descriptor has no length slot left for the optional activation
+/// command, so its two policy verdicts arrive folded into one: the command
+/// field's shape, then (when present) its command-name verdict.
+fn activationVerdict(policy: Policy, value: []const u8) u32 {
+    const shape = field(policy, .action_command, value);
+    if (shape != 0 or value.len == 0) return shape;
+    return field(policy, .command, value);
 }
 pub fn mime(policy: ?Policy, value: []const u8) !void {
     const compiled = policy orelse return reference.validateClipboardMimeType(value);

@@ -36,10 +36,14 @@ function nscvSystemAdmission(request: Uint8Array): Uint8Array {
       for (let i = 0; i < 6 && status === 0; i++) status = word(32 + i * 4);
     } else if (mode === 4) {
       if (word(56) > 11) throw new Error("invalid notification command verdict");
+      if (word(60) > 11) throw new Error("invalid notification activation verdict");
       if (empty(8)) status = 7;
       for (let i = 0; i < 6 && status === 0; i++) status = word(32 + i * 4);
       if (status === 0 && empty(16) !== empty(24)) status = 7;
       if (status === 0 && !empty(24)) status = word(56);
+      // The optional activation command arrives as one folded verdict:
+      // its field shape, then its command-name admission when present.
+      if (status === 0) status = word(60);
     } else if (mode === 5) status = word(32) || (over(8, 65536) ? 11 : 0);
     else {
       const previous = word(8);
