@@ -2329,6 +2329,10 @@ fn closeWebView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: [
 
 fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOptions) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    // This host does not bind notification clicks through
+    // `notification_records` yet; refuse a body-click command instead of
+    // showing a notification whose click would silently do nothing.
+    if (options.activation_command.len > 0) return error.UnsupportedService;
     if (native_sdk_appkit_show_notification(
         self.host,
         options.title.ptr,

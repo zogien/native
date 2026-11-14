@@ -12,6 +12,7 @@ const TestEffects = effects_mod.Effects(Msg);
 
 test "notification effect delivers validated fields to the platform service" {
     var null_platform = platform.NullPlatform.init(.{});
+    defer null_platform.deinit();
     var host = null_platform.platform();
     var fx = TestEffects.init(std.testing.allocator);
     defer fx.deinit();

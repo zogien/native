@@ -1440,6 +1440,10 @@ fn revealPath(context: ?*anyopaque, path: []const u8) anyerror!void {
 
 fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOptions) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    // This host does not bind notification clicks through
+    // `notification_records` yet; refuse a body-click command instead of
+    // showing a notification whose click would silently do nothing.
+    if (options.activation_command.len > 0) return error.UnsupportedService;
     if (self.web_engine != .system) return error.UnsupportedService;
     if (native_sdk_gtk_show_notification(
         self.host,
