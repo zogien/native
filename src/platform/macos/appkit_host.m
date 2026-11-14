@@ -1,4 +1,5 @@
 #import "appkit_host.h"
+#import "user_notifications.h"
 #include "../webview_window_drag.h"
 
 #import <AppKit/AppKit.h>
@@ -837,7 +838,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @implementation NativeSdkDialog
 @end
 
-@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, NSMenuDelegate, NSUserNotificationCenterDelegate>
+@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, NSMenuDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NativeSdkWindowDelegate *delegate;
@@ -905,12 +906,9 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
  * order they finished, awaiting poll. */
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkDialog *> *dialogs;
 @property(nonatomic, strong) NSMutableArray<NativeSdkDialog *> *finishedDialogs;
-/* Notification userInfo persists with the delivered notification, so it
- * carries only a per-process token. Commands remain in this live host;
- * stale notifications from an earlier execution cannot dispatch into a
- * later one. The identifier map invalidates same-id replacements. */
-@property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *notificationActionCommands;
-@property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *notificationActionTokensByIdentifier;
+/* Created with the first notification; it connects to the notification
+ * center only then. */
+@property(nonatomic, strong) NativeSdkUserNotifications *userNotifications;
 /* The app's single audio player and its position-tick timer. One player
  * is the whole surface: a music app plays one track at a time, and a
  * second concurrent stream would be mixer design the platform seam has
@@ -1185,8 +1183,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)stopApplicationActivationObservers;
 - (void)applicationDidBecomeActive:(NSNotification *)notification;
 - (void)applicationDidResignActive:(NSNotification *)notification;
-- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification;
-- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification;
+- (NativeSdkUserNotifications *)ensureUserNotifications;
 - (void)startAppearanceObservers;
 - (void)stopAppearanceObservers;
 - (void)emitAppearanceChanged;
@@ -8233,8 +8230,6 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.appTimers = [[NSMutableDictionary alloc] init];
     self.dialogs = [[NSMutableDictionary alloc] init];
     self.finishedDialogs = [[NSMutableArray alloc] init];
-    self.notificationActionCommands = [[NSMutableDictionary alloc] init];
-    self.notificationActionTokensByIdentifier = [[NSMutableDictionary alloc] init];
     self.statusItems = [[NSMutableDictionary alloc] init];
     self.allowedNavigationOrigins = @[ @"zero://app", @"zero://inline" ];
     self.allowedExternalURLs = @[];
@@ -8500,8 +8495,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 }
 
 - (void)dealloc {
-    NSUserNotificationCenter *notificationCenter = [NSUserNotificationCenter defaultUserNotificationCenter];
-    if (notificationCenter.delegate == self) notificationCenter.delegate = nil;
+    [self.userNotifications detach];
     [self invalidateAppTimers];
     [self.updateFeedLimitTimer invalidate];
     [self.updateDownloadLimitTimer invalidate];
@@ -10881,36 +10875,23 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_APP_DEACTIVATED }];
 }
 
-- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification {
-    (void)center;
-    (void)notification;
-    return YES;
-}
-
-- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification {
-    NSInteger activation = notification.activationType;
-    if (activation != NSUserNotificationActivationTypeActionButtonClicked) return;
-    NSString *token = [notification.userInfo[@"native-sdk-action-token"] isKindOfClass:[NSString class]]
-        ? notification.userInfo[@"native-sdk-action-token"] : @"";
-    NSString *command = token.length > 0 ? self.notificationActionCommands[token] : @"";
-    if (command.length == 0) {
-        [center removeDeliveredNotification:notification];
-        return;
-    }
-    NSString *identifier = notification.identifier ?: @"";
-    if (identifier.length > 0 &&
-        [self.notificationActionTokensByIdentifier[identifier] isEqualToString:token]) {
-        [self.notificationActionTokensByIdentifier removeObjectForKey:identifier];
-    }
-    [self.notificationActionCommands removeObjectForKey:token];
-    const char *commandBytes = command.UTF8String ?: "";
-    [self emitEvent:(native_sdk_appkit_event_t){
-        .kind = NATIVE_SDK_APPKIT_EVENT_NOTIFICATION_COMMAND,
-        .window_id = [self activeCommandWindowId],
-        .command_name = commandBytes,
-        .command_name_len = [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
-    }];
-    [center removeDeliveredNotification:notification];
+- (NativeSdkUserNotifications *)ensureUserNotifications {
+    if (self.userNotifications) return self.userNotifications;
+    NativeSdkUserNotifications *notifications = [[NativeSdkUserNotifications alloc] init];
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    notifications.activationHandler = ^(NSString *token, int activation) {
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf emitEvent:(native_sdk_appkit_event_t){
+            .kind = NATIVE_SDK_APPKIT_EVENT_NOTIFICATION_ACTIVATION,
+            .window_id = [strongSelf activeCommandWindowId],
+            .command_name = token.UTF8String ?: "",
+            .command_name_len = [token lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+            .notification_activation = activation,
+        }];
+    };
+    self.userNotifications = notifications;
+    return notifications;
 }
 
 - (void)startAppearanceObservers {
@@ -14254,43 +14235,20 @@ int native_sdk_appkit_clipboard_write_data(native_sdk_appkit_host_t *host, const
     return [pasteboard setData:data forType:type] ? 1 : 0;
 }
 
-int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len) {
-    if (!host || ((action_label_len == 0) != (action_command_len == 0))) return 0;
+int native_sdk_appkit_notifications_available(void) {
+    return [NativeSdkUserNotifications available] ? 1 : 0;
+}
+
+int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *token, size_t token_len) {
+    if (!host) return 0;
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *titleString = title ? [[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] : @"";
-    if (titleString.length == 0) return 0;
     NSString *subtitleString = subtitle ? [[NSString alloc] initWithBytes:subtitle length:subtitle_len encoding:NSUTF8StringEncoding] : @"";
     NSString *bodyString = body ? [[NSString alloc] initWithBytes:body length:body_len encoding:NSUTF8StringEncoding] : @"";
     NSString *identifier = notification_id ? [[NSString alloc] initWithBytes:notification_id length:notification_id_len encoding:NSUTF8StringEncoding] : @"";
     NSString *actionLabel = action_label ? [[NSString alloc] initWithBytes:action_label length:action_label_len encoding:NSUTF8StringEncoding] : @"";
-    NSString *actionCommand = action_command ? [[NSString alloc] initWithBytes:action_command length:action_command_len encoding:NSUTF8StringEncoding] : @"";
-    if (identifier.length > 0) {
-        NSString *oldToken = object.notificationActionTokensByIdentifier[identifier];
-        if (oldToken.length > 0) [object.notificationActionCommands removeObjectForKey:oldToken];
-        [object.notificationActionTokensByIdentifier removeObjectForKey:identifier];
-    }
-    NSUserNotification *notification = [[NSUserNotification alloc] init];
-    notification.title = titleString;
-    if (subtitleString.length > 0) notification.subtitle = subtitleString;
-    if (bodyString.length > 0) notification.informativeText = bodyString;
-    if (identifier.length > 0) notification.identifier = identifier;
-    if (actionCommand.length > 0) {
-        NSString *actionToken = [NSUUID UUID].UUIDString;
-        object.notificationActionCommands[actionToken] = actionCommand;
-        if (identifier.length > 0) object.notificationActionTokensByIdentifier[identifier] = actionToken;
-        notification.hasActionButton = YES;
-        notification.actionButtonTitle = actionLabel;
-        notification.userInfo = @{ @"native-sdk-action-token": actionToken };
-    }
-    NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
-    center.delegate = object;
-    if (identifier.length > 0) {
-        for (NSUserNotification *delivered in center.deliveredNotifications) {
-            if ([delivered.identifier isEqualToString:identifier]) [center removeDeliveredNotification:delivered];
-        }
-    }
-    [center deliverNotification:notification];
-    return 1;
+    NSString *tokenString = token ? [[NSString alloc] initWithBytes:token length:token_len encoding:NSUTF8StringEncoding] : @"";
+    return [[object ensureUserNotifications] showTitle:titleString subtitle:subtitleString body:bodyString identifier:identifier actionLabel:actionLabel token:tokenString] ? 1 : 0;
 }
 
 int native_sdk_appkit_open_external_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len) {

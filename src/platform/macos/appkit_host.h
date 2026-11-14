@@ -35,7 +35,10 @@ typedef enum {
     NATIVE_SDK_APPKIT_EVENT_VIDEO = 21,
     NATIVE_SDK_APPKIT_EVENT_VIEW_FOCUSED = 22,
     NATIVE_SDK_APPKIT_EVENT_TRAY_COMMAND = 23,
-    NATIVE_SDK_APPKIT_EVENT_NOTIFICATION_COMMAND = 24,
+    /* A notification click: command_name carries the notification's
+     * record token and notification_activation the click kind
+     * (0 the notification itself, 1 its action button). */
+    NATIVE_SDK_APPKIT_EVENT_NOTIFICATION_ACTIVATION = 24,
 } native_sdk_appkit_event_kind_t;
 
 /* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
@@ -362,6 +365,8 @@ typedef struct {
      * event kind. */
     uint64_t video_width;
     uint64_t video_height;
+    /* NOTIFICATION_ACTIVATION: 0 body click, 1 action button. */
+    int notification_activation;
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);
@@ -689,7 +694,12 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
 void native_sdk_appkit_clipboard_write(native_sdk_appkit_host_t *host, const char *text, size_t text_len);
 size_t native_sdk_appkit_clipboard_read_data(native_sdk_appkit_host_t *host, const char *mime_type, size_t mime_type_len, char *buffer, size_t buffer_len);
 int native_sdk_appkit_clipboard_write_data(native_sdk_appkit_host_t *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
-int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len);
+/* 1 when this process can show notifications: it runs from an app bundle
+ * with a bundle identifier. */
+int native_sdk_appkit_notifications_available(void);
+/* `token` is the notification's record token, empty for a notification
+ * without commands; a button needs one. */
+int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *token, size_t token_len);
 int native_sdk_appkit_open_external_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len);
 int native_sdk_appkit_reveal_path(native_sdk_appkit_host_t *host, const char *path, size_t path_len);
 int native_sdk_appkit_add_recent_document(native_sdk_appkit_host_t *host, const char *path, size_t path_len);
