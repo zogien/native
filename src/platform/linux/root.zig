@@ -2052,6 +2052,8 @@ test "linux notifications carry only process-scoped record tokens" {
         "char *body_target = g_strconcat(\"body:\", token_copy ? token_copy : \"\", NULL);",
         "char *action_target = g_strconcat(\"action:\", token_copy, NULL);",
         ".kind = NATIVE_SDK_GTK_EVENT_NOTIFICATION_ACTIVATION,",
+        "native_sdk_choose_notification_backend(host->bundle_id);",
+        "g_setenv(\"GNOTIFICATION_BACKEND\", \"freedesktop\", FALSE);",
     }) |pattern| try std.testing.expect(std.mem.indexOf(u8, host_source, pattern) != null);
     for ([_][]const u8{ "g_variant_new_string(command_copy)", "notification_actions", "action_command" }) |pattern| {
         try std.testing.expect(std.mem.indexOf(u8, host_source, pattern) == null);

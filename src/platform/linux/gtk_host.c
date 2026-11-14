@@ -3416,6 +3416,44 @@ static void on_activate(GtkApplication *app, gpointer data) {
     host->frame_timer = g_timeout_add(16, native_sdk_frame_tick, host);
 }
 
+/* GLib picks GNOME Shell's org.gtk.Notifications whenever that name has
+ * an owner, and the Shell rejects a notification whose app id has no
+ * installed <app-id>.desktop (INVALID_APP); GLib sends it without reading
+ * the reply, so the notification is dropped silently. That is every
+ * development run and every package not installed into an XDG data dir.
+ * Without that desktop file, use the freedesktop server instead (GNOME
+ * Shell runs one too, and it needs no desktop file). This is GLib's own
+ * GNOTIFICATION_BACKEND switch: a value the user set wins, and sandboxed
+ * apps keep the portal. GLib reads it when the app sends its first
+ * notification; it is set here, before GTK starts its threads.
+ *
+ * The lookup checks `applications/<app-id>.desktop` in the XDG data dirs
+ * directly: that is where packages install it, and GDesktopAppInfo's
+ * header lives in gio-unix-2.0, which the app build does not put on the
+ * include path. */
+static int native_sdk_desktop_entry_installed(const char *desktop_id) {
+    char *path = g_build_filename(g_get_user_data_dir(), "applications", desktop_id, NULL);
+    int found = g_file_test(path, G_FILE_TEST_IS_REGULAR);
+    g_free(path);
+    for (const char *const *dir = g_get_system_data_dirs(); !found && dir && *dir; dir++) {
+        path = g_build_filename(*dir, "applications", desktop_id, NULL);
+        found = g_file_test(path, G_FILE_TEST_IS_REGULAR);
+        g_free(path);
+    }
+    return found;
+}
+
+static void native_sdk_choose_notification_backend(const char *app_id) {
+    if (!app_id || app_id[0] == '\0') return;
+    if (g_getenv("GNOTIFICATION_BACKEND")) return;
+    if (g_file_test("/.flatpak-info", G_FILE_TEST_EXISTS) || g_getenv("SNAP")) return;
+    char *desktop_id = g_strconcat(app_id, ".desktop", NULL);
+    const int installed = native_sdk_desktop_entry_installed(desktop_id);
+    g_free(desktop_id);
+    if (installed) return;
+    g_setenv("GNOTIFICATION_BACKEND", "freedesktop", FALSE);
+}
+
 native_sdk_gtk_host_t *native_sdk_gtk_create(
     const char *app_name, size_t app_name_len,
     const char *window_title, size_t window_title_len,
@@ -3455,6 +3493,7 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     host->allowed_external_urls = NULL;
     host->allowed_external_urls_count = 0;
 
+    native_sdk_choose_notification_backend(host->bundle_id);
     host->app = gtk_application_new(host->bundle_id, G_APPLICATION_DEFAULT_FLAGS);
 
     return host;
