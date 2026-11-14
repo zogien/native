@@ -616,7 +616,7 @@ Files ride the same channel without smuggling an `Io` handle from `main` into `u
 .saved => |result| model.noteSaved(result.outcome),
 ```
 
-Desktop notifications use the same bounded platform-services facade but are intentionally fire-and-forget: once the host accepts a request, the OS can still suppress it through Focus / Do Not Disturb or the user's notification settings, so a success Msg would over-promise. A nonempty `id` replaces an earlier notification with that id. Paired `actionLabel` / `actionCommand` fields add an action whose activation returns through the ordinary application command path while the process is running. Return `Cmd.showNotification` from a TypeScript core or call `fx.showNotification` from a Zig `update_fx` arm; invalid or over-bound fields, unpaired action fields, invalid command names, and unavailable services fail closed. The fake executor and session replay never display one; the null test platform records and can activate one deterministically.
+Desktop notifications use the same bounded platform-services facade but are intentionally fire-and-forget: once the host accepts a request, the OS can still suppress it through Focus / Do Not Disturb or the user's notification settings, so a success Msg would over-promise. A nonempty `id` replaces an earlier notification with that id. Paired `actionLabel` / `actionCommand` fields add an action button, and `activationCommand` binds a click on the notification itself; either click returns through the ordinary application command path while the process is running, and consumes the notification so it dispatches at most once. Return `Cmd.showNotification` from a TypeScript core or call `fx.showNotification` from a Zig `update_fx` arm; invalid or over-bound fields, unpaired action fields, invalid command names, and unavailable services fail closed. The fake executor and session replay never display one; the null test platform records and can activate one deterministically.
 
 <CodeToggle>
 
@@ -629,6 +629,7 @@ case "build_finished":
     body: asciiBytes("All checks passed."),
     actionLabel: asciiBytes("Open results"),
     actionCommand: asciiBytes("build.open-results"),
+    activationCommand: asciiBytes("build.show-summary"),
   })];
 ```
 
@@ -640,6 +641,7 @@ case "build_finished":
     .body = "All checks passed.",
     .action_label = "Open results",
     .action_command = "build.open-results",
+    .activation_command = "build.show-summary",
 }),
 ```
 
