@@ -220,7 +220,7 @@ Linux packaging creates an install tree:
 
 - `bin/<name>` -- the executable
 - `resources/assets/` -- the app's asset tree, mirrored at its app-relative path (`resources/dist/` for frontend assets)
-- `share/applications/<name>.desktop` -- desktop entry file
+- `share/applications/<bundle-id>.desktop` -- desktop entry file, named after the app's bundle id because GNOME looks the running app up by that id (notifications are rejected without it). Packages built before this release named it `<name>.desktop`; remove that file when you install over one.
 - `share/icons/hicolor/.../<name>.png` -- icons at standard sizes
 - `share/mime/packages/<name>.xml` -- shared MIME metadata when file associations are configured
 
