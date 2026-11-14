@@ -114,6 +114,12 @@ pub const Records = struct {
         return if (command.len == 0) null else command;
     }
 
+    /// Drop a binding whose notification the host failed to show, so a
+    /// refused request leaves nothing behind.
+    pub fn discard(self: *Records, token: []const u8) void {
+        if (self.find(token)) |entry| entry.* = .{};
+    }
+
     /// The token bound to the live notification with this id, if any.
     pub fn tokenFor(self: *const Records, id: []const u8) ?Token {
         if (id.len == 0) return null;
@@ -251,6 +257,16 @@ test "unknown and malformed tokens dispatch nothing" {
     try testing.expect(records.activate(&foreign, .body) == null);
     for (token) |digit| try testing.expect(std.ascii.isDigit(digit) or (digit >= 'a' and digit <= 'f'));
     try testing.expectEqualStrings("app.open", records.activate(&token, .body).?.name());
+}
+
+test "a discarded binding dispatches nothing and frees its slot" {
+    var records: Records = .{};
+    defer records.deinit(testing.allocator);
+    const token = (try records.bind(testing.allocator, sample("build", "", "build.open"))).?;
+    records.discard(&token);
+    try testing.expectEqual(@as(usize, 0), records.count());
+    try testing.expect(records.tokenFor("build") == null);
+    try testing.expect(records.activate(&token, .action) == null);
 }
 
 test "over-bound fields are refused without touching the table" {
