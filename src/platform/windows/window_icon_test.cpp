@@ -3,9 +3,10 @@
  *   window-icon-test <icon_path> icon   the file loads
  *   window-icon-test <icon_path> none   the file is missing or unreadable
  *
- * build.zig runs it with a PNG, an .ico, a missing path and a file that
- * is not an image. Each step checks the icons Windows draws for Alt+Tab
- * and the taskbar preview (WM_GETICON):
+ * build.zig runs it with a PNG, an .ico, a missing path, a file that is
+ * not an image, and a relative path both from the working directory and
+ * from a packaged layout (bin\ beside resources\). Each step checks the
+ * icons Windows draws for Alt+Tab and the taskbar preview (WM_GETICON):
  *
  *  startup    The startup window has icon_path at its DPI's large and
  *             small sizes, or no icon when the file cannot be loaded.

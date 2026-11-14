@@ -2882,15 +2882,29 @@ static HICON iconFromRgba(const uint8_t *rgba, int width, int height) {
     return icon;
 }
 
+/* A relative icon_path names a file of the packaged asset tree when the
+ * app runs from a package, as WebView asset roots do (assetRootPath), and
+ * stays relative to the working directory in development. */
+static std::wstring iconFilePath(const std::string &icon_path) {
+    std::wstring path = widen(icon_path);
+    const bool absolute = !icon_path.empty() && (icon_path[0] == '\\' || icon_path[0] == '/' || (icon_path.size() > 1 && icon_path[1] == ':'));
+    if (absolute) return path;
+    const std::wstring &resources = packagedResourcesDirectory();
+    if (resources.empty()) return path;
+    std::wstring relative = path;
+    std::replace(relative.begin(), relative.end(), L'/', L'\\');
+    const std::wstring candidate = resources + L"\\" + relative;
+    return regularFileExists(candidate) ? candidate : path;
+}
+
 /* icon_path at exactly `size` pixels, owned by the host (never LR_SHARED:
  * DestroyIcon leaves a shared icon alive). An .ico goes through
  * LoadImageW, which picks the file's best image for the size; any other
  * file (the PNG the SDK passes by default) is decoded through WIC and
- * scaled down to the size. A relative path resolves against the working
- * directory, as on the other hosts. */
+ * scaled down to the size. */
 static HICON loadWindowIcon(Host *host, int size) {
     if (size <= 0 || host->icon_path.empty()) return nullptr;
-    const std::wstring path = widen(host->icon_path);
+    const std::wstring path = iconFilePath(host->icon_path);
     HICON icon = reinterpret_cast<HICON>(LoadImageW(nullptr, path.c_str(), IMAGE_ICON, size, size, LR_LOADFROMFILE));
     if (icon) return icon;
     std::string bytes;
