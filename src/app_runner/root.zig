@@ -55,6 +55,8 @@ pub const RunOptions = struct {
     // exists at this path, unbundled macOS runs render the toolkit's
     // embedded default icon — the same fallback `native package` ships —
     // so apps without a custom icon carry no committed copy to go stale.
+    // On Windows the same file becomes every window's icon (Alt+Tab, the
+    // taskbar preview, the caption); a PNG or an .ico works there.
     icon_path: []const u8 = "assets/icon.png",
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     restore_state: bool = true,
