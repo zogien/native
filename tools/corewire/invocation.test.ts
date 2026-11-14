@@ -21,6 +21,9 @@ const corewire = path.resolve(process.argv[2]);
 // by recovering each complete earlier facade after removing those blocks.
 // Exact subprocess and cancellation records are independently audited:
 // removing only their encoder cases recovers every preceding complete facade.
+// The activation-command notification record (0x48) is audited the same
+// way: removing only its encoder block recovers every preceding complete
+// facade, and profile output is byte-identical with and without it.
 const goldens = JSON.parse(fs.readFileSync(new URL("invocation_goldens.json", import.meta.url), "utf8"));
 for (const item of invocationCases()) test("invocation: " + item.name, () => {
   assert.ok(goldens[item.name], "missing independent native reference");

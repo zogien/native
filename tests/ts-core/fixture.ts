@@ -518,6 +518,7 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
         body: asciiBytes("TS core notification"),
         actionLabel: asciiBytes("Pause polling"),
         actionCommand: asciiBytes("core.toggle"),
+        activationCommand: asciiBytes("core.toggle"),
       })];
     case "store_put":
       return [model, Cmd.store.set("fixture/one", model.status, { key: "store", ok: "wrote", err: "failed" })];

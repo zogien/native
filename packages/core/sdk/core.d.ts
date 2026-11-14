@@ -414,6 +414,7 @@ export interface NotificationSpec {
     readonly body?: Uint8Array;
     readonly actionLabel?: Uint8Array;
     readonly actionCommand?: Uint8Array;
+    readonly activationCommand?: Uint8Array;
 }
 export type LocalTimeStyle = "date" | "time" | "datetime";
 export type KeyChord = GlobalShortcutBinding;
@@ -666,6 +667,7 @@ export type Cmd<M extends Msgish> = {
     readonly body: Uint8Array;
     readonly actionLabel: Uint8Array;
     readonly actionCommand: Uint8Array;
+    readonly activationCommand: Uint8Array;
 } | {
     readonly op: "delay";
     readonly key: string;
