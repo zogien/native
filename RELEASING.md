@@ -15,12 +15,15 @@ included in the CLI payload and is not published separately by this fork.
    existing shared-version convention also updates the bundled core and the
    example/test app pins. Platform names and the CLI lockfile are checked by
    `npm --prefix packages/native-sdk run version:check`.
-3. Run `npm --prefix packages/native-sdk run scripts:check` and confirm CI is
-   green on the release commit. Package verification (`package:check`) runs in
-   the release workflow, which builds every target; run it locally only when
-   changing packaging.
-4. Open a pull request with the release configuration and merge it into `main`.
-5. Create an annotated tag on the merged commit,
+3. Run `npm --prefix packages/native-sdk run scripts:check`. Package
+   verification (`package:check`) runs in the release workflow, which builds
+   every target; run it locally only when changing packaging.
+4. Commit the version change directly to `main` as
+   `chore: bump version to X.Y.Z-fork.N` and push `main`. A release commit
+   carries only the version change, so it skips the pull request that other
+   changes go through: start from a `main` whose CI is green, and wait for CI to
+   pass on the release commit before tagging.
+5. Create an annotated tag on the release commit,
    `git tag -a fork/vX.Y.Z-fork.N -m "Release X.Y.Z-fork.N"`, and push only
    that tag to `origin`. Ordinary `main` pushes do not publish. Never overwrite
    a published version or move a published tag.
