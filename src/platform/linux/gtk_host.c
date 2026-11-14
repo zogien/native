@@ -5060,8 +5060,8 @@ static void native_sdk_notification_action_activated(GSimpleAction *action, GVar
     }
     if (kind == 0) {
         native_sdk_gtk_window_t *main_window = native_sdk_find_window(host, 1);
-        if (main_window && main_window->gtk_window && gtk_widget_get_visible(main_window->gtk_window)) {
-            gtk_window_present(GTK_WINDOW(main_window->gtk_window));
+        if (main_window && main_window->gtk_window && gtk_widget_get_visible(GTK_WIDGET(main_window->gtk_window))) {
+            gtk_window_present(main_window->gtk_window);
         }
     }
     const size_t token_len = strlen(token);
