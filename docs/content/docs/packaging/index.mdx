@@ -220,7 +220,7 @@ Linux packaging creates an install tree:
 
 - `bin/<name>` -- the executable
 - `resources/assets/` -- the app's asset tree, mirrored at its app-relative path (`resources/dist/` for frontend assets)
-- `share/applications/<name>.desktop` -- desktop entry file
+- `share/applications/<bundle-id>.desktop` -- desktop entry file, named after the app's bundle id because GNOME looks the running app up by that id (notifications are rejected without it). Packages built before this release named it `<name>.desktop`; remove that file when you install over one.
 - `share/icons/hicolor/.../<name>.png` -- icons at standard sizes
 - `share/mime/packages/<name>.xml` -- shared MIME metadata when file associations are configured
 
@@ -283,7 +283,7 @@ Running a setup program again reinstalls or replaces the installed version; the 
 
 An installed app can update itself: add `--update-archive` to also write the archive the [updater](/docs/updates) downloads, the same install image as the setup program's.
 
-Uninstall from Settings > Apps, or run `<name>.exe --uninstall` (`--silent` skips the confirmation). It removes the shortcut, the registry entries and the install folder. The app's data under `%LOCALAPPDATA%\<bundle-id>` stays.
+Uninstall from Settings > Apps, or run `<name>.exe --uninstall` (`--silent` skips the confirmation). It removes the shortcut, the registry entries (including the notification identity the app registers under `HKCU\Software\Classes\AppUserModelId\<bundle-id>`) and the install folder. The app's data under `%LOCALAPPDATA%\<bundle-id>` stays.
 
 The SDK does not sign the setup program or the launcher. Sign `bin\<name>.exe` before packaging and the setup program after it; the launcher the setup program installs stays unsigned. The installer installs per user only; a per-machine install under Program Files is not supported.
 

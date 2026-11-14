@@ -35,7 +35,9 @@ const GtkEventKind = enum(c_int) {
     audio = 17,
     context_menu_action = 18,
     view_focused = 19,
-    notification_command = 20,
+    /// A notification click: `command_name` carries the record token
+    /// and `notification_activation` the click kind.
+    notification_activation = 20,
 };
 
 const GtkEvent = extern struct {
@@ -102,6 +104,9 @@ const GtkEvent = extern struct {
     /// without a selection).
     widget_id: u64,
     menu_item_id: u32,
+    /// notification_activation: 0 for a click on the notification
+    /// itself, 1 for its action button (`notification_records.Activation`).
+    notification_activation: c_int,
 };
 
 const GtkCallback = *const fn (context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void;
@@ -157,7 +162,7 @@ extern fn native_sdk_gtk_set_webview_layer(host: *GtkHost, window_id: u64, label
 extern fn native_sdk_gtk_close_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_gtk_open_external_url(host: *GtkHost, url: [*]const u8, url_len: usize) c_int;
 extern fn native_sdk_gtk_reveal_path(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
-extern fn native_sdk_gtk_show_notification(host: *GtkHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, action_command: [*]const u8, action_command_len: usize) c_int;
+extern fn native_sdk_gtk_show_notification(host: *GtkHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, token: [*]const u8, token_len: usize) c_int;
 extern fn native_sdk_gtk_add_recent_document(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
 extern fn native_sdk_gtk_clear_recent_documents(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_credentials_available(host: *GtkHost) c_int;
@@ -289,6 +294,9 @@ pub const LinuxPlatform = struct {
     /// `createWithOptions` and retire it through `destroy`, the
     /// latch-gated free.
     channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Commands of the notifications this process showed, keyed by the
+    /// opaque token each notification carries in its action targets.
+    notification_records: platform_mod.notification_records.Records = .{},
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!LinuxPlatform {
         return initWithEngine(title, size, .system);
@@ -362,6 +370,7 @@ pub const LinuxPlatform = struct {
             return;
         }
         native_sdk_gtk_destroy(self.host);
+        self.notification_records.deinit(std.heap.page_allocator);
     }
 
     pub fn platform(self: *LinuxPlatform) platform_mod.Platform {
@@ -625,10 +634,12 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
         } }),
-        .notification_command => state.emit(.{ .notification_command = .{
-            .name = event.command_name[0..event.command_name_len],
-            .window_id = event.window_id,
-        } }),
+        .notification_activation => {
+            const owner = state.self orelse return;
+            const kind: platform_mod.notification_records.Activation = if (event.notification_activation == 1) .action else .body;
+            const command = owner.notification_records.activate(event.command_name[0..event.command_name_len], kind) orelse return;
+            state.emit(.{ .notification_command = .{ .name = command.name(), .window_id = event.window_id } });
+        },
         .files_dropped => {
             var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
             const paths = platform_mod.splitDropPaths(event.drop_paths[0..event.drop_paths_len], paths_buffer[0..]);
@@ -1441,6 +1452,11 @@ fn revealPath(context: ?*anyopaque, path: []const u8) anyerror!void {
 fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOptions) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
+    // The notification carries only the token; the commands stay in this
+    // process, so a click on a notification from an earlier run (the shell
+    // may D-Bus-activate a new instance for it) dispatches nothing.
+    const token = try self.notification_records.bind(std.heap.page_allocator, options);
+    const token_bytes: []const u8 = if (token) |*value| value else "";
     if (native_sdk_gtk_show_notification(
         self.host,
         options.title.ptr,
@@ -1453,9 +1469,12 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
         options.id.len,
         options.action_label.ptr,
         options.action_label.len,
-        options.action_command.ptr,
-        options.action_command.len,
-    ) == 0) return error.UnsupportedService;
+        token_bytes.ptr,
+        token_bytes.len,
+    ) == 0) {
+        if (token) |*value| self.notification_records.discard(value);
+        return error.UnsupportedService;
+    }
 }
 
 fn addRecentDocument(context: ?*anyopaque, path: []const u8) anyerror!void {
@@ -2023,38 +2042,22 @@ test "linux message dialogs construct alerts with a non-null format string" {
     ) == null);
 }
 
-test "linux notification actions use process-scoped opaque tokens" {
+test "linux notifications carry only process-scoped record tokens" {
     const host_source = @embedFile("gtk_host.c");
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        host_source,
-        "char *action_token = native_sdk_random_notification_action_token();",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        host_source,
-        "open(\"/dev/urandom\", O_RDONLY | O_CLOEXEC)",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        host_source,
-        "g_variant_new_string(action_token)",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        host_source,
-        "native_sdk_take_notification_action_command(host, token, token_len)",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        host_source,
-        "g_hash_table_remove(host->notification_actions, token);",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        host_source,
-        "g_variant_new_string(command_copy)",
-    ) == null);
+    // The body click and the action button both target the one app
+    // action with a token, never a command name; the commands stay in
+    // `notification_records`.
+    for ([_][]const u8{
+        "g_notification_set_default_action_and_target_value(notification,",
+        "char *body_target = g_strconcat(\"body:\", token_copy ? token_copy : \"\", NULL);",
+        "char *action_target = g_strconcat(\"action:\", token_copy, NULL);",
+        ".kind = NATIVE_SDK_GTK_EVENT_NOTIFICATION_ACTIVATION,",
+        "native_sdk_choose_notification_backend(host->bundle_id);",
+        "g_setenv(\"GNOTIFICATION_BACKEND\", \"freedesktop\", FALSE);",
+    }) |pattern| try std.testing.expect(std.mem.indexOf(u8, host_source, pattern) != null);
+    for ([_][]const u8{ "g_variant_new_string(command_copy)", "notification_actions", "action_command" }) |pattern| {
+        try std.testing.expect(std.mem.indexOf(u8, host_source, pattern) == null);
+    }
 }
 
 test "linux transparent windows clear the main webview background" {

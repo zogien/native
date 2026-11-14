@@ -257,6 +257,7 @@ pub const max_notification_body_bytes: usize = 1024;
 pub const max_notification_id_bytes: usize = 128;
 pub const max_notification_action_label_bytes: usize = 128;
 pub const max_notification_action_command_bytes: usize = 128;
+pub const max_notification_activation_command_bytes: usize = 128;
 pub const max_clipboard_mime_type_bytes: usize = 128;
 pub const max_clipboard_data_bytes: usize = 65536;
 pub const max_credential_service_bytes: usize = 128;
@@ -1570,16 +1571,21 @@ pub const DialogResult = struct {
 
 pub const NotificationOptions = struct {
     /// Stable host identity. Reissuing a non-empty id replaces the
-    /// notification with that id and its action binding.
+    /// notification with that id and its command bindings.
     id: []const u8 = "",
     title: []const u8,
     subtitle: []const u8 = "",
     body: []const u8 = "",
-    /// Action fields are paired: both empty means display-only; both
-    /// non-empty presents the label and routes activation as an ordinary
-    /// application command.
+    /// Action fields are paired: both empty means no action button; both
+    /// non-empty presents the label and routes a click on that button as
+    /// an ordinary application command.
     action_label: []const u8 = "",
     action_command: []const u8 = "",
+    /// Optional command for activating the notification itself (a click
+    /// on its body), independent of the action button. Empty means a body
+    /// click only brings the app forward. Any activation consumes the
+    /// notification: at most one of its commands is dispatched.
+    activation_command: []const u8 = "",
 };
 
 pub const CredentialKey = struct {

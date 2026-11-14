@@ -250,7 +250,7 @@ A dialog command answers when its dialog closes, without blocking the app meanwh
     <tr>
       <td><code>native-sdk.os.showNotification</code></td>
       <td><code>notifications</code></td>
-      <td>Show or replace a native notification; optional paired <code>actionLabel</code> / <code>actionCommand</code> fields dispatch an app command</td>
+      <td>Show or replace a native notification; optional paired <code>actionLabel</code> / <code>actionCommand</code> fields add an action button, and <code>activationCommand</code> binds a click on the notification itself; either dispatches an app command</td>
     </tr>
     <tr>
       <td><code>native-sdk.os.revealPath</code></td>
@@ -476,6 +476,7 @@ await window.zero.os.showNotification({
   body: "All checks passed.",
   actionLabel: "Open results",
   actionCommand: "build.open-results",
+  activationCommand: "build.show-summary",
 });
 await window.zero.os.revealPath("/Users/me/Downloads/report.pdf");
 await window.zero.os.addRecentDocument("/Users/me/Downloads/report.pdf");

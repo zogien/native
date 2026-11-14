@@ -3,6 +3,7 @@ const geometry = @import("geometry");
 const canvas = @import("canvas");
 const types = @import("types.zig");
 const null_backend = @import("null_platform.zig");
+const notification_records = @import("notification_records.zig");
 const default_gpu_frame_interval_ns = types.default_gpu_frame_interval_ns;
 const default_gpu_first_frame_latency_budget_ns = types.default_gpu_first_frame_latency_budget_ns;
 const Error = types.Error;
@@ -431,7 +432,7 @@ test "null platform records OS actions" {
     try std.testing.expectEqualStrings("build-status", null_platform.lastNotificationId());
     try std.testing.expectEqualStrings("Open", null_platform.lastNotificationActionLabel());
     try std.testing.expectEqualStrings("build.open", null_platform.lastNotificationActionCommand());
-    const notification_event = null_platform.activateNotification("build-status") orelse return error.TestUnexpectedResult;
+    const notification_event = null_platform.activateNotification("build-status", .action) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("build.open", notification_event.notification_command.name);
     try std.testing.expectEqualStrings("https://example.com/docs", null_platform.lastExternalUrl());
     try std.testing.expectEqualStrings("/tmp/example.txt", null_platform.lastRevealedPath());
@@ -519,9 +520,63 @@ test "null platform notification ids replace their action binding" {
 
     try std.testing.expectEqual(@as(usize, 3), null_platform.notificationCount());
     try std.testing.expectEqual(@as(usize, 1), null_platform.notificationReplacementCount());
-    try std.testing.expectEqualStrings("sync.view", null_platform.activateNotification("sync").?.notification_command.name);
-    try std.testing.expectEqualStrings("other.open", null_platform.activateNotification("other").?.notification_command.name);
-    try std.testing.expect(null_platform.activateNotification("missing") == null);
+    try std.testing.expectEqual(@as(usize, 2), null_platform.notificationRecordCount());
+    try std.testing.expectEqualStrings("sync.view", null_platform.activateNotification("sync", .action).?.notification_command.name);
+    try std.testing.expectEqualStrings("other.open", null_platform.activateNotification("other", .action).?.notification_command.name);
+    try std.testing.expect(null_platform.activateNotification("missing", .action) == null);
+    try std.testing.expectEqual(@as(usize, 0), null_platform.notificationRecordCount());
+}
+
+test "null platform notification body and action clicks dispatch their own command once" {
+    var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
+    const services = null_platform.platform().services;
+
+    try services.showNotification(.{
+        .id = "sync",
+        .title = "Syncing",
+        .activation_command = "sync.open",
+        .action_label = "Cancel",
+        .action_command = "sync.cancel",
+    });
+    try std.testing.expectEqualStrings("sync.open", null_platform.lastNotificationActivationCommand());
+    try std.testing.expectEqualStrings("sync.open", null_platform.activateNotification("sync", .body).?.notification_command.name);
+    try std.testing.expect(null_platform.activateLastNotification(.action) == null);
+
+    try services.showNotification(.{
+        .title = "Anonymous",
+        .action_label = "Open",
+        .action_command = "inbox.open",
+    });
+    try std.testing.expect(null_platform.activateLastNotification(.body) == null);
+    try std.testing.expect(null_platform.activateLastNotification(.action) == null);
+
+    try services.showNotification(.{ .title = "Body only", .activation_command = "inbox.show" });
+    try std.testing.expectEqualStrings("inbox.show", null_platform.activateLastNotification(.body).?.notification_command.name);
+    try std.testing.expectEqual(@as(usize, 0), null_platform.notificationRecordCount());
+}
+
+test "null platform display-only replacement retires the earlier command binding" {
+    var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
+    const services = null_platform.platform().services;
+
+    try services.showNotification(.{ .id = "build", .title = "Building", .action_label = "Cancel", .action_command = "build.cancel" });
+    try services.showNotification(.{ .id = "build", .title = "Build finished" });
+    try std.testing.expectEqual(@as(usize, 0), null_platform.notificationRecordCount());
+    try std.testing.expect(null_platform.activateNotification("build", .action) == null);
+}
+
+test "null platform keeps notification command bindings bounded" {
+    var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
+    const services = null_platform.platform().services;
+
+    var index: usize = 0;
+    while (index < notification_records.capacity * 2) : (index += 1) {
+        try services.showNotification(.{ .title = "Message", .activation_command = "inbox.open" });
+    }
+    try std.testing.expectEqual(notification_records.capacity, null_platform.notificationRecordCount());
 }
 
 test "null platform records configured shortcuts" {

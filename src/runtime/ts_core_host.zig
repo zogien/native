@@ -1601,6 +1601,26 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                             .action_command = action_command,
                         });
                     },
+                    // activatable_notification [op 0x48][the 0x31 fields,
+                    // then activation_command, all u32-length bytes]
+                    0x48 => {
+                        const notification_id = takeLongBytes(cmd, &at);
+                        const title = takeLongBytes(cmd, &at);
+                        const subtitle = takeLongBytes(cmd, &at);
+                        const body = takeLongBytes(cmd, &at);
+                        const action_label = takeLongBytes(cmd, &at);
+                        const action_command = takeLongBytes(cmd, &at);
+                        const activation_command = takeLongBytes(cmd, &at);
+                        fx.showNotification(.{
+                            .id = notification_id,
+                            .title = title,
+                            .subtitle = subtitle,
+                            .body = body,
+                            .action_label = action_label,
+                            .action_command = action_command,
+                            .activation_command = activation_command,
+                        });
+                    },
                     // audio_capture_start [op][key f64 LE][source u8]
                     //                     [sample_rate u32 LE][channels u8]
                     //                     [event_tag u8]

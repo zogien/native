@@ -149,6 +149,8 @@ static const GUID kNativeSdkIID_IMFMediaSource = {0x279a808d, 0xaec7, 0x40c8, {0
 static const GUID kNativeSdkIID_IMFPresentationClock = {0x868ce85c, 0x8ea9, 0x4f55, {0xab, 0x82, 0xb0, 0x09, 0xa9, 0x10, 0xa8, 0x05}};
 static const GUID kNativeSdkIID_IMFAudioStreamVolume = {0x76b1bbdb, 0x4ec8, 0x4f36, {0xb1, 0x06, 0x70, 0xa9, 0x31, 0x6d, 0xf5, 0x93}};
 
+#include "toast_notifications.h"
+
 namespace {
 
 enum EventKind {
@@ -174,7 +176,9 @@ enum EventKind {
     kContextMenuAction = 19,
     kViewFocused = 20,
     kTrayCommand = 21,
-    kNotificationCommand = 22,
+    /* A toast click: command_name carries the toast's record token and
+     * notification_activation the click kind (0 body, 1 action button). */
+    kNotificationActivation = 22,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -215,6 +219,9 @@ constexpr UINT kShowContextMenuMessage = WM_APP + 47;
  * for the app; the loop window delivers the queue on a fresh loop turn,
  * after the WebView2 callback has returned. */
 constexpr UINT kDeliverWebViewEventsMessage = WM_APP + 48;
+/* Posted by toast activation (a WinRT pool thread or the COM activator);
+ * lparam owns a native_sdk_toast::Activation the loop window consumes. */
+constexpr UINT kToastActivationMessage = WM_APP + 49;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 constexpr int kViewWebView = 0;
@@ -320,6 +327,9 @@ struct WindowsEvent {
     /* Window events: nonzero while the window is maximized (IsZoomed).
      * Every emit carries the live value, so any frame event reports it. */
     int maximized;
+    /* kNotificationActivation: 0 for a click on the toast itself, 1 for
+     * its action button. */
+    int notification_activation;
 };
 
 /* One context-menu entry crossing the C ABI (the same shape the macOS
@@ -914,9 +924,9 @@ struct Host {
     int external_link_action = 0;
     bool app_active = false;
     bool notification_icon_added = false;
-    std::string notification_id;
-    std::string notification_action_label;
-    std::string notification_action_command;
+    /* Desktop notifications are toasts; the notification icon above
+     * belongs to the tray alone. */
+    native_sdk_toast::Center toasts;
     bool tray_active = false;
     AppTimer app_timers[kMaxAppTimers];
     /* Last emitted appearance values; -1 = nothing emitted yet, so the
@@ -1087,10 +1097,6 @@ static bool setNotificationIcon(Host *host, const std::string &icon_path, const 
     }
     host->notification_icon_added = true;
     return true;
-}
-
-static bool ensureNotificationIcon(Host *host) {
-    return setNotificationIcon(host, std::string(), std::string(), false);
 }
 
 static void removeNotificationIcon(Host *host) {
@@ -1891,20 +1897,27 @@ static bool emitStatusCommand(Host *host, HWND hwnd, const std::string &command)
     return true;
 }
 
-static bool emitNotificationCommand(Host *host, HWND hwnd) {
-    if (!host || !host->callback || host->notification_action_command.empty()) return false;
-    std::string command = host->notification_action_command;
-    host->notification_id.clear();
-    host->notification_action_label.clear();
-    host->notification_action_command.clear();
-    const Window *window = windowForHwnd(host, hwnd);
+/* A toast click, on the loop thread. A click on the toast itself brings
+ * the app forward, as clicking a notification does on every desktop; an
+ * action button only dispatches. A window the app hid stays hidden: the
+ * app decides through its activation command. The binding lookup happens
+ * in the platform layer, which drops tokens it does not know. */
+static void deliverToastActivation(Host *host, const native_sdk_toast::Activation &activation) {
+    if (!host) return;
+    HWND hwnd = parentWindow(host);
+    if (activation.kind == 0 && hwnd && IsWindowVisible(hwnd)) {
+        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+    }
+    if (activation.token.empty() || !host->callback) return;
+    const Window *window = hwnd ? windowForHwnd(host, hwnd) : nullptr;
     WindowsEvent event = {};
-    event.kind = kNotificationCommand;
+    event.kind = kNotificationActivation;
     event.window_id = window ? window->id : 1;
-    event.command_name = command.c_str();
-    event.command_name_len = command.size();
+    event.command_name = activation.token.c_str();
+    event.command_name_len = activation.token.size();
+    event.notification_activation = activation.kind;
     host->callback(host->callback_context, &event);
-    return true;
 }
 
 static void showTrayMenu(Host *host, HWND hwnd) {
@@ -5750,7 +5763,7 @@ static const wchar_t *nativeSdkBridgeScript() {
 	});
 	var os=Object.freeze({
 	openUrl:function(value){var options=typeof value==='string'?{url:value}:(value||{});return invoke('native-sdk.os.openUrl',{url:ensureString(options.url,'url')});},
-	showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.id!=null){payload.id=ensureString(options.id,'id');}if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}if(options.actionLabel!=null){payload.actionLabel=ensureString(options.actionLabel,'actionLabel');}if(options.actionCommand!=null){payload.actionCommand=ensureString(options.actionCommand,'actionCommand');}return invoke('native-sdk.os.showNotification',payload);},
+	showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.id!=null){payload.id=ensureString(options.id,'id');}if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}if(options.actionLabel!=null){payload.actionLabel=ensureString(options.actionLabel,'actionLabel');}if(options.actionCommand!=null){payload.actionCommand=ensureString(options.actionCommand,'actionCommand');}if(options.activationCommand!=null){payload.activationCommand=ensureString(options.activationCommand,'activationCommand');}return invoke('native-sdk.os.showNotification',payload);},
 	revealPath:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.revealPath',{path:ensureString(options.path,'path')});},
 	addRecentDocument:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.addRecentDocument',{path:ensureString(options.path,'path')});},
 	clearRecentDocuments:function(){return invoke('native-sdk.os.clearRecentDocuments',{});}
@@ -6442,6 +6455,14 @@ static LRESULT CALLBACK loopWindowProc(HWND hwnd, UINT message, WPARAM wparam, L
         case kAudioSessionMessage:
             if (host) audioHandleSessionMessage(host, wparam, lparam);
             return 0;
+        case kToastActivationMessage: {
+            auto *activation = reinterpret_cast<native_sdk_toast::Activation *>(lparam);
+            if (activation) {
+                deliverToastActivation(host, *activation);
+                delete activation;
+            }
+            return 0;
+        }
         case kAudioSpectrumMessage:
             if (host) audioHandleSpectrumMessage(host, wparam);
             return 0;
@@ -6682,9 +6703,6 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case kNotificationCallbackMessage:
             if (host) {
                 UINT tray_event = LOWORD(lparam);
-                if (tray_event == NIN_BALLOONUSERCLICK && emitNotificationCommand(host, hwnd)) {
-                    return 0;
-                }
                 if (!host->tray_active) break;
                 if (tray_event == NIN_SELECT || tray_event == NIN_KEYSELECT || tray_event == WM_LBUTTONUP) {
                     if (keyDown(VK_MENU) && !host->tray_alternate_activation_command.empty()) {
@@ -7542,6 +7560,17 @@ void native_sdk_windows_destroy(Host *host) {
      * so nothing here blocks. The cache download is cancelled. */
     audioReleaseSession(host, true);
     removeNotificationIcon(host);
+    /* Revoke the toast activator while COM is still initialized; toasts
+     * already in Action Center outlive the host. */
+    native_sdk_toast::shutdown(host->toasts);
+    /* Free activations still queued for the loop window; nothing posts
+     * new ones once the relay is detached. */
+    if (loop_window) {
+        MSG pending = {};
+        while (PeekMessageW(&pending, loop_window, kToastActivationMessage, kToastActivationMessage, PM_REMOVE)) {
+            delete reinterpret_cast<native_sdk_toast::Activation *>(pending.lParam);
+        }
+    }
     destroyAllWindows(host);
     gpuSurfaceDestroyFrameWakeTimer(host);
     if (loop_window) DestroyWindow(loop_window);
@@ -8879,36 +8908,23 @@ int native_sdk_windows_poll_dialog_result(Host *host, char *buffer, size_t buffe
     return 1;
 }
 
-int native_sdk_windows_show_notification(Host *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len) {
+/* token: the opaque binding the platform layer created for this
+ * notification's commands; empty when it carries none. */
+int native_sdk_windows_show_notification(Host *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *token, size_t token_len) {
     if (!host || !title || title_len == 0) return 0;
     if ((subtitle_len > 0 && !subtitle) || (body_len > 0 && !body) ||
         (notification_id_len > 0 && !notification_id) ||
         (action_label_len > 0 && !action_label) ||
-        (action_command_len > 0 && !action_command) ||
-        ((action_label_len == 0) != (action_command_len == 0))) return 0;
-    if (!ensureNotificationIcon(host)) return 0;
-
-    std::wstring title_wide = widen(slice(title, title_len));
-    std::wstring body_wide;
-    if (subtitle && subtitle_len > 0) body_wide += widen(slice(subtitle, subtitle_len));
-    if (subtitle_len > 0 && body_len > 0) body_wide += L"\n";
-    if (body && body_len > 0) body_wide += widen(slice(body, body_len));
-    if (action_label_len > 0) {
-        if (!body_wide.empty()) body_wide += L"\n\n";
-        body_wide += L"[" + widen(slice(action_label, action_label_len)) + L"]";
-    }
-
-    NOTIFYICONDATAW data = notificationIconData(host);
-    if (!data.hWnd) return 0;
-    data.uFlags = NIF_INFO;
-    data.dwInfoFlags = NIIF_INFO;
-    copyWideField(data.szInfoTitle, ARRAYSIZE(data.szInfoTitle), title_wide);
-    copyWideField(data.szInfo, ARRAYSIZE(data.szInfo), body_wide);
-    if (!Shell_NotifyIconW(NIM_MODIFY, &data)) return 0;
-    host->notification_id = slice(notification_id, notification_id_len);
-    host->notification_action_label = slice(action_label, action_label_len);
-    host->notification_action_command = slice(action_command, action_command_len);
-    return 1;
+        (token_len > 0 && !token)) return 0;
+    /* Toasts are attributed to the process's AppUserModelID, which the
+     * host derives from the bundle id; without one there is no identity
+     * to show them under. */
+    if (host->bundle_id.empty()) return 0;
+    return native_sdk_toast::show(host->toasts, loopWindow(host), kToastActivationMessage,
+        widen(host->bundle_id), host->bundle_id, widen(host->app_name), widen(host->icon_path),
+        widen(slice(title, title_len)), widen(slice(subtitle, subtitle_len)), widen(slice(body, body_len)),
+        slice(notification_id, notification_id_len), widen(slice(action_label, action_label_len)),
+        slice(token, token_len)) ? 1 : 0;
 }
 
 int native_sdk_windows_create_tray(Host *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {

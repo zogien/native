@@ -4,6 +4,7 @@ const geometry = @import("geometry");
 const platform_info = @import("platform_info");
 const security = @import("../security/root.zig");
 const types = @import("types.zig");
+const notification_records = @import("notification_records.zig");
 
 const default_gpu_frame_interval_ns = types.default_gpu_frame_interval_ns;
 const default_gpu_first_frame_latency_budget_ns = types.default_gpu_first_frame_latency_budget_ns;
@@ -32,6 +33,7 @@ const max_notification_body_bytes = types.max_notification_body_bytes;
 const max_notification_id_bytes = types.max_notification_id_bytes;
 const max_notification_action_label_bytes = types.max_notification_action_label_bytes;
 const max_notification_action_command_bytes = types.max_notification_action_command_bytes;
+const max_notification_activation_command_bytes = types.max_notification_activation_command_bytes;
 const max_clipboard_mime_type_bytes = types.max_clipboard_mime_type_bytes;
 const max_clipboard_data_bytes = types.max_clipboard_data_bytes;
 const max_credential_service_bytes = types.max_credential_service_bytes;
@@ -376,12 +378,13 @@ const NullStatusItem = struct {
 
 const max_null_notifications: usize = 16;
 
+/// What the fake OS still lists: id-keyed entries model replacement, and
+/// each carries the opaque record token a real host attaches.
 const NullNotification = struct {
     active: bool = false,
     id: [max_notification_id_bytes]u8 = undefined,
     id_len: usize = 0,
-    action_command: [max_notification_action_command_bytes]u8 = undefined,
-    action_command_len: usize = 0,
+    token: ?notification_records.Token = null,
 };
 
 pub const NullPlatform = struct {
@@ -599,9 +602,16 @@ pub const NullPlatform = struct {
     notification_action_label_len: usize = 0,
     notification_action_command: [max_notification_action_command_bytes]u8 = undefined,
     notification_action_command_len: usize = 0,
+    notification_activation_command: [max_notification_activation_command_bytes]u8 = undefined,
+    notification_activation_command_len: usize = 0,
     notifications: [max_null_notifications]NullNotification = [_]NullNotification{.{}} ** max_null_notifications,
     notification_count: usize = 0,
     notification_replacement_count: usize = 0,
+    /// The same command bindings the real hosts use.
+    notification_records: notification_records.Records = .{},
+    notification_last_token: ?notification_records.Token = null,
+    /// Backs the event an activation seam returns.
+    notification_activated: notification_records.Command = .{},
     clipboard_mime_type: [max_clipboard_mime_type_bytes]u8 = undefined,
     clipboard_mime_type_len: usize = 0,
     clipboard_data: [max_clipboard_data_bytes]u8 = undefined,
@@ -963,6 +973,7 @@ pub const NullPlatform = struct {
         self.credential_entries = .empty;
         self.credential_last_secret = null;
         self.credential_mutex.unlock();
+        self.notification_records.deinit(std.heap.page_allocator);
         self.destroyed = true;
     }
 
@@ -1827,18 +1838,22 @@ pub const NullPlatform = struct {
 
     fn showNotification(context: ?*anyopaque, options: NotificationOptions) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const token = try self.notification_records.bind(std.heap.page_allocator, options);
         self.notification_title = undefined;
         self.notification_subtitle = undefined;
         self.notification_body = undefined;
         self.notification_id = undefined;
         self.notification_action_label = undefined;
         self.notification_action_command = undefined;
+        self.notification_activation_command = undefined;
         self.notification_title_len = (try copyInto(&self.notification_title, options.title)).len;
         self.notification_subtitle_len = (try copyInto(&self.notification_subtitle, options.subtitle)).len;
         self.notification_body_len = (try copyInto(&self.notification_body, options.body)).len;
         self.notification_id_len = (try copyInto(&self.notification_id, options.id)).len;
         self.notification_action_label_len = (try copyInto(&self.notification_action_label, options.action_label)).len;
         self.notification_action_command_len = (try copyInto(&self.notification_action_command, options.action_command)).len;
+        self.notification_activation_command_len = (try copyInto(&self.notification_activation_command, options.activation_command)).len;
+        self.notification_last_token = token;
 
         if (options.id.len > 0) {
             var selected: ?usize = null;
@@ -1856,9 +1871,8 @@ pub const NullPlatform = struct {
             }
             const index = selected orelse free orelse (self.notification_count % max_null_notifications);
             var entry = &self.notifications[index];
-            entry.* = .{ .active = true };
+            entry.* = .{ .active = true, .token = token };
             entry.id_len = (try copyInto(&entry.id, options.id)).len;
-            entry.action_command_len = (try copyInto(&entry.action_command, options.action_command)).len;
         }
         self.notification_count += 1;
     }
@@ -3497,23 +3511,41 @@ pub const NullPlatform = struct {
         return self.notification_action_command[0..self.notification_action_command_len];
     }
 
-    /// Deterministically model a user activating the action on a named,
-    /// currently active notification. The returned event borrows this
-    /// platform's fixed storage until the next notification update.
-    pub fn activateNotification(self: *const NullPlatform, id: []const u8) ?Event {
+    pub fn lastNotificationActivationCommand(self: *const NullPlatform) []const u8 {
+        return self.notification_activation_command[0..self.notification_activation_command_len];
+    }
+
+    /// Deterministically model a user clicking the body or the action
+    /// button of a named, currently listed notification, the way a real
+    /// host reports it: by the notification's record token. The click
+    /// removes the notification and consumes its record, so a second
+    /// click dispatches nothing. The returned event borrows this
+    /// platform's storage until the next activation.
+    pub fn activateNotification(self: *NullPlatform, id: []const u8, kind: notification_records.Activation) ?Event {
         for (&self.notifications) |*entry| {
             if (!entry.active or !std.mem.eql(u8, entry.id[0..entry.id_len], id)) continue;
-            if (entry.action_command_len == 0) return null;
-            return .{ .notification_command = .{ .name = entry.action_command[0..entry.action_command_len] } };
+            entry.active = false;
+            const token = entry.token orelse return null;
+            return self.activateToken(&token, kind);
         }
         return null;
     }
 
     /// Anonymous notifications have no replacement key; tests can still
-    /// activate the most recently delivered action through this seam.
-    pub fn activateLastNotification(self: *const NullPlatform) ?Event {
-        if (self.notification_action_command_len == 0) return null;
-        return .{ .notification_command = .{ .name = self.lastNotificationActionCommand() } };
+    /// activate the most recently shown one through this seam.
+    pub fn activateLastNotification(self: *NullPlatform, kind: notification_records.Activation) ?Event {
+        const token = self.notification_last_token orelse return null;
+        return self.activateToken(&token, kind);
+    }
+
+    fn activateToken(self: *NullPlatform, token: []const u8, kind: notification_records.Activation) ?Event {
+        self.notification_activated = self.notification_records.activate(token, kind) orelse return null;
+        return .{ .notification_command = .{ .name = self.notification_activated.name() } };
+    }
+
+    /// Live command bindings, bounded by `notification_records.capacity`.
+    pub fn notificationRecordCount(self: *const NullPlatform) usize {
+        return self.notification_records.count();
     }
 
     pub fn notificationCount(self: *const NullPlatform) usize {

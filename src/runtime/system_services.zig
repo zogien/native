@@ -397,6 +397,7 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             const notification_id = try optionalNotificationString(payload, "id", &storage);
             const action_label = try optionalNotificationString(payload, "actionLabel", &storage);
             const action_command = try optionalNotificationString(payload, "actionCommand", &storage);
+            const activation_command = try optionalNotificationString(payload, "activationCommand", &storage);
             try self.showNotification(.{
                 .id = notification_id,
                 .title = title,
@@ -404,6 +405,7 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
                 .body = body,
                 .action_label = action_label,
                 .action_command = action_command,
+                .activation_command = activation_command,
             });
             return writeTrueJson(output);
         }

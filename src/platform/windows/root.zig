@@ -44,7 +44,9 @@ const WindowsEventKind = enum(c_int) {
     context_menu_action = 19,
     view_focused = 20,
     tray_command = 21,
-    notification_command = 22,
+    /// A toast click: `command_name` carries the record token and
+    /// `notification_activation` the click kind.
+    notification_activation = 22,
 };
 
 const WindowsEvent = extern struct {
@@ -130,6 +132,9 @@ const WindowsEvent = extern struct {
     /// Window events: nonzero while the window is maximized. Every emit
     /// carries the live value, so any frame event reports it.
     maximized: c_int,
+    /// notification_activation: 0 for a click on the toast itself, 1 for
+    /// its action button (`notification_records.Activation`).
+    notification_activation: c_int,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -202,7 +207,7 @@ extern fn native_sdk_windows_show_message_dialog(host: *WindowsHost, opts: *cons
 extern fn native_sdk_windows_request_dialog(host: *WindowsHost, request: *const WindowsDialogRequest) c_int;
 extern fn native_sdk_windows_cancel_dialog(host: *WindowsHost, id: u64) void;
 extern fn native_sdk_windows_poll_dialog_result(host: *WindowsHost, buffer: [*]u8, buffer_len: usize, result: *WindowsDialogResult) c_int;
-extern fn native_sdk_windows_show_notification(host: *WindowsHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, action_command: [*]const u8, action_command_len: usize) c_int;
+extern fn native_sdk_windows_show_notification(host: *WindowsHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, token: [*]const u8, token_len: usize) c_int;
 extern fn native_sdk_windows_create_tray(host: *WindowsHost, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) c_int;
 extern fn native_sdk_windows_update_tray_menu(host: *WindowsHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) c_int;
 extern fn native_sdk_windows_remove_tray(host: *WindowsHost) void;
@@ -353,6 +358,9 @@ pub const WindowsPlatform = struct {
     channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     audio_capture_sinks: [2]platform_mod.AudioCaptureSink = [_]platform_mod.AudioCaptureSink{.{}} ** 2,
     global_shortcuts: global_shortcuts.Registry = .{},
+    /// Commands of the toasts this process showed, keyed by the opaque
+    /// token each toast carries in its activation arguments.
+    notification_records: platform_mod.notification_records.Records = .{},
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!WindowsPlatform {
         return initWithEngine(title, size, .system);
@@ -444,6 +452,7 @@ pub const WindowsPlatform = struct {
         }
         self.global_shortcuts.deinit();
         native_sdk_windows_destroy(self.host);
+        self.notification_records.deinit(std.heap.page_allocator);
     }
 
     pub fn platform(self: *WindowsPlatform) platform_mod.Platform {
@@ -726,10 +735,12 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
         } }),
-        .notification_command => state.emit(.{ .notification_command = .{
-            .name = event.command_name[0..event.command_name_len],
-            .window_id = event.window_id,
-        } }),
+        .notification_activation => {
+            const owner = state.self orelse return;
+            const kind: platform_mod.notification_records.Activation = if (event.notification_activation == 1) .action else .body;
+            const command = owner.notification_records.activate(event.command_name[0..event.command_name_len], kind) orelse return;
+            state.emit(.{ .notification_command = .{ .name = command.name(), .window_id = event.window_id } });
+        },
         .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = gpuSurfaceFrameEventFromWindowsEvent(event) }),
         .gpu_surface_resize => state.emit(.{ .gpu_surface_resized = .{
             .window_id = event.window_id,
@@ -1655,6 +1666,11 @@ fn pollDialogResult(context: ?*anyopaque, buffer: []u8) ?platform_mod.DialogResu
 fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOptions) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
+    // The toast carries only the token; the commands stay in this
+    // process, so a click on a toast from an earlier run dispatches
+    // nothing.
+    const token = try self.notification_records.bind(std.heap.page_allocator, options);
+    const token_bytes: []const u8 = if (token) |*value| value else "";
     if (native_sdk_windows_show_notification(
         self.host,
         options.title.ptr,
@@ -1667,9 +1683,12 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
         options.id.len,
         options.action_label.ptr,
         options.action_label.len,
-        options.action_command.ptr,
-        options.action_command.len,
-    ) == 0) return error.UnsupportedService;
+        token_bytes.ptr,
+        token_bytes.len,
+    ) == 0) {
+        if (token) |*value| self.notification_records.discard(value);
+        return error.UnsupportedService;
+    }
 }
 
 const max_tray_items: usize = 32;

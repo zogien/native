@@ -63,6 +63,9 @@ test("nested unions in helper arguments retain their decoder type imports", () =
 // recovers every complete facade from the exact-audio projection.
 // Exact subprocess and cancellation records are independently audited:
 // removing only their encoder cases recovers every preceding complete facade.
+// The activation-command notification record (0x48) is audited the same
+// way: removing only its encoder block recovers every preceding complete
+// facade, and profile output is byte-identical with and without it.
 const goldens = JSON.parse(fs.readFileSync(new URL("core_goldens.json", import.meta.url), "utf8")) as Record<string, {
   status: number; diagnostics: string; hashes: Record<string, string>;
   check_status: number; check_diagnostics: string;

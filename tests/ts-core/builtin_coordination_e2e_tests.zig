@@ -224,7 +224,7 @@ test "compiled builtin coordination preserves notification action permission and
     const b = try Harness.create(std.testing.allocator, .{});
     defer b.destroy(std.testing.allocator);
     b.runtime.builtin_coordination_policy = compiled;
-    for ([_]bool{ false, true }) |allowed| for ([_][]const u8{ "{}", "{\"actionCommand\":\"\"}", "{\"actionCommand\":\"go\"}", "{\"actionCommand\":4}", "invalid" }) |payload| {
+    for ([_]bool{ false, true }) |allowed| for ([_][]const u8{ "{}", "{\"actionCommand\":\"\"}", "{\"actionCommand\":\"go\"}", "{\"actionCommand\":4}", "{\"activationCommand\":\"\"}", "{\"activationCommand\":\"go\"}", "{\"activationCommand\":4}", "invalid" }) |payload| {
         for ([_]*Harness{ a, b }) |h| h.runtime.options.builtin_bridge = .{ .enabled = true, .commands = if (allowed) &.{.{ .name = "native-sdk.command.invoke", .origins = &.{"zero://inline"} }} else &.{} };
         var left: [4096]u8 = @splat(0xa5);
         var right = left;

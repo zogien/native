@@ -56,6 +56,16 @@ test("notifications preserve title-first admission, field order and paired comma
   for (const value of ["", ".", "..", "a/b", "a\\b", "a\n", "a\r", "a\t", "a\0"]) assert.equal(field(17, value), 9);
   assert.equal(field(14, "a/command"), 0); assert.equal(field(14, "a\0command"), 7);
 });
+test("notification activation commands follow every other notification verdict", () => {
+  const b = packet(4); wide(b, 8, 1n); word(b, 60, 9);
+  assert.equal(result(b)[2], 9);
+  word(b, 32, 8); assert.equal(result(b)[2], 8);
+  word(b, 32, 0); wide(b, 16, 1n); assert.equal(result(b)[2], 7);
+  wide(b, 24, 1n); word(b, 56, 9); word(b, 60, 8); assert.equal(result(b)[2], 9);
+  word(b, 56, 0); assert.equal(result(b)[2], 8);
+  word(b, 60, 0); assert.equal(result(b)[2], 0);
+  word(b, 60, 12); assert.throws(() => derive(b));
+});
 test("system transport rejects truncation and retains nonzero byte offsets", () => {
   const b = packet(4); wide(b, 8, 1n);
   for (let n = 0; n < 64; n++) assert.throws(() => derive(b.subarray(0,n)));

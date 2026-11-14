@@ -1,4 +1,5 @@
 #import "appkit_host.h"
+#import "user_notifications.h"
 
 #import <AppKit/AppKit.h>
 #import <CoreFoundation/CoreFoundation.h>
@@ -539,7 +540,7 @@ static const char *NativeSdkCefBridgeScript() {
         "});"
         "var os=Object.freeze({"
         "openUrl:function(value){var options=typeof value==='string'?{url:value}:(value||{});return invoke('native-sdk.os.openUrl',{url:ensureString(options.url,'url')});},"
-        "showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.id!=null){payload.id=ensureString(options.id,'id');}if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}if(options.actionLabel!=null){payload.actionLabel=ensureString(options.actionLabel,'actionLabel');}if(options.actionCommand!=null){payload.actionCommand=ensureString(options.actionCommand,'actionCommand');}return invoke('native-sdk.os.showNotification',payload);},"
+        "showNotification:function(value){var options=typeof value==='string'?{title:value}:(value||{});var payload={title:ensureString(options.title,'title')};if(options.id!=null){payload.id=ensureString(options.id,'id');}if(options.subtitle!=null){payload.subtitle=ensureString(options.subtitle,'subtitle');}if(options.body!=null){payload.body=ensureString(options.body,'body');}if(options.actionLabel!=null){payload.actionLabel=ensureString(options.actionLabel,'actionLabel');}if(options.actionCommand!=null){payload.actionCommand=ensureString(options.actionCommand,'actionCommand');}if(options.activationCommand!=null){payload.activationCommand=ensureString(options.activationCommand,'activationCommand');}return invoke('native-sdk.os.showNotification',payload);},"
         "revealPath:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.revealPath',{path:ensureString(options.path,'path')});},"
         "addRecentDocument:function(value){var options=typeof value==='string'?{path:value}:(value||{});return invoke('native-sdk.os.addRecentDocument',{path:ensureString(options.path,'path')});},"
         "clearRecentDocuments:function(){return invoke('native-sdk.os.clearRecentDocuments',{});}"
@@ -659,7 +660,7 @@ static const char *NativeSdkCefBridgeScript() {
 
 @end
 
-@interface NativeSdkChromiumHost : NSObject <NSMenuDelegate, NSUserNotificationCenterDelegate>
+@interface NativeSdkChromiumHost : NSObject <NSMenuDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) NSView *browserContainer;
 @property(nonatomic, strong) NativeSdkChromiumWindowDelegate *delegate;
@@ -687,10 +688,9 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, assign) uint64_t nextWebViewGeneration;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSTimer *> *appTimers;
-/* Delivered notifications outlive this object, so userInfo carries only
- * a per-process token; the command remains in these live-host maps. */
-@property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *notificationActionCommands;
-@property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *notificationActionTokensByIdentifier;
+/* Created with the first notification; it connects to the notification
+ * center only then. */
+@property(nonatomic, strong) NativeSdkUserNotifications *userNotifications;
 @property(nonatomic, strong) NSString *appName;
 /* The human-facing app name (app.zon display_name, empty = appName):
  * drives the application menu title and its About/Hide/Quit labels, the
@@ -751,8 +751,7 @@ static const char *NativeSdkCefBridgeScript() {
 - (void)stopApplicationActivationObservers;
 - (void)applicationDidBecomeActive:(NSNotification *)notification;
 - (void)applicationDidResignActive:(NSNotification *)notification;
-- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification;
-- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification;
+- (NativeSdkUserNotifications *)ensureUserNotifications;
 - (void)emitResize;
 - (void)emitResizeForWindowId:(uint64_t)windowId;
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open;
@@ -967,8 +966,6 @@ static const char *NativeSdkCefBridgeScript() {
     self.webviewGenerations = [[NSMutableDictionary alloc] init];
     self.closingWebViewKeys = [[NSMutableSet alloc] init];
     self.appTimers = [[NSMutableDictionary alloc] init];
-    self.notificationActionCommands = [[NSMutableDictionary alloc] init];
-    self.notificationActionTokensByIdentifier = [[NSMutableDictionary alloc] init];
     self.statusItems = [[NSMutableDictionary alloc] init];
     self.nextWebViewGeneration = 1;
     self.cefClients = new std::map<uint64_t, CefRefPtr<NativeSdkCefClient>>();
@@ -1085,8 +1082,7 @@ static const char *NativeSdkCefBridgeScript() {
 }
 
 - (void)dealloc {
-    NSUserNotificationCenter *notificationCenter = [NSUserNotificationCenter defaultUserNotificationCenter];
-    if (notificationCenter.delegate == self) notificationCenter.delegate = nil;
+    [self.userNotifications detach];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
@@ -1501,36 +1497,23 @@ static const char *NativeSdkCefBridgeScript() {
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_APP_DEACTIVATED }];
 }
 
-- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification {
-    (void)center;
-    (void)notification;
-    return YES;
-}
-
-- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification {
-    NSInteger activation = notification.activationType;
-    if (activation != NSUserNotificationActivationTypeActionButtonClicked) return;
-    NSString *token = [notification.userInfo[@"native-sdk-action-token"] isKindOfClass:[NSString class]]
-        ? notification.userInfo[@"native-sdk-action-token"] : @"";
-    NSString *command = token.length > 0 ? self.notificationActionCommands[token] : @"";
-    if (command.length == 0) {
-        [center removeDeliveredNotification:notification];
-        return;
-    }
-    NSString *identifier = notification.identifier ?: @"";
-    if (identifier.length > 0 &&
-        [self.notificationActionTokensByIdentifier[identifier] isEqualToString:token]) {
-        [self.notificationActionTokensByIdentifier removeObjectForKey:identifier];
-    }
-    [self.notificationActionCommands removeObjectForKey:token];
-    const char *commandBytes = command.UTF8String ?: "";
-    [self emitEvent:(native_sdk_appkit_event_t){
-        .kind = NATIVE_SDK_APPKIT_EVENT_NOTIFICATION_COMMAND,
-        .window_id = 1,
-        .command_name = commandBytes,
-        .command_name_len = [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
-    }];
-    [center removeDeliveredNotification:notification];
+- (NativeSdkUserNotifications *)ensureUserNotifications {
+    if (self.userNotifications) return self.userNotifications;
+    NativeSdkUserNotifications *notifications = [[NativeSdkUserNotifications alloc] init];
+    __weak NativeSdkChromiumHost *weakSelf = self;
+    notifications.activationHandler = ^(NSString *token, int activation) {
+        NativeSdkChromiumHost *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf emitEvent:(native_sdk_appkit_event_t){
+            .kind = NATIVE_SDK_APPKIT_EVENT_NOTIFICATION_ACTIVATION,
+            .window_id = 1,
+            .command_name = token.UTF8String ?: "",
+            .command_name_len = [token lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+            .notification_activation = activation,
+        }];
+    };
+    self.userNotifications = notifications;
+    return notifications;
 }
 
 - (void)emitResize {
@@ -3467,43 +3450,20 @@ int native_sdk_appkit_clipboard_write_data(native_sdk_appkit_host_t *host, const
     return [pasteboard setData:data forType:type] ? 1 : 0;
 }
 
-int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len) {
-    if (!host || ((action_label_len == 0) != (action_command_len == 0))) return 0;
+int native_sdk_appkit_notifications_available(void) {
+    return [NativeSdkUserNotifications available] ? 1 : 0;
+}
+
+int native_sdk_appkit_show_notification(native_sdk_appkit_host_t *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *token, size_t token_len) {
+    if (!host) return 0;
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     NSString *titleString = title ? [[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] : @"";
-    if (titleString.length == 0) return 0;
     NSString *subtitleString = subtitle ? [[NSString alloc] initWithBytes:subtitle length:subtitle_len encoding:NSUTF8StringEncoding] : @"";
     NSString *bodyString = body ? [[NSString alloc] initWithBytes:body length:body_len encoding:NSUTF8StringEncoding] : @"";
     NSString *identifier = notification_id ? [[NSString alloc] initWithBytes:notification_id length:notification_id_len encoding:NSUTF8StringEncoding] : @"";
     NSString *actionLabel = action_label ? [[NSString alloc] initWithBytes:action_label length:action_label_len encoding:NSUTF8StringEncoding] : @"";
-    NSString *actionCommand = action_command ? [[NSString alloc] initWithBytes:action_command length:action_command_len encoding:NSUTF8StringEncoding] : @"";
-    if (identifier.length > 0) {
-        NSString *oldToken = object.notificationActionTokensByIdentifier[identifier];
-        if (oldToken.length > 0) [object.notificationActionCommands removeObjectForKey:oldToken];
-        [object.notificationActionTokensByIdentifier removeObjectForKey:identifier];
-    }
-    NSUserNotification *notification = [[NSUserNotification alloc] init];
-    notification.title = titleString;
-    if (subtitleString.length > 0) notification.subtitle = subtitleString;
-    if (bodyString.length > 0) notification.informativeText = bodyString;
-    if (identifier.length > 0) notification.identifier = identifier;
-    if (actionCommand.length > 0) {
-        NSString *actionToken = [NSUUID UUID].UUIDString;
-        object.notificationActionCommands[actionToken] = actionCommand;
-        if (identifier.length > 0) object.notificationActionTokensByIdentifier[identifier] = actionToken;
-        notification.hasActionButton = YES;
-        notification.actionButtonTitle = actionLabel;
-        notification.userInfo = @{ @"native-sdk-action-token": actionToken };
-    }
-    NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
-    center.delegate = object;
-    if (identifier.length > 0) {
-        for (NSUserNotification *delivered in center.deliveredNotifications) {
-            if ([delivered.identifier isEqualToString:identifier]) [center removeDeliveredNotification:delivered];
-        }
-    }
-    [center deliverNotification:notification];
-    return 1;
+    NSString *tokenString = token ? [[NSString alloc] initWithBytes:token length:token_len encoding:NSUTF8StringEncoding] : @"";
+    return [[object ensureUserNotifications] showTitle:titleString subtitle:subtitleString body:bodyString identifier:identifier actionLabel:actionLabel token:tokenString] ? 1 : 0;
 }
 
 int native_sdk_appkit_open_external_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len) {

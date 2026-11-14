@@ -152,6 +152,10 @@ pub fn installConfig(allocator: std.mem.Allocator, metadata: manifest_tool.Metad
         try registry.append(allocator, .{ .key = try std.fmt.allocPrint(allocator, "{s}\\shell\\open\\command", .{scheme_key}), .value = open_command });
         try cleanup.append(allocator, .{ .key = scheme_key });
     }
+    // The app registers its notification identity (display name, icon and
+    // toast activator) under this key itself, on its first notification;
+    // the uninstaller removes it with the rest of the app.
+    try cleanup.append(allocator, .{ .key = try std.fmt.allocPrint(allocator, "Software\\Classes\\AppUserModelId\\{s}", .{metadata.id}) });
 
     return .{
         .bundle_id = metadata.id,
@@ -191,6 +195,9 @@ test "an app's associations and URL schemes register through the installed launc
     // app; the app's own ProgID and scheme keys go whole.
     try std.testing.expectEqualStrings("dev.example.notes.Markdown", config.registry_cleanup[0].if_value.?);
     try std.testing.expect(config.registry_cleanup[1].name == null);
+    const identity = config.registry_cleanup[config.registry_cleanup.len - 1];
+    try std.testing.expectEqualStrings("Software\\Classes\\AppUserModelId\\dev.example.notes", identity.key);
+    try std.testing.expect(identity.name == null);
 }
 
 test "setup.exe carries the launcher, its configuration and the install image" {

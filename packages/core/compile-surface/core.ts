@@ -303,6 +303,7 @@ export interface NotificationSpec {
   readonly body?: Uint8Array;
   readonly actionLabel?: Uint8Array;
   readonly actionCommand?: Uint8Array;
+  readonly activationCommand?: Uint8Array;
 }
 
 export type LocalTimeStyle = "date" | "time" | "datetime";
@@ -448,7 +449,7 @@ export type CmdData =
   | { readonly op: "cancel_exact"; readonly key: Uint8Array }
   | { readonly op: "video_snapshot"; readonly snapshotKind: string }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
-  | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
+  | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array; readonly activationCommand: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
   | {
       readonly op: "spawn";
@@ -884,6 +885,7 @@ export const Cmd = {
       body: spec.body ?? new Uint8Array(0),
       actionLabel: spec.actionLabel ?? new Uint8Array(0),
       actionCommand: spec.actionCommand ?? new Uint8Array(0),
+      activationCommand: spec.activationCommand ?? new Uint8Array(0),
     };
   },
 

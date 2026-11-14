@@ -211,7 +211,7 @@ OS bridge commands are default-deny. Add explicit `builtin_bridge` entries for e
 },
 ```
 
-Because the JavaScript example below supplies a notification action, the app/runtime permission list must also include `command`. Display-only notifications need only the `native-sdk.os.showNotification` policy and `notifications` permission.
+Because the JavaScript example below binds notification commands (`actionCommand` and `activationCommand`), the app/runtime permission list must also include `command`. Display-only notifications need only the `native-sdk.os.showNotification` policy and `notifications` permission.
 
 Opening external URLs is also gated by the external-link policy:
 
@@ -237,6 +237,7 @@ await window.zero.os.showNotification({
   body: "All checks passed.",
   actionLabel: "Open results",
   actionCommand: "build.open-results",
+  activationCommand: "build.show-summary",
 });
 await window.zero.os.revealPath("/Users/me/Downloads/report.pdf");
 await window.zero.os.addRecentDocument("/Users/me/Downloads/report.pdf");
@@ -277,7 +278,7 @@ Use the app manifest’s id as `service` when WebView code and a model core need
 
 ## Model cores
 
-Model-driven apps request notifications as effects. Delivery is fire-and-forget because OS focus modes and user settings remain authoritative after the host accepts the request; fake-executor tests and session replay do not display notifications. An optional nonempty `id` replaces the app's earlier notification with the same id. Supply `actionLabel` and `actionCommand` together to route activation through the same application command path as menus, shortcuts, and bridge command invocation. Action-command delivery is process-scoped: a notification from an earlier execution cannot dispatch its command into a later one. Linux notification shells may still D-Bus-activate an exited app when the notification or its action is clicked, but the stale action is rejected rather than entering the new runtime.
+Model-driven apps request notifications as effects. Delivery is fire-and-forget because OS focus modes and user settings remain authoritative after the host accepts the request; fake-executor tests and session replay do not display notifications. An optional nonempty `id` replaces the app's earlier notification with the same id. Supply `actionLabel` and `actionCommand` together to add an action button, and `activationCommand` to bind a click on the notification itself; both route through the same application command path as menus, shortcuts, and bridge command invocation. Without `activationCommand`, clicking the notification only brings the app forward. Any click consumes the notification, so it dispatches at most one command, and the runtime keeps a bounded number of these bindings: past that bound the oldest notification's commands are dropped, and clicking it only brings the app forward. Command delivery is process-scoped: a notification from an earlier execution cannot dispatch its command into a later one. Linux notification shells may still D-Bus-activate an exited app when the notification or its action is clicked, but the stale command is rejected rather than entering the new runtime. GNOME Shell accepts notifications only from an app whose `<bundle-id>.desktop` entry is installed, which Linux packages provide; a run without it, such as a development build or an uninstalled package, sends its notifications to the freedesktop notification server instead (GNOME Shell runs one too). Setting `GNOTIFICATION_BACKEND` yourself overrides that choice. On Windows, notifications are toasts shown under the app's bundle id: the first notification registers that id for the current user under `HKCU\Software\Classes\AppUserModelId\<bundle-id>`, with the app's display name, icon and the activator that receives clicks from Action Center. No Start menu shortcut is needed, so portable and development builds show toasts too. A toast stays in Action Center after the app exits: clicking it there does nothing while the app is not running, and in a later run it only brings the app forward. On macOS, notifications go through the system notification center, which identifies the app by its bundle: a packaged app shows them, while a development run (an unbundled executable) reports notifications unsupported, so `supports("notifications")` is false and showing one fails as unsupported. The first notification makes macOS ask the user for permission, and nothing is shown while notifications are off for the app. Notification Center keeps a notification after the app exits: clicking it there launches or brings the app forward but dispatches nothing.
 
 ### TypeScript
 
@@ -290,6 +291,7 @@ case "build_finished":
     body: asciiBytes("All checks passed."),
     actionLabel: asciiBytes("Open results"),
     actionCommand: asciiBytes("build.open-results"),
+    activationCommand: asciiBytes("build.show-summary"),
   })];
 ```
 
@@ -303,6 +305,7 @@ case "build_finished":
     .body = "All checks passed.",
     .action_label = "Open results",
     .action_command = "build.open-results",
+    .activation_command = "build.show-summary",
 }),
 ```
 

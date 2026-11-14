@@ -492,7 +492,7 @@ int native_sdk_gtk_reveal_path(Host *host, const char *path, size_t path_len) {
     return 0;
 }
 
-int native_sdk_gtk_show_notification(Host *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len) {
+int native_sdk_gtk_show_notification(Host *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *token, size_t token_len) {
     (void)host;
     (void)title;
     (void)title_len;
@@ -504,8 +504,8 @@ int native_sdk_gtk_show_notification(Host *host, const char *title, size_t title
     (void)notification_id_len;
     (void)action_label;
     (void)action_label_len;
-    (void)action_command;
-    (void)action_command_len;
+    (void)token;
+    (void)token_len;
     return 0;
 }
 

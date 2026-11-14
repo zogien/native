@@ -88,7 +88,7 @@ import { type ImageIdentity } from "./internal/image_identity.ts";
 //                                clipboard read; ok arm carries the text bytes,
 //                                err arm the reason bytes ("failed",
 //                                "rejected")
-//   Cmd.showNotification({ id?, title, subtitle?, body?, actionLabel?, actionCommand? })
+//   Cmd.showNotification({ id?, title, subtitle?, body?, actionLabel?, actionCommand?, activationCommand? })
 //                                fire-and-forget desktop notification; the OS
 //                                remains authoritative over final delivery
 //   Cmd.openExternalUrl(url)      open an allowed HTTP(S) URL in the system
@@ -1235,6 +1235,7 @@ export interface NotificationSpec {
   readonly body?: Uint8Array;
   readonly actionLabel?: Uint8Array;
   readonly actionCommand?: Uint8Array;
+  readonly activationCommand?: Uint8Array;
 }
 
 /// The three bounded host-local timestamp presentations. Unlike the markup
@@ -1432,7 +1433,7 @@ export type Cmd<M extends Msgish> =
   | { readonly op: "cancel_exact"; readonly key: Uint8Array }
   | { readonly op: "video_snapshot"; readonly snapshotKind: string }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
-  | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
+  | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array; readonly activationCommand: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
   | {
       readonly op: "spawn";
@@ -1983,7 +1984,9 @@ export const Cmd = {
   /// platform acceptance cannot promise display while OS focus modes and user
   /// notification settings remain authoritative. A stable id replaces the
   /// earlier notification with that id; paired actionLabel/actionCommand bytes
-  /// dispatch through the normal app-command path while the process is live.
+  /// add an action button, and activationCommand bytes bind a click on the
+  /// notification itself. Either click dispatches through the normal
+  /// app-command path while the process is live, at most once per notification.
   /// Empty or over-bound titles, over-bound optional fields, unpaired actions,
   /// invalid command names, and unavailable services fail closed.
   showNotification(spec: NotificationSpec): Cmd<never> {
@@ -1995,6 +1998,7 @@ export const Cmd = {
       body: spec.body ?? new Uint8Array(0),
       actionLabel: spec.actionLabel ?? new Uint8Array(0),
       actionCommand: spec.actionCommand ?? new Uint8Array(0),
+      activationCommand: spec.activationCommand ?? new Uint8Array(0),
     };
   },
 

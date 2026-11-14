@@ -424,6 +424,13 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
     try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "Notification actions require command invoke permission") != null);
     try std.testing.expectEqual(@as(usize, 1), allowed.null_platform.notificationCount());
 
+    try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"activation-denied\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"title\":\"Build finished\",\"activationCommand\":\"build.show\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "Notification actions require command invoke permission") != null);
+    try std.testing.expectEqual(@as(usize, 1), allowed.null_platform.notificationCount());
+
     allowed.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &action_policies };
     try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"action-allowed\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"id\":\"build\",\"title\":\"Build finished\",\"actionLabel\":\"Open\",\"actionCommand\":\"build.open\"}}",
@@ -436,11 +443,20 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
     try std.testing.expectEqualStrings("build.open", allowed.null_platform.lastNotificationActionCommand());
 
     try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"activation-allowed\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"id\":\"build\",\"title\":\"Build finished\",\"activationCommand\":\"build.show\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+    try std.testing.expectEqual(@as(usize, 3), allowed.null_platform.notificationCount());
+    try std.testing.expectEqualStrings("build.show", allowed.null_platform.lastNotificationActivationCommand());
+    try std.testing.expectEqualStrings("build.show", allowed.null_platform.activateNotification("build", .body).?.notification_command.name);
+
+    try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"invalid-notification\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"id\":42,\"title\":\"Build finished\"}}",
         .origin = "zero://inline",
     } });
     try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
-    try std.testing.expectEqual(@as(usize, 2), allowed.null_platform.notificationCount());
+    try std.testing.expectEqual(@as(usize, 3), allowed.null_platform.notificationCount());
 
     try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"open\",\"command\":\"native-sdk.os.openUrl\",\"payload\":{\"url\":\"https://example.com/docs\"}}",

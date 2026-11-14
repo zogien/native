@@ -557,7 +557,11 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try dir.createDirPath(io, "share/icons");
         const desktop_entry = try linuxDesktopEntry(allocator, options.metadata);
         defer allocator.free(desktop_entry);
-        const desktop_path = try std.fmt.allocPrint(allocator, "share/applications/{s}.desktop", .{options.metadata.name});
+        // Named after the bundle id, which is also the GApplication id the
+        // GTK host registers: GNOME Shell attributes notifications (and
+        // windows) by looking up `<app-id>.desktop`, and rejects
+        // notifications from an app id it cannot find.
+        const desktop_path = try std.fmt.allocPrint(allocator, "share/applications/{s}.desktop", .{options.metadata.id});
         defer allocator.free(desktop_path);
         try writeFile(dir, io, desktop_path, desktop_entry);
         if (options.metadata.file_associations.len > 0) {
@@ -3519,6 +3523,12 @@ test "windows and linux packages mirror app assets at their app-relative path" {
         defer std.testing.allocator.free(packaged);
         try std.testing.expectEqualStrings("mp3-bytes", packaged);
         try std.testing.expectError(error.FileNotFound, readPath(std.testing.allocator, std.testing.io, output ++ "/resources/music/track.mp3"));
+        if (target == .linux) {
+            const entry = try readPath(std.testing.allocator, std.testing.io, output ++ "/share/applications/dev.example.app.desktop");
+            defer std.testing.allocator.free(entry);
+            try std.testing.expect(std.mem.indexOf(u8, entry, "Exec=\"demo\"") != null);
+            try std.testing.expectError(error.FileNotFound, readPath(std.testing.allocator, std.testing.io, output ++ "/share/applications/demo.desktop"));
+        }
     }
 }
 

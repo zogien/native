@@ -884,8 +884,11 @@ test "showNotification reaches the desktop platform from the compiled core" {
     try std.testing.expectEqualStrings("build-status", h.harness.null_platform.lastNotificationId());
     try std.testing.expectEqualStrings("Pause polling", h.harness.null_platform.lastNotificationActionLabel());
     try std.testing.expectEqualStrings("core.toggle", h.harness.null_platform.lastNotificationActionCommand());
+    // The activation command selects the 0x48 record; decoding it must keep
+    // every earlier field in place.
+    try std.testing.expectEqualStrings("core.toggle", h.harness.null_platform.lastNotificationActivationCommand());
 
-    const activation = h.harness.null_platform.activateNotification("build-status") orelse return error.TestUnexpectedResult;
+    const activation = h.harness.null_platform.activateNotification("build-status", .action) orelse return error.TestUnexpectedResult;
     try h.harness.runtime.dispatchPlatformEvent(h.app, activation);
     try std.testing.expect(!Bridge.model().polling);
 }

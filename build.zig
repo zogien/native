@@ -835,6 +835,7 @@ pub fn build(b: *std.Build) void {
             probe_run.addFileArg(b.path(b.fmt("src/platform/macos/{s}", .{probe.file})));
             probe_run.addFileInput(b.path("src/platform/macos/appkit_host.m"));
             probe_run.addFileInput(b.path("src/platform/macos/appkit_host.h"));
+            probe_run.addFileInput(b.path("src/platform/macos/user_notifications.h"));
             probe_run.expectExitCode(0);
             b.step(probe.step, probe.description).dependOn(&probe_run.step);
             test_step.dependOn(&probe_run.step);
