@@ -197,6 +197,16 @@ jobs:
       # logoff and Restart Manager reach a tray-hidden window, run the
       # stop hook once, and unwind a dialog the app has open first.
       - run: zig build test-windows-session-end
+      # Toast activation in the same host without a toast or a click: the
+      # activation-argument parser, and the COM activator relaying one
+      # parsed activation to the loop window.
+      - run: zig build test-windows-toast-activation
+      # The loop, session-end and toast harnesses again for the MSVC ABI in
+      # Debug, the build an MSVC app's `native dev` runs. Only that ABI
+      # compiles the UCRT and MSVC STL inline functions into the host under
+      # Zig's UBSan; the runs above are GNU ABI. Uses the runner's Visual
+      # Studio, like test-windows-msvc-apps below.
+      - run: zig build test-windows-msvc-host
       # Effects.spawn is a pipe-backed background transport. Run its
       # Windows-only PowerShell probe natively so removing CREATE_NO_WINDOW
       # cannot leave the platform-neutral and Wine lanes green.

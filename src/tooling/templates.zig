@@ -1716,6 +1716,22 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    return .{ .cwd_relative = b.pathJoin(&.{ native_sdk_path, sub_path }) };
         \\}
         \\
+        \\/// The compile flags shared by every Windows host C++ source. Zig
+        \\/// compiles C++ with UBSan in Debug and ReleaseSafe; for the MSVC
+        \\/// ABI the host objects also carry UCRT and MSVC STL inline
+        \\/// functions written for a compiler without UBSan, and the SDK's
+        \\/// ignorelist exempts each from the one check it trips.
+        \\fn windowsHostCxxFlags(b: *std.Build, native_sdk_path: []const u8, target: std.Build.ResolvedTarget, extra: []const []const u8) []const []const u8 {
+        \\    var flags: std.ArrayList([]const u8) = .empty;
+        \\    flags.append(b.allocator, "-std=c++17") catch @panic("OOM");
+        \\    if (target.result.abi == .msvc) {
+        \\        const ignorelist = b.pathFromRoot(b.pathJoin(&.{ native_sdk_path, "src/platform/windows/ubsan_vendor_ignorelist.txt" }));
+        \\        flags.append(b.allocator, b.fmt("-fsanitize-ignorelist={s}", .{ignorelist})) catch @panic("OOM");
+        \\    }
+        \\    flags.appendSlice(b.allocator, extra) catch @panic("OOM");
+        \\    return flags.items;
+        \\}
+        \\
         \\fn nativeSdkModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, native_sdk_path: []const u8) *std.Build.Module {
         \\    const geometry_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/geometry/root.zig");
         \\    const assets_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/assets/root.zig");
@@ -1893,7 +1909,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                // fails the compile by design if it cannot be found.
         \\                app_mod.addIncludePath(nativeSdkPath(b, native_sdk_path, "third_party/webview2/include"));
         \\                if (windowsSdkWinrtIncludeDir(b, target)) |winrt| app_mod.addSystemIncludePath(.{ .cwd_relative = winrt });
-        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17" } });
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = windowsHostCxxFlags(b, native_sdk_path, target, &.{}) });
         \\                // WebView2Loader.dll rides next to the installed app
         \\                // executable: the host loads it at runtime to discover
         \\                // the machine's WebView2 runtime. Canvas apps never
@@ -1917,7 +1933,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                // stubbed host teaches at runtime by reporting
         \\                // WebViewNotFound the moment an app actually uses a
         \\                // WebView.
-        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", "-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB" } });
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = windowsHostCxxFlags(b, native_sdk_path, target, &.{"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB"}) });
         \\            },
         \\            .chromium => {
         \\                const cef_check = addCefCheck(b, target, cef_dir);
@@ -1928,12 +1944,12 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                exe.step.dependOn(&cef_check.step);
         \\                const include_arg = b.fmt("-I{s}", .{cef_dir});
         \\                const define_arg = b.fmt("-DNATIVE_SDK_CEF_DIR=\"{s}\"", .{cef_dir});
-        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/cef_host.cpp"), .flags = &.{ "-std=c++17", include_arg, define_arg } });
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/cef_host.cpp"), .flags = windowsHostCxxFlags(b, native_sdk_path, target, &.{ include_arg, define_arg }) });
         \\                app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.lib", .{cef_dir})));
         \\                app_mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
         \\            },
         \\        }
-        \\        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{ "-std=c++17" } });
+        \\        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/gpu_surface_renderer.cpp"), .flags = windowsHostCxxFlags(b, native_sdk_path, target, &.{}) });
         \\        app_mod.linkSystemLibrary("c", .{});
         \\        // The MSVC target compiles the hosts against the toolchain's own
         \\        // STL, which pulls in msvcprt/vcruntime through its default-lib
@@ -4326,6 +4342,11 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "the web layer is excluded ({s}) but the app declares web use ({s})") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".system => if (web_layer) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB\"") != null);
+    // Every Windows host C++ compile (WebView2, stub, CEF, GPU renderer)
+    // takes the SDK's shared flags, which pass the vendor UBSan ignorelist
+    // for MSVC targets, as build/app.zig's windowsHostCxxFlags does.
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, build_zig_text, ".flags = windowsHostCxxFlags(b, native_sdk_path, target, "));
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"src/platform/windows/ubsan_vendor_ignorelist.txt\"") != null);
     // The Linux seam mirrors it: gtk_host.c compiles with the WebKitGTK
     // stub define and webkitgtk-6.0 is not linked when native-only.
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB\"") != null);
