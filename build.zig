@@ -737,49 +737,33 @@ pub fn build(b: *std.Build) void {
         // probes below, it runs on hosts of its own platform only.
         const app_build = @import("build/app.zig");
         const loop_target = b.graph.host;
-        const loop_mod = b.createModule(.{ .target = loop_target, .optimize = optimize, .link_libc = true });
-        app_build.addWebView2HostIncludes(b, loop_mod, b.path("third_party/webview2/include"), loop_target);
-        loop_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/host_loop_test.cpp"), .flags = &.{"-std=c++17"} });
-        loop_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
-        app_build.linkWindowsHostLibraries(loop_mod, loop_target);
-        const loop_test = b.addExecutable(.{ .name = "windows-host-loop-test", .root_module = loop_mod });
-        loop_test.win32_manifest = b.path("assets/native-sdk.manifest");
-        const loop_run = b.addRunArtifact(loop_test);
-        loop_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
-        loop_run.expectExitCode(0);
+        const loop_test = windowsHostHarness(b, "windows-host-loop-test", "src/platform/windows/host_loop_test.cpp", loop_target, optimize);
+        const loop_run = windowsHostHarnessRun(b, loop_test, loop_target);
         b.step("test-windows-host-loop", "Verify the Windows host's loop model against a real WebView").dependOn(&loop_run.step);
         test_step.dependOn(&loop_run.step);
 
         // Session end (logoff, shutdown, Restart Manager) against the same
         // production host, sent from a second process the way Windows
         // sends it (see src/platform/windows/session_end_test.cpp).
-        const session_mod = b.createModule(.{ .target = loop_target, .optimize = optimize, .link_libc = true });
-        app_build.addWebView2HostIncludes(b, session_mod, b.path("third_party/webview2/include"), loop_target);
-        session_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/session_end_test.cpp"), .flags = &.{"-std=c++17"} });
-        session_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
-        app_build.linkWindowsHostLibraries(session_mod, loop_target);
-        const session_test = b.addExecutable(.{ .name = "windows-session-end-test", .root_module = session_mod });
-        session_test.win32_manifest = b.path("assets/native-sdk.manifest");
-        const session_run = b.addRunArtifact(session_test);
-        session_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
-        session_run.expectExitCode(0);
+        const session_test = windowsHostHarness(b, "windows-session-end-test", "src/platform/windows/session_end_test.cpp", loop_target, optimize);
+        const session_run = windowsHostHarnessRun(b, session_test, loop_target);
         b.step("test-windows-session-end", "Verify the Windows host's session end across processes").dependOn(&session_run.step);
         test_step.dependOn(&session_run.step);
 
         // Asynchronous dialogs on their own threads against the same
         // production host (see src/platform/windows/dialog_test.cpp).
-        const dialog_mod = b.createModule(.{ .target = loop_target, .optimize = optimize, .link_libc = true });
-        app_build.addWebView2HostIncludes(b, dialog_mod, b.path("third_party/webview2/include"), loop_target);
-        dialog_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/dialog_test.cpp"), .flags = &.{"-std=c++17"} });
-        dialog_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
-        app_build.linkWindowsHostLibraries(dialog_mod, loop_target);
-        const dialog_test = b.addExecutable(.{ .name = "windows-dialog-test", .root_module = dialog_mod });
-        dialog_test.win32_manifest = b.path("assets/native-sdk.manifest");
-        const dialog_run = b.addRunArtifact(dialog_test);
-        dialog_run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(loop_target)));
-        dialog_run.expectExitCode(0);
+        const dialog_test = windowsHostHarness(b, "windows-dialog-test", "src/platform/windows/dialog_test.cpp", loop_target, optimize);
+        const dialog_run = windowsHostHarnessRun(b, dialog_test, loop_target);
         b.step("test-windows-dialogs", "Verify the Windows host's asynchronous dialogs on their own threads").dependOn(&dialog_run.step);
         test_step.dependOn(&dialog_run.step);
+
+        // Toast activation parsing and the activator-to-loop-window relay
+        // in the same production host, with no toast or click (see
+        // src/platform/windows/toast_activation_test.cpp).
+        const toast_test = windowsHostHarness(b, "windows-toast-activation-test", "src/platform/windows/toast_activation_test.cpp", loop_target, optimize);
+        const toast_run = windowsHostHarnessRun(b, toast_test, loop_target);
+        b.step("test-windows-toast-activation", "Verify the Windows host parses and relays toast activations").dependOn(&toast_run.step);
+        test_step.dependOn(&toast_run.step);
 
         // Window icons from icon_path against the same production host
         // (see src/platform/windows/window_icon_test.cpp): a PNG and an
@@ -787,13 +771,7 @@ pub fn build(b: *std.Build) void {
         // the windows on the system default; a relative path resolves
         // against the working directory in development and against
         // resources\ beside bin\ in a packaged layout.
-        const icon_mod = b.createModule(.{ .target = loop_target, .optimize = optimize, .link_libc = true });
-        app_build.addWebView2HostIncludes(b, icon_mod, b.path("third_party/webview2/include"), loop_target);
-        icon_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/window_icon_test.cpp"), .flags = &.{"-std=c++17"} });
-        icon_mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
-        app_build.linkWindowsHostLibraries(icon_mod, loop_target);
-        const icon_test = b.addExecutable(.{ .name = "windows-window-icon-test", .root_module = icon_mod });
-        icon_test.win32_manifest = b.path("assets/native-sdk.manifest");
+        const icon_test = windowsHostHarness(b, "windows-window-icon-test", "src/platform/windows/window_icon_test.cpp", loop_target, optimize);
         const icon_step = b.step("test-windows-window-icon", "Verify the Windows host gives every window the icon_path icon");
         const icon_cases = [_]struct { path: []const u8, exists: bool, expect: []const u8 }{
             .{ .path = "assets/icon.png", .exists = true, .expect = "icon" },
@@ -829,6 +807,26 @@ pub fn build(b: *std.Build) void {
         icon_packaged_run.expectExitCode(0);
         icon_step.dependOn(&icon_packaged_run.step);
         test_step.dependOn(icon_step);
+
+        // The same harnesses built for the host architecture's MSVC ABI in
+        // Debug, the build an MSVC app's `native dev` runs. Under that ABI
+        // the host objects also compile the UCRT and MSVC STL inline
+        // functions under Zig's UBSan, which the GNU-ABI runs above never
+        // see (src/platform/windows/ubsan_vendor_ignorelist.txt). Debug,
+        // not ReleaseSafe: a UBSan finding then names the check and the
+        // stack instead of trapping silently. It needs Visual Studio, so it
+        // stays out of `test`, like test-windows-msvc-apps.
+        const msvc_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .windows, .abi = .msvc });
+        const msvc_host_step = b.step("test-windows-msvc-host", "Run the Windows host harnesses for the MSVC ABI in Debug");
+        const msvc_harnesses = [_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "windows-host-loop-test-msvc", .source = "src/platform/windows/host_loop_test.cpp" },
+            .{ .name = "windows-session-end-test-msvc", .source = "src/platform/windows/session_end_test.cpp" },
+            .{ .name = "windows-toast-activation-test-msvc", .source = "src/platform/windows/toast_activation_test.cpp" },
+        };
+        for (msvc_harnesses) |harness| {
+            const msvc_test = windowsHostHarness(b, harness.name, harness.source, msvc_target, .Debug);
+            msvc_host_step.dependOn(&windowsHostHarnessRun(b, msvc_test, msvc_target).step);
+        }
     }
     const window_drag_tests = b.addSystemCommand(&.{ "node", "--test" });
     window_drag_tests.addFileArg(b.path("scripts/webview-window-drag.test.mjs"));
@@ -4679,6 +4677,32 @@ fn windowsLauncher(b: *std.Build, arch: std.Target.Cpu.Arch) *std.Build.Step.Com
     });
     launcher.subsystem = .windows;
     return launcher;
+}
+
+/// A Windows host test harness: one test source that includes the
+/// production host, plus the GPU-surface renderer and the host's link set,
+/// all compiled with the flags apps compile the host with
+/// (windowsHostCxxFlags in build/app.zig).
+fn windowsHostHarness(b: *std.Build, name: []const u8, source: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const app_build = @import("build/app.zig");
+    const mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    app_build.addWebView2HostIncludes(b, mod, b.path("third_party/webview2/include"), target);
+    mod.addCSourceFile(.{ .file = b.path(source), .flags = app_build.windowsHostCxxFlags(b, target, &.{}) });
+    mod.addCSourceFile(.{ .file = b.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = app_build.windowsHostCxxFlags(b, target, &.{}) });
+    app_build.linkWindowsHostLibraries(mod, target);
+    const harness = b.addExecutable(.{ .name = name, .root_module = mod });
+    harness.win32_manifest = b.path("assets/native-sdk.manifest");
+    return harness;
+}
+
+/// Runs a host harness with the vendored WebView2Loader.dll on PATH; the
+/// harness reports failure through its exit code.
+fn windowsHostHarnessRun(b: *std.Build, harness: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) *std.Build.Step.Run {
+    const app_build = @import("build/app.zig");
+    const run = b.addRunArtifact(harness);
+    run.addPathDir(b.pathFromRoot(app_build.webView2LoaderDir(target)));
+    run.expectExitCode(0);
+    return run;
 }
 
 fn testArtifact(b: *std.Build, mod: *std.Build.Module) *std.Build.Step.Compile {

@@ -1,0 +1,19 @@
+# UBSan checks that fire inside Microsoft's headers, not in SDK code.
+#
+# Zig compiles C and C++ with -fsanitize=undefined in Debug (reported) and
+# in ReleaseSafe (trap, no message). The Windows host sources include the
+# UCRT and MSVC STL headers, whose inline functions compile into the host's
+# own objects under those checks. Those headers are written for MSVC, which
+# has no UBSan. Each entry below exempts one vendor function from one check,
+# with the reason its code is correct for the toolchain it targets. Every
+# Windows host C++ compile for the MSVC ABI passes this file
+# (windowsHostCxxFlags in build/app.zig). SDK code keeps every check.
+#
+# UCRT wchar.h, x64: wmemcmp compares a 4-unit tail as one unsigned __int64
+# load at whatever address it is handed. x64 and MSVC allow that unaligned
+# load, so the result is correct (measured), but -fsanitize=alignment
+# reports it whenever either side is not 8-byte aligned. A wide string
+# literal is only 2-byte aligned, and every std::wstring compare in the MSVC
+# STL ends in wmemcmp. Windows SDK 10.0.26100.0.
+[alignment]
+fun:wmemcmp

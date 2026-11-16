@@ -2752,8 +2752,12 @@ fn externalModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.R
 // check fires spuriously at startup; zig's ubsan_rt then cannot even decode
 // the report ("invalid enum value" / "passing zero to clz()" panics).
 // Reproduced with a 10-line `zig cc` program against both the 14.5 and
-// 26.0 SDKs. Release builds never hit it (no UBSan), which is why only
-// Debug-built examples (standardOptimizeOption default) crashed.
+// 26.0 SDKs. Zig compiles C and Objective-C with UBSan in Debug (reported)
+// and in ReleaseSafe (trap, no message), and without it in ReleaseFast and
+// ReleaseSmall. The crashes surfaced in Debug-built examples
+// (standardOptimizeOption's default), but ReleaseSafe compiles the same
+// check, so the flag holds for every mode. The Windows hosts meet the same
+// class of problem in the UCRT headers (windowsHostCxxFlags).
 fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, cef_dir: []const u8, cef_auto_install: bool) void {
     addPlatformLinkSearchPaths(b, platform, web_engine, cef_dir, app_mod);
     if (platform == .macos) {
@@ -2862,8 +2866,8 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 // turns on the host's embedded-WebView layer; the host
                 // fails the compile by design if it cannot be found.
                 addWebView2HostIncludes(b, app_mod, dep.path("third_party/webview2/include"), target);
-                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} });
-                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = windowsHostCxxFlags(dep.builder, target, &.{}) });
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = windowsHostCxxFlags(dep.builder, target, &.{}) });
                 // WebView2Loader.dll rides next to the installed app
                 // executable: the host loads it at runtime to discover
                 // the machine's WebView2 runtime. Canvas apps never
@@ -2887,8 +2891,8 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 // stubbed host teaches at runtime by reporting
                 // WebViewNotFound the moment an app actually uses a
                 // WebView.
-                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", "-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB" } });
-                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = windowsHostCxxFlags(dep.builder, target, &.{"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB"}) });
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = windowsHostCxxFlags(dep.builder, target, &.{}) });
             },
             .chromium => {
                 const cef_check = addCefCheck(b, target, cef_dir);
@@ -2899,8 +2903,8 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 exe.step.dependOn(&cef_check.step);
                 const include_arg = b.fmt("-I{s}", .{cef_dir});
                 const define_arg = b.fmt("-DNATIVE_SDK_CEF_DIR=\"{s}\"", .{cef_dir});
-                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/cef_host.cpp"), .flags = &.{ "-std=c++17", include_arg, define_arg } });
-                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/cef_host.cpp"), .flags = windowsHostCxxFlags(dep.builder, target, &.{ include_arg, define_arg }) });
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/gpu_surface_renderer.cpp"), .flags = windowsHostCxxFlags(dep.builder, target, &.{}) });
                 app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.lib", .{cef_dir})));
             },
         }
@@ -2928,6 +2932,33 @@ fn addPlatformLinkSearchPaths(b: *std.Build, platform: PlatformOption, web_engin
     } else if (platform == .windows and web_engine == .chromium) {
         mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
     }
+}
+
+/// The compile flags shared by every Windows host C++ source: the hosts,
+/// the GPU-surface renderer, and the SDK's own host test harnesses. `sdk`
+/// is the SDK's build (the dependency's builder in an app graph), so the
+/// ignorelist path resolves inside the SDK tree. `extra` follows the
+/// shared flags.
+///
+/// Sanitizer policy: Zig compiles C and C++ with -fsanitize=undefined in
+/// Debug (reported) and ReleaseSafe (trap), and the SDK keeps those checks
+/// on its own host code. For the MSVC ABI the host objects also carry the
+/// UCRT and MSVC STL inline functions, written for a compiler without
+/// UBSan. ubsan_vendor_ignorelist.txt exempts each such function from the
+/// one check it trips, with the evidence. Every host compile has to pass
+/// it, because an inline function compiled in two objects is a COMDAT the
+/// linker may take from either one. The GNU ABI calls wmemcmp out of line
+/// and needs no entry. macOS has the same class of problem (the
+/// -fno-sanitize=builtin comment above linkPlatform).
+pub fn windowsHostCxxFlags(sdk: *std.Build, target: std.Build.ResolvedTarget, extra: []const []const u8) []const []const u8 {
+    var flags: std.ArrayList([]const u8) = .empty;
+    flags.append(sdk.allocator, "-std=c++17") catch @panic("OOM");
+    if (target.result.abi == .msvc) {
+        const ignorelist = sdk.pathFromRoot("src/platform/windows/ubsan_vendor_ignorelist.txt");
+        flags.append(sdk.allocator, sdk.fmt("-fsanitize-ignorelist={s}", .{ignorelist})) catch @panic("OOM");
+    }
+    flags.appendSlice(sdk.allocator, extra) catch @panic("OOM");
+    return flags.items;
 }
 
 /// The vendored WebView2Loader.dll for the target architecture, relative
