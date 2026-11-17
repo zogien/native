@@ -105,7 +105,6 @@ static NSScreen *NativeSdkScreenForFrame(NSRect frame);
 static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen);
 static NSRect NativeSdkConstrainFrame(NSRect frame);
 static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen);
-static void NativeSdkApplyHiddenInsetTitlebar(NSWindow *window, int titlebar_style, NativeSdkChromiumWindowDelegate *delegate);
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath);
 static NSURL *NativeSdkAssetEntryFileURL(NSString *rootPath, NSString *entryPath);
 static NSString *NativeSdkSafeAssetPath(NSURL *url, NSString *entryPath);
@@ -583,6 +582,10 @@ static const char *NativeSdkCefBridgeScript() {
 }
 
 } // namespace
+
+// Defined at file scope further down, like this declaration: in C++ a
+// declaration inside the anonymous namespace names a different function.
+static void NativeSdkApplyHiddenInsetTitlebar(NSWindow *window, int titlebar_style, NativeSdkChromiumWindowDelegate *delegate);
 
 @implementation NativeSdkChromiumApplication
 
@@ -1612,8 +1615,8 @@ static const char *NativeSdkCefBridgeScript() {
     }
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_TIMER,
-        .timer_id = key.unsignedLongLongValue,
         .timestamp_ns = NativeSdkChromiumTimestampNanoseconds(),
+        .timer_id = key.unsignedLongLongValue,
     }];
 }
 
@@ -2198,9 +2201,9 @@ static const char *NativeSdkCefBridgeScript() {
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_TRAY_COMMAND,
         .window_id = 1,
-        .status_item_id = statusItemId,
         .command_name = bytes,
         .command_name_len = [command lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .status_item_id = statusItemId,
     }];
 }
 
@@ -3164,13 +3167,15 @@ int native_sdk_appkit_note_gpu_surface_input(native_sdk_appkit_host_t *host, uin
     return 0;
 }
 
-int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count) {
+int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count, const native_sdk_appkit_scroll_occluder_t *occluders, size_t occluder_count) {
     (void)host;
     (void)window_id;
     (void)label;
     (void)label_len;
     (void)drivers;
     (void)count;
+    (void)occluders;
+    (void)occluder_count;
     return 0;
 }
 
@@ -3311,6 +3316,25 @@ int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const
     return 0;
 }
 
+/* Ink-bounds twin of the declines above: without host metrics there are
+ * no host ink bounds either, and 0 tells the engine to keep its own. */
+int native_sdk_appkit_measure_text_ink(uint64_t font_id, double size, const char *text, size_t text_len, double *min_x, double *max_x, double *min_y, double *max_y) {
+    (void)font_id;
+    (void)size;
+    (void)text;
+    (void)text_len;
+    (void)min_x;
+    (void)max_x;
+    (void)min_y;
+    (void)max_y;
+    return 0;
+}
+
+/* Headless session replay activates the bundled faces a live host uses.
+ * This host draws no text and declines every measurement above, so its
+ * live run activates none and replay has nothing to activate either. */
+void native_sdk_appkit_register_bundled_fonts(void) {}
+
 /* Mirror of the AppKit host's decoder: ImageIO raster codecs plus NSImage's
  * system SVG rasterizer, with no host state, so both engines decode
  * identically. See appkit_host.h for the pixel-format and return-value
@@ -3328,8 +3352,8 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
             int64_t source_width_value = 0;
             int64_t source_height_value = 0;
             if (properties) {
-                CFNumberRef width_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
-                CFNumberRef height_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+                CFNumberRef width_value = (CFNumberRef)CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+                CFNumberRef height_value = (CFNumberRef)CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
                 if (width_value) CFNumberGetValue(width_value, kCFNumberSInt64Type, &source_width_value);
                 if (height_value) CFNumberGetValue(height_value, kCFNumberSInt64Type, &source_height_value);
                 CFRelease(properties);
@@ -3553,6 +3577,27 @@ int native_sdk_appkit_delete_credential(native_sdk_appkit_host_t *host, const ch
     }
 }
 
+/* Mirror of the AppKit host's formatter: Foundation only, no host state,
+ * so both engines format Cmd.formatLocalTime identically. */
+size_t native_sdk_appkit_format_local_time(native_sdk_appkit_host_t *host, int64_t timestamp_ms, int style, char *buffer, size_t buffer_len) {
+    (void)host;
+    if (!buffer || buffer_len == 0 || style < 0 || style > 2) return 0;
+    @autoreleasepool {
+        NSDate *date = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)timestamp_ms / 1000.0];
+        if (!date) return 0;
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.locale = [NSLocale autoupdatingCurrentLocale];
+        formatter.timeZone = [NSTimeZone localTimeZone];
+        formatter.dateStyle = (style == 0 || style == 2) ? NSDateFormatterShortStyle : NSDateFormatterNoStyle;
+        formatter.timeStyle = (style == 1 || style == 2) ? NSDateFormatterMediumStyle : NSDateFormatterNoStyle;
+        NSString *text = [formatter stringFromDate:date];
+        NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
+        if (!utf8 || utf8.length == 0 || utf8.length > buffer_len) return 0;
+        memcpy(buffer, utf8.bytes, utf8.length);
+        return utf8.length;
+    }
+}
+
 static NSArray<NSString *> *NativeSdkParseExtensions(const char *extensions, size_t len) {
     if (!extensions || len == 0) return nil;
     NSString *str = [[NSString alloc] initWithBytes:extensions length:len encoding:NSUTF8StringEncoding];
@@ -3715,7 +3760,8 @@ static NSImage *NativeSdkCefTrayImageWithOpacity(NSImage *source, double opacity
     [image lockFocus];
     [source drawInRect:NSMakeRect(0, 0, source.size.width, source.size.height) fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:fraction];
     [image unlockFocus];
-    image.template = YES;
+    // `template` is a C++ keyword, so ObjC++ cannot use the dot syntax.
+    [image setTemplate:YES];
     return image;
 }
 
@@ -3761,7 +3807,7 @@ static void NativeSdkCefApplyTrayShell(NativeSdkChromiumHost *object, NativeSdkC
         NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
         NSImage *image = [[NSImage alloc] initWithContentsOfFile:path];
         if (image) {
-            image.template = YES;
+            [image setTemplate:YES];
             image.size = NSMakeSize(18, 18);
             entry.baseImage = image;
         }
