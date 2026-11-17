@@ -138,7 +138,7 @@ zig build test-package-cef-layout -Dplatform=macos
 
 The Chromium smoke step requires a local CEF layout or `-Dcef-auto-install=true`. It launches the WebView example under CEF with automation, verifies `native.ping` over the bridge, and exercises child WebView create/setFrame/navigate/close. The package layout step verifies that a Chromium macOS package contains the framework and resources CEF expects.
 
-`zig build test-webview-cef-link` builds the WebView example with `-Dweb-engine=chromium` without running it. Use it to check compilation and linking after platform changes. `scripts/gate.sh fast` runs it automatically whenever `src/platform/macos/` files change (macOS only; it skips with a warning when no CEF layout is installed).
+`zig build test-webview-cef-link` builds the WebView example with `-Dweb-engine=chromium` without running it. `zig build test-cef-app-link` does the same for `examples/ui-inbox`, which builds through the same app graph as a `native init` app, and installs it under that example's `zig-out/cef-link`. Use both to check compilation and linking after framework changes. `scripts/gate.sh fast` runs both whenever framework sources change (macOS only; they skip with a warning when no CEF layout is installed), and CI runs both on macOS.
 
 ## Choosing An Engine
 

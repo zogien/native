@@ -114,6 +114,35 @@ jobs:
       - run: zig build test-gpu-components-smoke
         env:
           NATIVE_SDK_SMOKE_BUDGET_MS: "1500"
+      # Only Chromium-engine builds compile the Chromium host
+      # (src/platform/macos/cef_host.mm), and no other job runs one. Install
+      # the pinned prepared runtime through the documented `native cef
+      # install` path, then link the WebView example and an addApp example,
+      # whose shared runner references more host symbols, against it.
+      # These steps run last and on `!cancelled()`, so a failure above does
+      # not skip them and a failure here does not hide the checks above;
+      # each link check runs whenever the runtime is in place, even if the
+      # other one failed. The cache key hashes src/tooling/cef.zig, which
+      # holds the pin, and the runtime is saved right after the install so
+      # a failing link check does not discard it.
+      - uses: actions/cache/restore@v4
+        if: ${{ !cancelled() }}
+        id: cef-runtime
+        with:
+          path: third_party/cef/macos
+          key: cef-macos-${{ runner.arch }}-${{ hashFiles('src/tooling/cef.zig') }}
+      - if: ${{ !cancelled() && steps.cef-runtime.outputs.cache-hit != 'true' }}
+        id: cef-install
+        run: zig build cli && ./zig-out/bin/native cef install
+      - if: ${{ !cancelled() && steps.cef-install.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/cef/macos
+          key: ${{ steps.cef-runtime.outputs.cache-primary-key }}
+      - if: ${{ !cancelled() && (steps.cef-runtime.outputs.cache-hit == 'true' || steps.cef-install.outcome == 'success') }}
+        run: zig build test-webview-cef-link
+      - if: ${{ !cancelled() && (steps.cef-runtime.outputs.cache-hit == 'true' || steps.cef-install.outcome == 'success') }}
+        run: zig build test-cef-app-link
 
   macos-gpu-perf:
     name: macOS GPU Perf

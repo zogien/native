@@ -3407,6 +3407,17 @@ pub fn build(b: *std.Build) void {
     const webview_cef_link_step = b.step("test-webview-cef-link", "Build the WebView example with Chromium/CEF");
     webview_cef_link_step.dependOn(&build_webview_cef.step);
 
+    // The WebView example wires its own runner, which has no session
+    // replay. Apps built through addApp (every `native init` app) link the
+    // shared app runner, whose headless replay reaches host symbols the
+    // example never references, so link one of those too. The build goes to
+    // its own prefix so the example's usual zig-out/bin keeps the system
+    // engine build.
+    const build_app_cef = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=chromium", b.fmt("-Dcef-dir={s}", .{exampleCefDir(b, cef_dir)}), "--prefix", "zig-out/cef-link" });
+    build_app_cef.setCwd(b.path("examples/ui-inbox"));
+    const app_cef_link_step = b.step("test-cef-app-link", "Build an addApp example (ui-inbox) with Chromium/CEF");
+    app_cef_link_step.dependOn(&build_app_cef.step);
+
     const webview_smoke_step = b.step("test-webview-smoke", "Run macOS WebView automation smoke test");
     const webview_smoke_build = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Djs-bridge=true" });
     webview_smoke_build.setCwd(b.path("examples/webview"));
