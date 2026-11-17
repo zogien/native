@@ -203,8 +203,20 @@ pub fn parsePrepareOptions(args: []const []const u8) Error!PrepareOptions {
     return options;
 }
 
+/// Asset name prefixes `native cef install` accepts for a prepared runtime,
+/// in the order it tries them. `prepare-release` (and so the CEF runtime
+/// workflow) names assets with the first. The pinned runtime was published
+/// before the project rename, so its release carries only the legacy
+/// `zero-native-cef-` assets; without the fallback the default install
+/// 404s.
+pub const prepared_archive_prefixes = [_][]const u8{ "native-sdk-cef-", "zero-native-cef-" };
+
 pub fn preparedArchiveName(buffer: []u8, version: []const u8, platform: Platform) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "native-sdk-cef-{s}-{s}.tar.gz", .{ version, platform.name() });
+    return preparedArchiveNameWithPrefix(buffer, prepared_archive_prefixes[0], version, platform);
+}
+
+pub fn preparedArchiveNameWithPrefix(buffer: []u8, prefix: []const u8, version: []const u8, platform: Platform) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{s}{s}-{s}.tar.gz", .{ prefix, version, platform.name() });
 }
 
 pub fn archiveName(buffer: []u8, version: []const u8, platform: Platform) ![]const u8 {
@@ -218,8 +230,12 @@ fn trimTrailingSlashes(value: []const u8) []const u8 {
 }
 
 pub fn preparedArchiveUrl(allocator: std.mem.Allocator, base_url: []const u8, version: []const u8, platform: Platform) ![]const u8 {
+    return preparedArchiveUrlWithPrefix(allocator, base_url, prepared_archive_prefixes[0], version, platform);
+}
+
+pub fn preparedArchiveUrlWithPrefix(allocator: std.mem.Allocator, base_url: []const u8, prefix: []const u8, version: []const u8, platform: Platform) ![]const u8 {
     var name_buffer: [256]u8 = undefined;
-    const name = try preparedArchiveName(&name_buffer, version, platform);
+    const name = try preparedArchiveNameWithPrefix(&name_buffer, prefix, version, platform);
     return std.fmt.allocPrint(allocator, "{s}/cef-{s}/{s}", .{ trimTrailingSlashes(base_url), version, name });
 }
 
@@ -334,27 +350,9 @@ fn installPrepared(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
     try std.Io.Dir.cwd().createDirPath(io, cache_path);
 
     var archive_name_buffer: [256]u8 = undefined;
-    const archive_name = try preparedArchiveName(&archive_name_buffer, options.version, platform);
+    const archive_name = try fetchPreparedArchive(allocator, io, options, platform, cache_path, &archive_name_buffer);
     const archive_path = try std.fs.path.join(allocator, &.{ cache_path, archive_name });
     errdefer allocator.free(archive_path);
-    const sha_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{archive_path});
-    defer allocator.free(sha_path);
-
-    const url = try preparedArchiveUrl(allocator, options.download_url orelse default_prepared_download_url, options.version, platform);
-    defer allocator.free(url);
-    const sha_url = try std.fmt.allocPrint(allocator, "{s}.sha256", .{url});
-    defer allocator.free(sha_url);
-
-    if (options.force or !pathExists(io, archive_path)) {
-        downloadFile(io, archive_path, url) catch |err| {
-            std.debug.print("Prepared native-sdk CEF runtime is not available at {s}\n", .{url});
-            std.debug.print("Maintainers can publish it with the CEF runtime release workflow. Advanced users may run `native cef install --source official --allow-build-tools`.\n", .{});
-            return err;
-        };
-    }
-    if (options.force or !pathExists(io, sha_path)) {
-        try downloadFile(io, sha_path, sha_url);
-    }
     try verifyArchiveChecksum(allocator, io, cache_path, archive_name);
 
     const tmp_dir = try std.fs.path.join(allocator, &.{ cache_path, "extract-tmp" });
@@ -432,6 +430,84 @@ fn installOfficial(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
     try ensureLayoutFor(io, platform, options.dir);
 
     return .{ .dir = options.dir, .archive_path = archive_path, .platform = platform, .installed = true };
+}
+
+/// Puts a prepared runtime archive and its `.sha256` in the cache and
+/// returns the asset name it used (formatted into `name_buffer`). Without
+/// --force a cached pair under any accepted name is reused; otherwise each
+/// name in `prepared_archive_prefixes` is tried in turn until the release
+/// serves both files. The caller verifies the checksum either way.
+fn fetchPreparedArchive(allocator: std.mem.Allocator, io: std.Io, options: InstallOptions, platform: Platform, cache_path: []const u8, name_buffer: *[256]u8) ![]const u8 {
+    const base_url = options.download_url orelse default_prepared_download_url;
+    if (!options.force) {
+        for (prepared_archive_prefixes) |prefix| {
+            const name = try preparedArchiveNameWithPrefix(name_buffer, prefix, options.version, platform);
+            if (try cachedPreparedPair(allocator, io, cache_path, name)) return name;
+        }
+    }
+    for (prepared_archive_prefixes, 0..) |prefix, index| {
+        const name = try preparedArchiveNameWithPrefix(name_buffer, prefix, options.version, platform);
+        const url = try preparedArchiveUrlWithPrefix(allocator, base_url, prefix, options.version, platform);
+        defer allocator.free(url);
+        downloadPreparedPair(allocator, io, cache_path, name, url) catch |err| {
+            if (index + 1 < prepared_archive_prefixes.len) {
+                std.debug.print("Could not download the prepared CEF runtime and its .sha256 from {s}; trying the next asset name.\n", .{url});
+                continue;
+            }
+            // Name every URL: a network failure on an earlier name lands
+            // here too, and the last name alone may be one the release
+            // never served.
+            std.debug.print("Could not download the prepared native-sdk CEF runtime and its .sha256 from any of:\n", .{});
+            for (prepared_archive_prefixes) |tried| {
+                const tried_url = try preparedArchiveUrlWithPrefix(allocator, base_url, tried, options.version, platform);
+                defer allocator.free(tried_url);
+                std.debug.print("  {s}\n", .{tried_url});
+            }
+            std.debug.print("Maintainers can publish it with the CEF runtime release workflow. Advanced users may run `native cef install --source official --allow-build-tools`.\n", .{});
+            return err;
+        };
+        return name;
+    }
+    unreachable;
+}
+
+/// Whether the cache holds both halves of a prepared download: an archive
+/// without its `.sha256` (left by an older CLI) is not reused, so it gets
+/// downloaded again instead of failing every later install.
+fn cachedPreparedPair(allocator: std.mem.Allocator, io: std.Io, cache_path: []const u8, name: []const u8) !bool {
+    const archive_path = try std.fs.path.join(allocator, &.{ cache_path, name });
+    defer allocator.free(archive_path);
+    const sha_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{archive_path});
+    defer allocator.free(sha_path);
+    return pathExists(io, archive_path) and pathExists(io, sha_path);
+}
+
+/// Downloads an asset's `.sha256`, then the archive, into `.part` files
+/// and moves both into place only once both arrived. A failed or
+/// interrupted download therefore never replaces a cached pair or leaves
+/// half of one, and a release that lacks the `.sha256` counts as not
+/// serving that name.
+fn downloadPreparedPair(allocator: std.mem.Allocator, io: std.Io, cache_path: []const u8, name: []const u8, url: []const u8) !void {
+    const archive_path = try std.fs.path.join(allocator, &.{ cache_path, name });
+    defer allocator.free(archive_path);
+    const sha_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{archive_path});
+    defer allocator.free(sha_path);
+    const archive_part = try std.fmt.allocPrint(allocator, "{s}.part", .{archive_path});
+    defer allocator.free(archive_part);
+    const sha_part = try std.fmt.allocPrint(allocator, "{s}.part", .{sha_path});
+    defer allocator.free(sha_part);
+    const sha_url = try std.fmt.allocPrint(allocator, "{s}.sha256", .{url});
+    defer allocator.free(sha_url);
+
+    const cwd = std.Io.Dir.cwd();
+    errdefer {
+        cwd.deleteFile(io, sha_part) catch {};
+        cwd.deleteFile(io, archive_part) catch {};
+    }
+    try downloadFile(io, sha_part, sha_url);
+    try downloadFile(io, archive_part, url);
+    try cwd.rename(archive_part, cwd, archive_path, io);
+    try cwd.rename(sha_part, cwd, sha_path, io);
 }
 
 fn verifyArchiveChecksum(allocator: std.mem.Allocator, io: std.Io, cache_path: []const u8, archive_name: []const u8) !void {
@@ -604,6 +680,21 @@ test "archive urls trim trailing slash" {
     const url = try archiveUrl(std.testing.allocator, "https://example.com/", "1.2.3", .macosx64);
     defer std.testing.allocator.free(url);
     try std.testing.expectEqualStrings("https://example.com/cef_binary_1.2.3_macosx64.tar.bz2", url);
+}
+
+test "prepared installs try the current asset name before the legacy one" {
+    try std.testing.expectEqual(@as(usize, 2), prepared_archive_prefixes.len);
+    var buffer: [256]u8 = undefined;
+    var current_buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        try preparedArchiveName(&current_buffer, "1.2.3", .macosarm64),
+        try preparedArchiveNameWithPrefix(&buffer, "native-sdk-cef-", "1.2.3", .macosarm64),
+    );
+    try std.testing.expectEqualStrings("zero-native-cef-1.2.3+gabc+chromium-4.5.6-macosarm64.tar.gz", try preparedArchiveNameWithPrefix(&buffer, prepared_archive_prefixes[1], "1.2.3+gabc+chromium-4.5.6", .macosarm64));
+
+    const legacy_url = try preparedArchiveUrlWithPrefix(std.testing.allocator, "https://example.com/releases/", prepared_archive_prefixes[1], "1.2.3", .macosarm64);
+    defer std.testing.allocator.free(legacy_url);
+    try std.testing.expectEqualStrings("https://example.com/releases/cef-1.2.3/zero-native-cef-1.2.3-macosarm64.tar.gz", legacy_url);
 }
 
 test "parse install options" {

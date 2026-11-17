@@ -660,6 +660,10 @@ double native_sdk_appkit_measure_text(uint64_t font_id, double size, const char 
 int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const char *text, size_t text_len, float *advances);
 /* Shaped glyph-path bounds for one line, relative to its baseline. */
 int native_sdk_appkit_measure_text_ink(uint64_t font_id, double size, const char *text, size_t text_len, double *min_x, double *max_x, double *min_y, double *max_y);
+/* Activates the app's bundled fonts for this process without a live host
+ * object, for headless session replay. Safe to call alongside a live
+ * host. Hosts that draw no text themselves accept it as a no-op. */
+void native_sdk_appkit_register_bundled_fonts(void);
 
 // Register engine-validated TrueType bytes under a canvas font id so
 // measurement and packet text drawing resolve the id to this exact face.
