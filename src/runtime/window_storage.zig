@@ -7,6 +7,7 @@ const runtime_state = @import("state.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
+const window_state = @import("../window_state/root.zig");
 
 const WindowSourcePolicy = runtime_state.WindowSourcePolicy;
 const copySourceInto = runtime_state.copySourceInto;
@@ -110,6 +111,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             if (Self.findWindowIndexByLabel(self, label) != null) return error.DuplicateWindowLabel;
             const index = try Self.reserveWindow(self, id, label, options.title, source, source_reloads_from_app, source_policy);
             self.windows[index].activate_on_show = options.activate_on_show;
+            self.windows[index].restore_state = options.restore_state;
             var native_created = false;
             errdefer Self.removeWindowAt(self, index);
             errdefer if (native_created) self.options.platform.services.closeWindow(id) catch {};
@@ -130,8 +132,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             if (window_options.restore_state) {
                 if (self.options.window_state_store) |store| {
                     if (store.loadWindow(window_options.label, &self.window_state_read_scratch) catch null) |saved| {
-                        window_options.default_frame = saved.frame;
-                        window_options.initial_placement = .restored;
+                        window_options.applySavedPlacement(saved);
                     }
                 }
             }
@@ -165,6 +166,12 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
                 .open = true,
                 .focused = self.window_count == 0,
             };
+            // Startup windows reach the table through this reservation
+            // from several paths (the host's first frame event, scene and
+            // scene-less startup loads); their persistence policy is the
+            // declaration's. Runtime-created windows override it with
+            // their own options right after.
+            self.windows[index].restore_state = Self.declaredStartupRestoreState(self, id);
             self.windows[index].main_view_id = Self.allocateViewId(self);
             self.windows[index].source = if (source) |source_value| try Self.copySource(self, index, source_value) else null;
             self.windows[index].source_reloads_from_app = source_reloads_from_app;
@@ -209,9 +216,23 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             return copySourceInto(&self.loaded_source_storage, source);
         }
 
+        /// The `restore_state` a startup declaration gives the window with
+        /// this id; true (the option's default) for any other window.
+        fn declaredStartupRestoreState(self: *const Runtime, id: platform.WindowId) bool {
+            const app_info = self.options.platform.app_info;
+            for (0..app_info.startupWindowCount()) |startup_index| {
+                const declared = app_info.resolvedStartupWindow(startup_index);
+                if (declared.id == id) return declared.restore_state;
+            }
+            return true;
+        }
+
         pub fn applyNativeInfo(self: *Runtime, index: usize, native_info: platform.WindowInfo) anyerror!void {
             self.windows[index].info.frame = native_info.frame;
             self.windows[index].info.scale_factor = native_info.scale_factor;
+            // A restored window can open maximized; creation has no prior
+            // state, so this is no maximized edge to announce.
+            self.windows[index].info.maximized = native_info.maximized;
             if (self.window_lifecycle_policy == null) {
                 self.windows[index].info.open = native_info.open;
                 self.windows[index].info.hidden = native_info.hidden;
@@ -262,13 +283,83 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
                 try Self.setWindowFocused(self, index, false);
         }
 
-        pub fn runtimeWindowStateForPersistence(self: *const Runtime, state: platform.WindowState) platform.WindowState {
+        /// THE window-state persistence seam: both host flows hand every
+        /// window frame event here once the runtime table has taken it.
+        /// It writes the record `runtimeWindowStateForPersistence` builds,
+        /// and skips the file write when that record is the one this
+        /// window last wrote — the frames of a drag (whose placement does
+        /// not change until it settles), focus echoes with nothing new,
+        /// and repeated close echoes cost no I/O. A failed write leaves
+        /// the digest alone, so the next event retries it.
+        pub fn persistWindowState(self: *Runtime, store: window_state.Store, state: platform.WindowState) !void {
+            const record = Self.runtimeWindowStateForPersistence(self, state) orelse return;
+            const digest = windowRecordDigest(record);
+            const index = Self.findWindowIndexById(self, state.id);
+            if (index) |slot| {
+                if (self.windows[slot].persisted_digest) |previous| {
+                    if (previous == digest) return;
+                }
+            }
+            try store.saveWindow(record);
+            if (index) |slot| self.windows[slot].persisted_digest = digest;
+        }
+
+        /// The record a frame event persists, or null when the window
+        /// opted out of persistence (`restore_state = false`). The frame
+        /// and `maximized` are the window's PLACEMENT, not its live
+        /// geometry:
+        /// - A host with the placement query answers them (the normal
+        ///   frame, maximized or not), before and after the window closes.
+        /// - Without an answer, an open window's frame event supplies its
+        ///   own values (the hosts that predate the query keep exactly
+        ///   their earlier behavior).
+        /// - Without an answer, a close (`open = false`) never replaces
+        ///   the geometry: it keeps the window's last known placement — or
+        ///   the record in the runtime's window-state store, when this
+        ///   session saw none — and only flips `open`.
+        /// Fullscreen is never persisted (it is never restored), and the
+        /// label and title come from runtime storage, which outlives the
+        /// event's transient slices.
+        pub fn runtimeWindowStateForPersistence(self: *Runtime, state: platform.WindowState) ?platform.WindowState {
             var persisted = state;
-            if (Self.findWindowIndexById(self, state.id)) |index| {
-                persisted.label = self.windows[index].info.label;
-                persisted.title = self.windows[index].info.title;
+            persisted.fullscreen = false;
+            // A window the table could not take keeps the event's values.
+            const index = Self.findWindowIndexById(self, state.id) orelse return persisted;
+            const window = &self.windows[index];
+            if (!window.restore_state) return null;
+            persisted.label = window.info.label;
+            persisted.title = window.info.title;
+            if (self.options.platform.services.windowPlacement(state.id)) |placement| {
+                window.last_placement = placement;
+                persisted.frame = placement.frame;
+                persisted.maximized = placement.maximized;
+            } else if (state.open) {
+                window.last_placement = .{ .frame = state.frame, .maximized = state.maximized };
+            } else if (window.last_placement) |known| {
+                persisted.frame = known.frame;
+                persisted.maximized = known.maximized;
+            } else if (self.options.window_state_store) |store| {
+                // A read failure is a miss: the event's values stand.
+                if (store.loadWindow(window.info.label, &self.window_state_read_scratch) catch null) |saved| {
+                    persisted.frame = saved.frame;
+                    persisted.maximized = saved.maximized;
+                }
             }
             return persisted;
+        }
+
+        /// Every field the store serializes, so equal digests mean an
+        /// identical record on disk.
+        fn windowRecordDigest(record: platform.WindowState) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            hasher.update(std.mem.asBytes(&record.id));
+            hasher.update(record.label);
+            hasher.update(&.{0});
+            hasher.update(record.title);
+            const numbers = [_]f32{ record.frame.x, record.frame.y, record.frame.width, record.frame.height, record.scale_factor };
+            hasher.update(std.mem.sliceAsBytes(&numbers));
+            hasher.update(&.{ @intFromBool(record.open), @intFromBool(record.focused), @intFromBool(record.maximized), @intFromBool(record.fullscreen) });
+            return hasher.final();
         }
 
         pub fn shellBoundsForWindow(self: *const Runtime, window_id: platform.WindowId) geometry.RectF {

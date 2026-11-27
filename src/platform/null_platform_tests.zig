@@ -1030,3 +1030,104 @@ test "null platform fireTimer synthesizes timer events for live timers only" {
     try std.testing.expect(null_platform.fireTimer(2, 50_000) != null);
     try std.testing.expect(null_platform.fireTimer(2, 51_000) == null);
 }
+
+test "null placement query keeps the normal frame through maximize and restore" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+    const normal = geometry.RectF.init(120, 80, 900, 640);
+    _ = try services.createWindow(.{ .id = 2, .label = "tools", .default_frame = normal });
+    try std.testing.expectEqual(types.WindowPlacement{ .frame = normal }, services.windowPlacement(2).?);
+
+    try services.maximizeWindow(2);
+    const maximized = null_platform.windowFrameEvent(2).?.window_frame_changed;
+    try std.testing.expect(maximized.maximized);
+    // The live frame fills the modeled work area; the placement does not.
+    try std.testing.expectEqual(null_platform.maximized_frame, maximized.frame);
+    try std.testing.expectEqual(types.WindowPlacement{ .frame = normal, .maximized = true }, services.windowPlacement(2).?);
+
+    // Minimizing reports the pre-minimize mode and its normal frame.
+    try services.minimizeWindow(2);
+    try std.testing.expectEqual(types.WindowPlacement{ .frame = normal, .maximized = true }, services.windowPlacement(2).?);
+
+    try services.unmaximizeWindow(2);
+    try std.testing.expectEqual(normal, null_platform.windowFrameEvent(2).?.window_frame_changed.frame);
+    try std.testing.expectEqual(types.WindowPlacement{ .frame = normal }, services.windowPlacement(2).?);
+    try std.testing.expect(services.windowPlacement(99) == null);
+}
+
+test "null placement query advances only when a move settles and survives a user close" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+    const normal = geometry.RectF.init(10, 20, 640, 480);
+    _ = try services.createWindow(.{ .id = 2, .label = "tools", .default_frame = normal });
+
+    const dragging = geometry.RectF.init(30, 40, 640, 480);
+    const mid_drag = null_platform.userMoveWindow(2, dragging, false).?.window_frame_changed;
+    try std.testing.expectEqual(dragging, mid_drag.frame);
+    try std.testing.expectEqual(normal, services.windowPlacement(2).?.frame);
+
+    const dropped = geometry.RectF.init(50, 60, 700, 500);
+    _ = null_platform.userMoveWindow(2, dropped, true).?;
+    try std.testing.expectEqual(dropped, services.windowPlacement(2).?.frame);
+
+    // The user close removes the window; the cache still answers for it.
+    const closed = null_platform.userCloseWindow(2).?.window_frame_changed;
+    try std.testing.expect(!closed.open);
+    try std.testing.expect(null_platform.windowFrameEvent(2) == null);
+    try std.testing.expectEqual(types.WindowPlacement{ .frame = dropped }, services.windowPlacement(2).?);
+
+    // A re-created window under the same id takes the entry over.
+    _ = try services.createWindow(.{ .id = 2, .label = "tools", .default_frame = normal });
+    try std.testing.expectEqual(normal, services.windowPlacement(2).?.frame);
+}
+
+test "null platform opens a window maximized over its normal frame on request" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+    const normal = geometry.RectF.init(200, 100, 800, 600);
+    const info = try services.createWindow(.{ .id = 2, .label = "tools", .default_frame = normal, .initial_maximized = true });
+    try std.testing.expect(info.maximized);
+    try std.testing.expectEqual(null_platform.maximized_frame, info.frame);
+    try std.testing.expectEqual(types.WindowPlacement{ .frame = normal, .maximized = true }, services.windowPlacement(2).?);
+
+    // Restore returns to the requested normal frame.
+    try services.unmaximizeWindow(2);
+    try std.testing.expectEqual(normal, null_platform.windowFrameEvent(2).?.window_frame_changed.frame);
+
+    // A non-resizable window has no maximize to open in.
+    const fixed = try services.createWindow(.{ .id = 3, .label = "fixed", .default_frame = normal, .resizable = false, .initial_maximized = true });
+    try std.testing.expect(!fixed.maximized);
+    try std.testing.expectEqual(normal, fixed.frame);
+}
+
+test "host services without the placement query answer null" {
+    const services: types.PlatformServices = .{};
+    try std.testing.expect(services.windowPlacement(1) == null);
+}
+
+test "null platform opens a restored-maximized startup window maximized over its normal frame" {
+    const Recorder = struct {
+        startup: ?types.WindowState = null,
+
+        fn handle(context: *anyopaque, event: Event) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event) {
+                .window_frame_changed => |window| self.startup = window,
+                else => {},
+            }
+        }
+    };
+
+    const normal = geometry.RectF.init(100, 80, 900, 640);
+    var null_platform = NullPlatform.initWithOptions(.{}, .system, .{
+        .app_name = "Restored",
+        .main_window = .{ .default_frame = normal, .initial_placement = .restored, .initial_maximized = true },
+    });
+    var recorder: Recorder = .{};
+    try null_platform.platform().run(Recorder.handle, &recorder);
+
+    const startup = recorder.startup.?;
+    try std.testing.expect(startup.maximized);
+    try std.testing.expectEqual(null_platform.maximized_frame, startup.frame);
+    try std.testing.expectEqual(types.WindowPlacement{ .frame = normal, .maximized = true }, null_platform.platform().services.windowPlacement(startup.id).?);
+}

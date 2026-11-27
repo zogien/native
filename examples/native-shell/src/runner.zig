@@ -569,18 +569,13 @@ fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *n
         for (restored_windows, 0..) |*window, index| {
             if (!window.restore_state) continue;
             if (store.loadWindow(window.label, &buffers.read) catch null) |saved| {
-                window.default_frame = saved.frame;
-                window.initial_placement = .restored;
-                if (index == 0) {
-                    app_info.main_window.default_frame = saved.frame;
-                    app_info.main_window.initial_placement = .restored;
-                }
+                window.applySavedPlacement(saved);
+                if (index == 0) app_info.main_window.applySavedPlacement(saved);
             }
         }
     } else if (app_info.main_window.restore_state) {
         if (store.loadWindow(app_info.main_window.label, &buffers.read) catch null) |saved| {
-            app_info.main_window.default_frame = saved.frame;
-            app_info.main_window.initial_placement = .restored;
+            app_info.main_window.applySavedPlacement(saved);
         }
     }
     return store;

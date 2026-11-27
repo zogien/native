@@ -49,4 +49,5 @@ test {
     _ = @import("session_record.zig");
     _ = @import("session_tests.zig");
     _ = @import("window_controls_tests.zig");
+    _ = @import("window_persistence_tests.zig");
 }

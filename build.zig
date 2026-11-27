@@ -765,6 +765,16 @@ pub fn build(b: *std.Build) void {
         b.step("test-windows-toast-activation", "Verify the Windows host parses and relays toast activations").dependOn(&toast_run.step);
         test_step.dependOn(&toast_run.step);
 
+        // Window placement against the same production host (see
+        // src/platform/windows/window_placement_test.cpp): exact content
+        // size and origin round trips for every titlebar style, the
+        // placement cache's settle points, maximized opens through every
+        // show path, and the off-screen restore policies.
+        const placement_test = windowsHostHarness(b, "windows-window-placement-test", "src/platform/windows/window_placement_test.cpp", loop_target, optimize);
+        const placement_run = windowsHostHarnessRun(b, placement_test, loop_target);
+        b.step("test-windows-window-placement", "Verify the Windows host's window placement: size round trips, settle points, maximized opens").dependOn(&placement_run.step);
+        test_step.dependOn(&placement_run.step);
+
         // Window icons from icon_path against the same production host
         // (see src/platform/windows/window_icon_test.cpp): a PNG and an
         // .ico load; a missing path and a file that is not an image leave
@@ -2136,8 +2146,8 @@ pub fn build(b: *std.Build) void {
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-owned-runner-window-placement", "Verify owned example runners preserve explicit origins and distinguish successful state restoration", &.{
         .{ .path = "examples/hello/src/runner.zig", .pattern = ".initial_placement = if (@hasField(@TypeOf(window), \"x\") or @hasField(@TypeOf(window), \"y\")) .explicit else .default" },
-        .{ .path = "examples/hello/src/runner.zig", .pattern = "window.initial_placement = .restored;" },
-        .{ .path = "examples/hello/src/runner.zig", .pattern = "app_info.main_window.initial_placement = .restored;" },
+        .{ .path = "examples/hello/src/runner.zig", .pattern = "window.applySavedPlacement(saved);" },
+        .{ .path = "examples/hello/src/runner.zig", .pattern = "if (index == 0) app_info.main_window.applySavedPlacement(saved);" },
         .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);" },
         .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);" },
         .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);" },

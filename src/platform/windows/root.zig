@@ -178,6 +178,8 @@ extern fn native_sdk_windows_show_window(host: *WindowsHost, window_id: u64) c_i
 extern fn native_sdk_windows_set_window_close_policy(host: *WindowsHost, window_id: u64, close_policy: c_int) c_int;
 extern fn native_sdk_windows_maximize_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_unmaximize_window(host: *WindowsHost, window_id: u64) c_int;
+extern fn native_sdk_windows_window_placement(host: *WindowsHost, window_id: u64, x: *f64, y: *f64, width: *f64, height: *f64, maximized: *c_int) c_int;
+extern fn native_sdk_windows_window_frame(host: *WindowsHost, window_id: u64, x: *f64, y: *f64, width: *f64, height: *f64, scale: *f64, maximized: *c_int) c_int;
 extern fn native_sdk_windows_request_close_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, gpu_backend_request: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_update_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
@@ -479,6 +481,7 @@ pub const WindowsPlatform = struct {
                 .minimize_window_fn = minimizeWindow,
                 .maximize_window_fn = maximizeWindow,
                 .unmaximize_window_fn = unmaximizeWindow,
+                .window_placement_fn = windowPlacement,
                 .request_close_window_fn = requestCloseWindow,
                 .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
@@ -1034,6 +1037,7 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (!options.activate_on_show) flags |= 1 << 3;
     if (!options.allows_fullscreen) flags |= 1 << 4;
     if (options.window_drag_regions) flags |= 1 << 5;
+    if (options.initial_maximized) flags |= 1 << 6;
     return flags;
 }
 
@@ -1064,15 +1068,46 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const frame = options.default_frame;
     if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, initialPlacementInt(options.initial_placement), restorePolicyInt(options.restore_policy), if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
     applyWindowClosePolicy(self.host, options.id, options.close_policy);
+    // The live frame, not the requested one: the host positions the
+    // window (its origin in physical screen pixels) and may open it
+    // maximized, which the runtime's window table must know before the
+    // first frame event.
+    var live_x: f64 = frame.x;
+    var live_y: f64 = frame.y;
+    var live_width: f64 = frame.width;
+    var live_height: f64 = frame.height;
+    var live_scale: f64 = 1;
+    var live_maximized: c_int = 0;
+    _ = native_sdk_windows_window_frame(self.host, options.id, &live_x, &live_y, &live_width, &live_height, &live_scale, &live_maximized);
     return .{
         .id = options.id,
         .label = options.label,
         .title = title,
-        .frame = frame,
-        .scale_factor = 1,
+        .frame = geometry.RectF.init(@floatCast(live_x), @floatCast(live_y), @floatCast(live_width), @floatCast(live_height)),
+        .scale_factor = @floatCast(live_scale),
         .open = true,
         .focused = options.activate_on_show and options.show == .immediate,
         .hidden = options.show == .hidden,
+        .maximized = live_maximized != 0,
+    };
+}
+
+/// `window_placement_fn`: the host's placement cache (normal-state
+/// content frame + maximized), which keeps answering after the native
+/// window is destroyed. The origin is in physical screen pixels and the
+/// size in logical points — the units the create path accepts back as a
+/// restored frame (see `WindowPlacementCache` in webview2_host.cpp).
+fn windowPlacement(context: ?*anyopaque, window_id: platform_mod.WindowId) ?platform_mod.WindowPlacement {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    var x: f64 = 0;
+    var y: f64 = 0;
+    var width: f64 = 0;
+    var height: f64 = 0;
+    var maximized: c_int = 0;
+    if (native_sdk_windows_window_placement(self.host, window_id, &x, &y, &width, &height, &maximized) == 0) return null;
+    return .{
+        .frame = geometry.RectF.init(@floatCast(x), @floatCast(y), @floatCast(width), @floatCast(height)),
+        .maximized = maximized != 0,
     };
 }
 
@@ -2558,12 +2593,20 @@ test "windows passive show never foregrounds or focuses the window" {
     const tail = host_source[show_at..];
     const next_at = std.mem.indexOf(u8, tail, "int native_sdk_windows_set_window_close_policy(") orelse return error.TestExpectedEqual;
     const show_fn = tail[0..next_at];
-    const passive_at = std.mem.indexOf(u8, show_fn, "ShowWindow(found->second.hwnd, SW_SHOWNOACTIVATE);") orelse return error.TestExpectedEqual;
+    const passive_at = std.mem.indexOf(u8, show_fn, "ShowWindow(found->second.hwnd, passiveShowCommand(found->second.hwnd));") orelse return error.TestExpectedEqual;
     const focused_at = std.mem.indexOf(u8, show_fn, "SetFocus(found->second.hwnd);") orelse return error.TestExpectedEqual;
     const active_branch_end = std.mem.indexOfPos(u8, show_fn, focused_at, "} else {") orelse return error.TestExpectedEqual;
     try std.testing.expect(focused_at < active_branch_end);
     try std.testing.expect(std.mem.indexOfPos(u8, show_fn, passive_at, "SetForegroundWindow(") == null);
     try std.testing.expect(std.mem.indexOfPos(u8, show_fn, passive_at, "SetFocus(") == null);
+    // The passive verb never activates: SW_SHOWNA keeps a maximized
+    // window maximized, SW_SHOWNOACTIVATE (which would restore it) shows
+    // every other window.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "static int passiveShowCommand(HWND hwnd) {\n    return IsZoomed(hwnd) ? SW_SHOWNA : SW_SHOWNOACTIVATE;\n}") != null);
+    // The activating verb shows a maximized window with SW_SHOWMAXIMIZED,
+    // which Windows does not replace with the launcher's STARTUPINFO show
+    // command (SW_SHOW would become SW_SHOWNORMAL and restore it).
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "static int activatingShowCommand(HWND hwnd) {\n    return IsZoomed(hwnd) && !launcherAsksMinimizedOrHidden() ? SW_SHOWMAXIMIZED : SW_SHOW;\n}") != null);
 
     // Passive is a SHOW policy, not a permanent interaction policy:
     // WS_EX_NOACTIVATE would also suppress activation on a later user
@@ -3122,9 +3165,10 @@ test "windows maximize refuses what the system would not maximize and reports ev
     const show_at = std.mem.indexOf(u8, maximize_fn, "ShowWindow(found->second.hwnd, SW_MAXIMIZE);") orelse return error.TestExpectedEqual;
     try std.testing.expect(resizable_at < show_at and visible_at < show_at);
 
-    // Every frame event carries the live state, and the top-level window
+    // Every frame event carries the live state (and a close event the
+    // state the window last reported), and the top-level window
     // procedure's WM_SIZE reports each transition, whoever caused it.
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.maximized = window.hwnd && IsZoomed(window.hwnd) ? 1 : 0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "event.maximized = window.hwnd ? (IsZoomed(window.hwnd) ? 1 : 0) : (window.maximized ? 1 : 0);") != null);
     const proc_at = std.mem.indexOf(u8, host_source, "static LRESULT CALLBACK windowProc(") orelse return error.TestExpectedEqual;
     const size_at = std.mem.indexOfPos(u8, host_source, proc_at, "case WM_SIZE:") orelse return error.TestExpectedEqual;
     const next_case_at = std.mem.indexOfPos(u8, host_source, size_at, "case WM_SETFOCUS:") orelse return error.TestExpectedEqual;
@@ -3139,6 +3183,52 @@ test "windows maximize refuses what the system would not maximize and reports ev
     try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, host_source[minmax_at + "case WM_GETMINMAXINFO:".len ..], " \t\r\n"), "applyChromelessMaximizedBounds(host, hwnd, reinterpret_cast<MINMAXINFO *>(lparam));"));
     const changing_at = std.mem.indexOfPos(u8, host_source, proc_at, "case WM_WINDOWPOSCHANGING:") orelse return error.TestExpectedEqual;
     try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, host_source[changing_at + "case WM_WINDOWPOSCHANGING:".len ..], " \t\r\n"), "clampChromelessMaximizedFrame(host, hwnd, reinterpret_cast<WINDOWPOS *>(lparam));"));
+}
+
+test "windows window flags carry the maximized open" {
+    try std.testing.expectEqual(@as(u32, 1 << 6), windowFlags(.{ .initial_maximized = true }) & (1 << 6));
+    try std.testing.expectEqual(@as(u32, 0), windowFlags(.{}) & (1 << 6));
+}
+
+test "windows placement cache settles only at settle points and outlives the window" {
+    // The host is C++ this suite cannot execute (window_placement_test.cpp
+    // drives it on real windows); pin the settle points textually.
+    const host_source = @embedFile("webview2_host.cpp");
+    const proc_at = std.mem.indexOf(u8, host_source, "static LRESULT CALLBACK windowProc(") orelse return error.TestExpectedEqual;
+
+    // Outside the interactive loop every window-position change settles
+    // (a Restore that keeps the rect changes only the mode), BEFORE
+    // DefWindowProc sends WM_MOVE/WM_SIZE, so their frame events carry
+    // the new placement; inside the loop nothing settles.
+    const changed_at = std.mem.indexOfPos(u8, host_source, proc_at, "case WM_WINDOWPOSCHANGED: {") orelse return error.TestExpectedEqual;
+    const changed_end = std.mem.indexOfPos(u8, host_source, changed_at, "return 0;\n        }") orelse return error.TestExpectedEqual;
+    const changed = host_source[changed_at..changed_end];
+    const settle_at = std.mem.indexOf(u8, changed, "if (!window || window->in_size_move || !settleWindowPlacement(*window)) break;") orelse return error.TestExpectedEqual;
+    const default_at = std.mem.indexOf(u8, changed, "DefWindowProcW(hwnd, message, wparam, lparam);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(settle_at < default_at);
+
+    // The end of the interactive loop is its one settle point.
+    const exit_at = std.mem.indexOfPos(u8, host_source, proc_at, "case WM_EXITSIZEMOVE:") orelse return error.TestExpectedEqual;
+    const exit_end = std.mem.indexOfPos(u8, host_source, exit_at, "break;") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, host_source[exit_at..exit_end], "if (settleWindowPlacement(*window)) emit(host, *window, kWindowFrame);") != null);
+
+    // The last settle runs while the native window still answers.
+    const destroy_at = std.mem.indexOfPos(u8, host_source, proc_at, "case WM_DESTROY:") orelse return error.TestExpectedEqual;
+    const destroy_settle_at = std.mem.indexOfPos(u8, host_source, destroy_at, "settleWindowPlacement(entry.second);") orelse return error.TestExpectedEqual;
+    const destroy_clear_at = std.mem.indexOfPos(u8, host_source, destroy_at, "entry.second.hwnd = nullptr;") orelse return error.TestExpectedEqual;
+    try std.testing.expect(destroy_settle_at < destroy_clear_at);
+
+    // The query answers from the cache, never from the live window.
+    const query_at = std.mem.indexOf(u8, host_source, "int native_sdk_windows_window_placement(") orelse return error.TestExpectedEqual;
+    const query_fn = hostFunction(host_source, query_at) orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, query_fn, "found->second.placement") != null);
+    try std.testing.expect(std.mem.indexOf(u8, query_fn, "GetWindowPlacement") == null and std.mem.indexOf(u8, query_fn, "GetWindowRect") == null);
+
+    // Frame insets come from the window's real style. Dropping
+    // WS_CAPTION for "borders without a caption" also drops WS_BORDER,
+    // and the hidden-titlebar styles then opened 2x1 px small and shrank
+    // on every relaunch.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "~WS_CAPTION") == null);
 }
 
 test "windows close request posts the user's WM_CLOSE while the app's close stays direct" {

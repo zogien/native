@@ -366,7 +366,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .window_save => {
                     const state = event_value.window_frame_changed;
                     if (self.options.window_state_store) |store| {
-                        store.saveWindow(WindowViewMethods().runtimeWindowStateForPersistence(self, state)) catch |err| log(self, "window.state.save_failed", @errorName(err), &.{trace.string("label", state.label)});
+                        WindowViewMethods().persistWindowState(self, store, state) catch |err| log(self, "window.state.save_failed", @errorName(err), &.{trace.string("label", state.label)});
                     }
                 },
                 .window_log => {

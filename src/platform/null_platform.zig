@@ -84,6 +84,11 @@ const validateMenuItem = types.validateMenuItem;
 const isValidShortcutKey = types.isValidShortcutKey;
 const WindowRestorePolicy = types.WindowRestorePolicy;
 const WindowInitialPlacement = types.WindowInitialPlacement;
+const WindowPlacement = types.WindowPlacement;
+const PlacementCacheEntry = struct {
+    id: WindowId,
+    placement: WindowPlacement,
+};
 const WindowOptions = types.WindowOptions;
 const WindowState = types.WindowState;
 const WindowInfo = types.WindowInfo;
@@ -446,6 +451,21 @@ pub const NullPlatform = struct {
     /// Captured independently from `restore_state`: persistence opt-in does
     /// not mean a frame was actually found and restored.
     window_placement: [max_windows]WindowInitialPlacement = [_]WindowInitialPlacement{.default} ** max_windows,
+    /// The modeled host's placement cache behind `window_placement_fn`:
+    /// one entry per window id, written at the modeled settle points
+    /// (create, the startup windows of `run`, maximize/restore, a settled
+    /// `userMoveWindow`, close) and kept apart from `windows` so it still
+    /// answers after a user close removes the window — the contract every
+    /// real host's cache meets. A harness's implicit main window has no
+    /// entry, and the query answers null for it, until one of those
+    /// settle points touches it.
+    placement_cache: [max_windows]PlacementCacheEntry = undefined,
+    placement_cache_count: usize = 0,
+    /// The modeled work area a maximized window fills: the live frame its
+    /// frame events report while maximized (the Windows host reports the
+    /// maximized client rect), distinct from the normal frame the
+    /// placement cache keeps.
+    maximized_frame: geometry.RectF = geometry.RectF.init(0, 0, 1920, 1017),
     window_restore_policy: [max_windows]WindowRestorePolicy = [_]WindowRestorePolicy{.clamp_to_visible_screen} ** max_windows,
     window_transparent: [max_windows]bool = [_]bool{false} ** max_windows,
     window_always_on_top: [max_windows]bool = [_]bool{false} ** max_windows,
@@ -1001,6 +1021,7 @@ pub const NullPlatform = struct {
                 .minimize_window_fn = minimizeWindow,
                 .maximize_window_fn = maximizeWindow,
                 .unmaximize_window_fn = unmaximizeWindow,
+                .window_placement_fn = windowPlacement,
                 .request_close_window_fn = requestCloseWindow,
                 .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
@@ -1149,15 +1170,20 @@ pub const NullPlatform = struct {
         var index: usize = 0;
         while (index < count) : (index += 1) {
             const window = self.app_info.resolvedStartupWindow(index);
+            // The startup windows open like created ones: maximized on
+            // request, with `default_frame` as the cached normal frame.
+            const maximized = window.initial_maximized and window.resizable;
+            self.settlePlacement(window.id, .{ .frame = window.default_frame, .maximized = maximized });
             try handler(handler_context, .{ .window_frame_changed = .{
                 .id = window.id,
                 .label = window.label,
                 .title = window.resolvedTitle(self.app_info.app_name),
-                .frame = window.default_frame,
+                .frame = if (maximized) self.maximized_frame else window.default_frame,
                 .scale_factor = self.surface_value.scale_factor,
                 .open = true,
                 .focused = index == 0 and window.activate_on_show and window.show == .immediate,
                 .hidden = window.show == .hidden,
+                .maximized = maximized,
             } });
         }
         var frame: u32 = 0;
@@ -1267,16 +1293,22 @@ pub const NullPlatform = struct {
         if (focused) {
             for (self.windows[0..self.window_count]) |*window| window.focused = false;
         }
+        // A maximized open, like the Windows host's: the window fills the
+        // work area while `default_frame` stays the normal frame Restore
+        // returns to. A non-resizable window has no maximize to open in.
+        const maximized = options.initial_maximized and options.resizable;
         const info: WindowInfo = .{
             .id = options.id,
             .label = try copyInto(&self.window_label_storage[self.window_count], options.label),
             .title = try copyInto(&self.window_title_storage[self.window_count], options.resolvedTitle(self.app_info.app_name)),
-            .frame = options.default_frame,
+            .frame = if (maximized) self.maximized_frame else options.default_frame,
             .scale_factor = self.surface_value.scale_factor,
             .open = true,
             .focused = focused,
             .hidden = options.show == .hidden,
+            .maximized = maximized,
         };
+        self.settlePlacement(options.id, .{ .frame = options.default_frame, .maximized = maximized });
         self.windows[self.window_count] = info;
         self.window_resizable[self.window_count] = options.resizable;
         self.window_titlebar[self.window_count] = options.titlebar;
@@ -1385,6 +1417,7 @@ pub const NullPlatform = struct {
             return error.CloseFailed;
         }
         const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        if (self.windows[index].open) self.settlePlacementBeforeDestroy(index);
         self.windows[index].open = false;
         self.windows[index].focused = false;
         // hidden clears WITH open, mirroring the real hosts' close
@@ -1417,24 +1450,104 @@ pub const NullPlatform = struct {
     }
 
     /// The modeled maximize: the refusals the Windows host makes, then the
-    /// state flip its WM_SIZE handler reports. `windowFrameEvent` hands a
-    /// test the frame event that report carries.
+    /// state flip its WM_SIZE handler reports — the live frame fills the
+    /// modeled work area and the placement cache settles on the normal
+    /// frame it left. `windowFrameEvent` hands a test the frame event that
+    /// report carries.
     fn maximizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
         if (!self.windows[index].open) return error.WindowNotFound;
         if (!self.window_resizable[index]) return error.WindowNotResizable;
         if (self.windows[index].hidden or !self.window_visible[index]) return error.WindowHidden;
+        if (self.windows[index].maximized) return;
+        self.settlePlacement(window_id, .{ .frame = self.windows[index].frame, .maximized = true });
         self.windows[index].maximized = true;
+        self.windows[index].frame = self.maximized_frame;
     }
 
+    /// Restore returns the live frame to the normal frame the placement
+    /// cache kept through the maximize.
     fn unmaximizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
         if (!self.windows[index].open) return error.WindowNotFound;
         if (!self.windows[index].maximized) return;
         if (self.windows[index].hidden or !self.window_visible[index]) return error.WindowHidden;
+        const normal = if (self.cachedPlacement(window_id)) |placement| placement.frame else self.windows[index].frame;
+        self.settlePlacement(window_id, .{ .frame = normal, .maximized = false });
         self.windows[index].maximized = false;
+        self.windows[index].frame = normal;
+    }
+
+    /// The modeled `window_placement_fn`: answers from the cache, so a
+    /// window a user close already removed still has its placement.
+    fn windowPlacement(context: ?*anyopaque, window_id: WindowId) ?WindowPlacement {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        return self.cachedPlacement(window_id);
+    }
+
+    fn cachedPlacement(self: *const NullPlatform, window_id: WindowId) ?WindowPlacement {
+        for (self.placement_cache[0..self.placement_cache_count]) |entry| {
+            if (entry.id == window_id) return entry.placement;
+        }
+        return null;
+    }
+
+    /// A settle point: replace the window's cached placement. A full
+    /// cache drops the entry of a window that is no longer open (its
+    /// close already persisted), then the oldest entry.
+    fn settlePlacement(self: *NullPlatform, window_id: WindowId, placement: WindowPlacement) void {
+        for (self.placement_cache[0..self.placement_cache_count]) |*entry| {
+            if (entry.id == window_id) {
+                entry.placement = placement;
+                return;
+            }
+        }
+        if (self.placement_cache_count == self.placement_cache.len) {
+            var evict: usize = 0;
+            for (self.placement_cache, 0..) |entry, cursor| {
+                const index = self.findWindowIndex(entry.id) orelse {
+                    evict = cursor;
+                    break;
+                };
+                if (!self.windows[index].open) {
+                    evict = cursor;
+                    break;
+                }
+            }
+            var cursor = evict;
+            while (cursor + 1 < self.placement_cache_count) : (cursor += 1) {
+                self.placement_cache[cursor] = self.placement_cache[cursor + 1];
+            }
+            self.placement_cache_count -= 1;
+        }
+        self.placement_cache[self.placement_cache_count] = .{ .id = window_id, .placement = placement };
+        self.placement_cache_count += 1;
+    }
+
+    /// The "just before destroy" settle point: a normal window's live
+    /// frame becomes its cached normal frame (a maximized one already
+    /// cached the frame its Restore returns to).
+    fn settlePlacementBeforeDestroy(self: *NullPlatform, index: usize) void {
+        const window = self.windows[index];
+        if (window.maximized) return;
+        self.settlePlacement(window.id, .{ .frame = window.frame, .maximized = false });
+    }
+
+    /// Test seam: the user moved or resized a window. `settled = false`
+    /// models a frame event from inside an interactive drag — the live
+    /// frame moves, the placement cache keeps its pre-drag answer;
+    /// `settled = true` models the drag's end (WM_EXITSIZEMOVE), the
+    /// settle point that advances the cache. A maximized window has no
+    /// user move to model and returns null; dispatch the returned frame
+    /// event through the runtime.
+    pub fn userMoveWindow(self: *NullPlatform, window_id: WindowId, frame: geometry.RectF, settled: bool) ?Event {
+        const index = self.findWindowIndex(window_id) orelse return null;
+        if (!self.windows[index].open or self.windows[index].maximized) return null;
+        self.windows[index].frame = frame;
+        if (settled) self.settlePlacement(window_id, .{ .frame = frame, .maximized = false });
+        return .{ .window_frame_changed = self.windows[index].state() };
     }
 
     fn requestCloseWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
@@ -3217,8 +3330,11 @@ pub const NullPlatform = struct {
             } };
         }
         const info = self.windows[index];
+        self.settlePlacementBeforeDestroy(index);
         self.removeViewsForWindow(window_id);
         self.removeWebViewsForWindow(window_id);
+        // The placement cache keeps the window's entry: the close event
+        // below is persisted after the window is gone.
         self.removeWindowAt(index);
         return .{ .window_frame_changed = .{
             .id = info.id,
