@@ -359,6 +359,12 @@ typedef struct native_sdk_gtk_window {
     double emitted_width;
     double emitted_height;
     double emitted_scale;
+    /* What the window's default size adds around the content (root_box)
+     * in its normal state, measured once at create — see
+     * native_sdk_window_measure_chrome. Every content <-> default size
+     * conversion uses these. */
+    int chrome_width;
+    int chrome_height;
     int transparent;
     int always_on_top;
     int click_through;
@@ -2464,10 +2470,12 @@ static void native_sdk_window_content_size(native_sdk_gtk_window_t *win, int *ou
         h = gtk_widget_get_height(GTK_WIDGET(win->gtk_window));
     }
     if (w <= 0 || h <= 0) {
+        /* The default size is the whole window's: its content is what
+         * is left inside the measured chrome. */
         int default_w = 0, default_h = 0;
         gtk_window_get_default_size(win->gtk_window, &default_w, &default_h);
-        if (w <= 0) w = default_w;
-        if (h <= 0) h = default_h;
+        if (w <= 0) w = default_w - win->chrome_width;
+        if (h <= 0) h = default_h - win->chrome_height;
     }
     *out_width = w;
     *out_height = h;
@@ -2599,6 +2607,50 @@ static void native_sdk_emit_resize(native_sdk_gtk_host_t *host, native_sdk_gtk_w
         .width = (double)w, .height = (double)h,
         .scale = scale,
     });
+}
+
+/* The window's titlebar, whichever one GtkWindow lays out: the hidden
+ * styles' own header bar, or the default decoration GTK adds at realize
+ * to a client-side decorated standard window (Wayland compositors
+ * without server-side decorations). GTK gives both the "titlebar" style
+ * class; the window's other child is the content. */
+static GtkWidget *native_sdk_window_titlebar(native_sdk_gtk_window_t *win) {
+    for (GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(win->gtk_window)); child; child = gtk_widget_get_next_sibling(child)) {
+        if (child == win->root_box || !gtk_widget_has_css_class(child, "titlebar")) continue;
+        if (gtk_widget_get_visible(child) && gtk_widget_get_child_visible(child)) return child;
+    }
+    return NULL;
+}
+
+/* What the window's default size adds around its content (root_box), in
+ * the normal state, from the measurements GtkWindow sizes itself with:
+ * its minimum is its own frame (CSS border and padding — the solid-csd
+ * frame of an uncomposited X11 desktop) around the titlebar stacked on
+ * the content, and the titlebar is allocated its natural height for the
+ * content width. GTK's default size is the size of the whole window, so
+ * passing the requested CONTENT size there would open every
+ * client-side decorated window short by its titlebar (and narrow by its
+ * frame). Measured on the realized window before it is first mapped,
+ * in the normal state the conversions are about. */
+static void native_sdk_window_measure_chrome(native_sdk_gtk_window_t *win, int content_width) {
+    GtkWidget *window = GTK_WIDGET(win->gtk_window);
+    GtkWidget *titlebar = native_sdk_window_titlebar(win);
+    int window_min_width = 0, window_min_height = 0;
+    int content_min_width = 0, content_min_height = 0;
+    int titlebar_min_width = 0, titlebar_min_height = 0, titlebar_height = 0;
+    gtk_widget_measure(window, GTK_ORIENTATION_HORIZONTAL, -1, &window_min_width, NULL, NULL, NULL);
+    gtk_widget_measure(window, GTK_ORIENTATION_VERTICAL, -1, &window_min_height, NULL, NULL, NULL);
+    gtk_widget_measure(win->root_box, GTK_ORIENTATION_HORIZONTAL, -1, &content_min_width, NULL, NULL, NULL);
+    gtk_widget_measure(win->root_box, GTK_ORIENTATION_VERTICAL, -1, &content_min_height, NULL, NULL, NULL);
+    if (titlebar) {
+        gtk_widget_measure(titlebar, GTK_ORIENTATION_HORIZONTAL, -1, &titlebar_min_width, NULL, NULL, NULL);
+        gtk_widget_measure(titlebar, GTK_ORIENTATION_VERTICAL, -1, &titlebar_min_height, NULL, NULL, NULL);
+        gtk_widget_measure(titlebar, GTK_ORIENTATION_VERTICAL, content_width, NULL, &titlebar_height, NULL, NULL);
+    }
+    const int frame_width = window_min_width - MAX(titlebar_min_width, content_min_width);
+    const int frame_height = window_min_height - titlebar_min_height - content_min_height;
+    win->chrome_width = MAX(frame_width, 0);
+    win->chrome_height = MAX(frame_height, 0) + titlebar_height;
 }
 
 static const char *native_sdk_shortcut_key_for_keyval(guint keyval, char *buffer, size_t buffer_len, int *uses_implicit_shift) {
@@ -3291,7 +3343,6 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
         gtk_widget_add_css_class(GTK_WIDGET(win->gtk_window), "native-sdk-transparent");
     }
     gtk_window_set_title(win->gtk_window, win->title);
-    gtk_window_set_default_size(win->gtk_window, (int)width, (int)height);
     gtk_window_set_resizable(win->gtk_window, resizable ? TRUE : FALSE);
     /* The hidden titlebar styles are client-side decorations, never an
      * undecorated window: a real GtkHeaderBar titlebar keeps the
@@ -3371,6 +3422,15 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     gtk_box_append(GTK_BOX(win->root_box), win->stack_root);
     gtk_window_set_child(win->gtk_window, win->root_box);
     native_sdk_install_file_drop_target(win);
+
+    /* The requested size is the CONTENT size; GTK's default size is the
+     * whole window's, so add the measured chrome (realizing first: that
+     * is when GTK settles client-side decorations and gives a standard
+     * window that needs one its default titlebar), before the handlers
+     * below connect. */
+    gtk_widget_realize(GTK_WIDGET(win->gtk_window));
+    native_sdk_window_measure_chrome(win, (int)width);
+    gtk_window_set_default_size(win->gtk_window, (int)width + win->chrome_width, (int)height + win->chrome_height);
 
     g_signal_connect(win->gtk_window, "notify::default-width", G_CALLBACK(on_resize), win);
     g_signal_connect(win->gtk_window, "notify::default-height", G_CALLBACK(on_resize), win);
