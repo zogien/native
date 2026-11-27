@@ -3167,18 +3167,34 @@ static void applyHiddenTitlebarFrame(Window &window) {
     dwm.extend_frame(window.hwnd, &margins);
 }
 
-/* Outer (track) size for a desired CONTENT size under the hidden
- * styles' live NC shape: WM_NCCALCSIZE hands the entire top band to the
- * client, so the outer rect carries NO top chrome — just the side and
- * bottom borders, plus the menu bar when one is attached. Plain
- * AdjustWindowRectEx would count the caption band the custom calc gives
- * back, landing the client one band taller than requested. */
-static SIZE hiddenOuterSizeForContent(DWORD style, DWORD ex_style, bool has_menu, double content_width, double content_height, UINT dpi) {
-    RECT borders = { 0, 0, 0, 0 };
-    adjustWindowRectForDpi(&borders, style & ~WS_CAPTION, FALSE, ex_style, dpi);
+/* The NORMAL-state (restored) frame around a window's content, as
+ * physical-pixel insets on each edge, for the window's style at `dpi`:
+ * exactly what WM_NCCALCSIZE takes from the outer rect. Standard windows
+ * get AdjustWindowRectEx's whole frame. Styles that reclaim their top
+ * frame keep only the left, right, and bottom borders of their REAL
+ * style (DefWindowProc lays those out, the custom calc then hands the
+ * top back to the client), plus the menu bar strip when one is attached.
+ * The borders must come from the real style: dropping WS_CAPTION to get
+ * "borders without a caption" also drops WS_BORDER, one pixel per edge,
+ * and the hidden styles then opened 2x1 px smaller than requested — a
+ * window that shrank on every relaunch. The create path and the
+ * min-size floor both convert through here. */
+static RECT normalFrameInsets(const Window &window, DWORD style, DWORD ex_style, bool has_menu, UINT dpi) {
+    RECT frame = { 0, 0, 0, 0 };
+    const bool reclaims_top = windowReclaimsTopFrame(window, has_menu);
+    adjustWindowRectForDpi(&frame, style, (has_menu && !reclaims_top) ? TRUE : FALSE, ex_style, dpi);
+    RECT insets = { -frame.left, -frame.top, frame.right, frame.bottom };
+    if (reclaims_top) insets.top = has_menu ? systemMetricForDpi(SM_CYMENU, dpi) : 0;
+    return insets;
+}
+
+/* Outer (track) size for a CONTENT size already scaled to physical
+ * pixels (see physicalContentExtent for the rounding). */
+static SIZE outerSizeForContent(const Window &window, DWORD style, DWORD ex_style, bool has_menu, double content_width, double content_height, UINT dpi) {
+    const RECT insets = normalFrameInsets(window, style, ex_style, has_menu, dpi);
     SIZE outer = {};
-    outer.cx = physicalContentExtent(content_width) + (borders.right - borders.left);
-    outer.cy = physicalContentExtent(content_height) + borders.bottom + (has_menu ? systemMetricForDpi(SM_CYMENU, dpi) : 0);
+    outer.cx = physicalContentExtent(content_width) + insets.left + insets.right;
+    outer.cy = physicalContentExtent(content_height) + insets.top + insets.bottom;
     return outer;
 }
 
@@ -7023,30 +7039,18 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                     if (window.min_width <= 0 && window.min_height <= 0) break;
                     /* The declared floor is a CONTENT size in LOGICAL
                      * points; scale to physical pixels at this window's
-                     * DPI, then convert to the outer track size for its
-                     * current style. Styles that reclaim their top frame
-                     * carry no top chrome (the custom WM_NCCALCSIZE hands
-                     * it to the client), so their conversion skips it
-                     * too. */
+                     * DPI, then convert to the outer track size through
+                     * the same frame insets the create path uses. */
                     const UINT dpi = dpiForWindow(hwnd);
                     const double scale = (double)dpi / 96.0;
                     const double min_content_width = window.min_width > 0 ? window.min_width * scale : 0;
                     const double min_content_height = window.min_height > 0 ? window.min_height * scale : 0;
-                    RECT frame = { 0, 0, physicalContentExtent(min_content_width), physicalContentExtent(min_content_height) };
-                    const DWORD style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
+                    const DWORD style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE) & ~(WS_MAXIMIZE | WS_MINIMIZE | WS_VISIBLE);
                     const DWORD ex_style = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                    const bool has_menu = GetMenu(hwnd) != nullptr;
-                    adjustWindowRectForDpi(&frame, style, has_menu, ex_style, dpi);
-                    LONG outer_width = frame.right - frame.left;
-                    LONG outer_height = frame.bottom - frame.top;
-                    if (windowReclaimsTopFrame(window, has_menu)) {
-                        const SIZE outer = hiddenOuterSizeForContent(style, ex_style, has_menu, min_content_width, min_content_height, dpi);
-                        outer_width = outer.cx;
-                        outer_height = outer.cy;
-                    }
+                    const SIZE outer = outerSizeForContent(window, style, ex_style, GetMenu(hwnd) != nullptr, min_content_width, min_content_height, dpi);
                     MINMAXINFO *info = reinterpret_cast<MINMAXINFO *>(lparam);
-                    if (window.min_width > 0) info->ptMinTrackSize.x = outer_width;
-                    if (window.min_height > 0) info->ptMinTrackSize.y = outer_height;
+                    if (window.min_width > 0) info->ptMinTrackSize.x = outer.cx;
+                    if (window.min_height > 0) info->ptMinTrackSize.y = outer.cy;
                     return 0;
                 }
             }
@@ -7181,25 +7185,13 @@ static bool createNativeWindow(Host *host, Window &window) {
      * other hosts size the content area); scale it to physical pixels
      * at the DPI the window opens at (the system DPI — WM_DPICHANGED
      * re-derives the frame if it lands on another monitor), then grow
-     * it to the outer size for this style so the client rect lands at
+     * it by the style's normal frame insets so the client rect lands at
      * the request. The menu bar is attached after creation, so account
-     * for it here when menus are declared. Styles that reclaim their top
-     * frame use the custom-calc shape (no top chrome) — plain adjustment
-     * would land their client one caption band (or top border) tall. */
+     * for it here when menus are declared. */
     const bool has_menu = !host->menus.empty();
     const UINT dpi = systemDpi();
     const double scale = (double)dpi / 96.0;
-    const double content_width = window.width * scale;
-    const double content_height = window.height * scale;
-    RECT frame = { 0, 0, physicalContentExtent(content_width), physicalContentExtent(content_height) };
-    adjustWindowRectForDpi(&frame, style, has_menu ? TRUE : FALSE, 0, dpi);
-    LONG outer_width = frame.right - frame.left;
-    LONG outer_height = frame.bottom - frame.top;
-    if (windowReclaimsTopFrame(window, has_menu)) {
-        const SIZE outer = hiddenOuterSizeForContent(style, 0, has_menu, content_width, content_height, dpi);
-        outer_width = outer.cx;
-        outer_height = outer.cy;
-    }
+    const SIZE outer = outerSizeForContent(window, style, windowExtendedStyle(window), has_menu, window.width * scale, window.height * scale, dpi);
     HWND hwnd = CreateWindowExW(
         windowExtendedStyle(window),
         L"NativeSdkWindowsHost",
@@ -7207,8 +7199,8 @@ static bool createNativeWindow(Host *host, Window &window) {
         style,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        outer_width,
-        outer_height,
+        outer.cx,
+        outer.cy,
         nullptr,
         nullptr,
         host->instance,
