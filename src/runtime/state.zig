@@ -33,6 +33,18 @@ pub const RuntimeWindow = struct {
     /// Creation-time show policy retained so Runtime.showWindow mirrors
     /// whether the native host passively orders front or activates.
     activate_on_show: bool = true,
+    /// Creation-time persistence policy (`WindowOptions.restore_state`):
+    /// false keeps the window out of the window-state store entirely,
+    /// so a window that never restores never writes a record either.
+    restore_state: bool = true,
+    /// The placement last seen for this window while it was open — the
+    /// host's placement query answer, else the frame event's own values.
+    /// A close event persists this instead of its own geometry when the
+    /// host cannot answer for the closed window.
+    last_placement: ?platform.WindowPlacement = null,
+    /// Digest of the record this window last wrote to the window-state
+    /// store; an event whose record digests the same skips the write.
+    persisted_digest: ?u64 = null,
     main_frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
     main_frame_set: bool = false,
     main_layer: i32 = 0,

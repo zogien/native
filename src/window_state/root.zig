@@ -45,7 +45,15 @@ pub const Store = struct {
         try cwd.createDirPath(self.io, self.state_dir);
         var read_buffer: [max_serialized_bytes]u8 = undefined;
         var windows_buffer: [platform.max_windows]platform.WindowState = undefined;
-        var windows = self.loadWindows(&windows_buffer, &read_buffer) catch windows_buffer[0..0];
+        // The write replaces the whole file, so it merges from what is on
+        // disk. Only a missing file is an empty merge: any other read
+        // failure (a sharing violation, a transient I/O error) aborts the
+        // save, which would otherwise drop every other window's record.
+        const existing = readPath(self.io, self.file_path, &read_buffer) catch |err| switch (err) {
+            error.FileNotFound => read_buffer[0..0],
+            else => return err,
+        };
+        var windows = parseWindowsInto(existing, &windows_buffer, read_buffer[existing.len..]);
         var found = false;
         for (windows) |*window| {
             if ((state.label.len > 0 and std.mem.eql(u8, window.label, state.label)) or (state.id != 0 and window.id == state.id)) {

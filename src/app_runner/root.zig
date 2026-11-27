@@ -1460,20 +1460,7 @@ const StateBuffers = struct {
 fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *native_sdk.AppInfo, buffers: *StateBuffers) ?native_sdk.window_state.Store {
     const paths = native_sdk.window_state.defaultPaths(&buffers.state_dir, &buffers.file_path, app_info.bundle_id, native_sdk.debug.envFromMap(env_map)) catch return null;
     const store = native_sdk.window_state.Store.init(io, paths.state_dir, paths.file_path);
-    if (app_info.windows.len > 0) {
-        const restored_windows = buffers.restored_windows[0..app_info.windows.len];
-        for (restored_windows, 0..) |*window, index| {
-            if (!window.restore_state) continue;
-            if (window_placement.applySavedWindow(window, store.loadWindow(window.label, &buffers.read) catch null)) {
-                if (index == 0) {
-                    app_info.main_window.default_frame = window.default_frame;
-                    app_info.main_window.initial_placement = .restored;
-                }
-            }
-        }
-    } else if (app_info.main_window.restore_state) {
-        _ = window_placement.applySavedWindow(&app_info.main_window, store.loadWindow(app_info.main_window.label, &buffers.read) catch null);
-    }
+    window_placement.restoreStartupWindows(app_info, buffers.restored_windows[0..app_info.windows.len], store, &buffers.read);
     return store;
 }
 

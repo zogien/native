@@ -40,6 +40,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         pub const copyLoadedSource = WindowStorageMethods.copyLoadedSource;
         pub const applyNativeInfo = WindowStorageMethods.applyNativeInfo;
         pub const runtimeWindowStateForPersistence = WindowStorageMethods.runtimeWindowStateForPersistence;
+        pub const persistWindowState = WindowStorageMethods.persistWindowState;
         pub const shellBoundsForWindow = WindowStorageMethods.shellBoundsForWindow;
         pub const startupWindowFrame = WindowStorageMethods.startupWindowFrame;
         pub const rectsEqual = WindowStorageMethods.rectsEqual;

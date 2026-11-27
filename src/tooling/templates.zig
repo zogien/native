@@ -3363,18 +3363,13 @@ fn runnerZig() []const u8 {
     \\        for (restored_windows, 0..) |*window, index| {
     \\            if (!window.restore_state) continue;
     \\            if (store.loadWindow(window.label, &buffers.read) catch null) |saved| {
-    \\                window.default_frame = saved.frame;
-    \\                window.initial_placement = .restored;
-    \\                if (index == 0) {
-    \\                    app_info.main_window.default_frame = saved.frame;
-    \\                    app_info.main_window.initial_placement = .restored;
-    \\                }
+    \\                window.applySavedPlacement(saved);
+    \\                if (index == 0) app_info.main_window.applySavedPlacement(saved);
     \\            }
     \\        }
     \\    } else if (app_info.main_window.restore_state) {
     \\        if (store.loadWindow(app_info.main_window.label, &buffers.read) catch null) |saved| {
-    \\            app_info.main_window.default_frame = saved.frame;
-    \\            app_info.main_window.initial_placement = .restored;
+    \\            app_info.main_window.applySavedPlacement(saved);
     \\        }
     \\    }
     \\    return store;
@@ -4412,8 +4407,8 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestWindowOptions") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.windows = windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "for (restored_windows, 0..)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "window.initial_placement = .restored") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "app_info.main_window.initial_placement = .restored") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "window.applySavedPlacement(saved);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "app_info.main_window.applySavedPlacement(saved);") != null);
     // The generated manifestWindow must thread every declarable window
     // option into WindowOptions — a dropped field is a silent no-op for
     // every `native create` app (the manifest accepts the declaration,
