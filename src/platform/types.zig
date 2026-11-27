@@ -549,6 +549,25 @@ pub const WindowInitialPlacement = enum {
     default,
 };
 
+/// Where a window belongs, as opposed to where it is right now: its
+/// NORMAL-state content frame plus whether it sits maximized over that
+/// frame. This is what the window-state store persists and what a
+/// relaunch restores — Win32 `GetWindowPlacement`'s normal rect,
+/// Electron's `getNormalBounds()`, GTK4's default size. It never carries
+/// live maximized, fullscreen, or minimized geometry: a maximized window
+/// reports the frame its Restore returns to, so a relaunch can open
+/// maximized and still restore to a real normal frame.
+pub const WindowPlacement = struct {
+    /// The normal-state content frame. Size is in logical points, like
+    /// every frame on this seam; the origin is in the host's own restore
+    /// coordinates (whatever its create path accepts back as a
+    /// `.restored` `default_frame` origin).
+    frame: geometry.RectF,
+    /// The window is maximized over `frame` (minimized-from-maximized
+    /// still counts as maximized: it is the mode a restore returns to).
+    maximized: bool = false,
+};
+
 /// How the window draws its titlebar chrome.
 /// `.hidden_inset` is the modern editor-app shape: content extends under a
 /// transparent titlebar with the title hidden (macOS:
@@ -709,6 +728,13 @@ pub const WindowOptions = struct {
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     initial_placement: WindowInitialPlacement = .default,
+    /// Open the window maximized over `default_frame`, which stays the
+    /// normal frame its Restore returns to. Set by the state-store
+    /// restore (`applySavedPlacement`) for a window that was maximized
+    /// when its placement was last saved; it combines with every `show`
+    /// mode (a `.hidden` window is maximized when it is first shown).
+    /// Hosts without a maximized-open path ignore it and open normal.
+    initial_maximized: bool = false,
     titlebar: WindowTitlebarStyle = .standard,
     show: WindowShowMode = .immediate,
     /// Make the top-level window and its rendering surface alpha-capable.
@@ -746,6 +772,20 @@ pub const WindowOptions = struct {
 
     pub fn resolvedTitle(self: WindowOptions, app_name: []const u8) []const u8 {
         return if (self.title.len > 0) self.title else app_name;
+    }
+
+    /// Apply a window-state store record: THE restore helper both restore
+    /// sites share (the app runner's startup windows and the runtime's
+    /// later-created windows). The saved frame is the persisted normal
+    /// frame, the placement reason becomes `.restored`, and a window
+    /// saved maximized asks to open maximized. Only placement is
+    /// restored: fullscreen, minimized, and hidden come back from the
+    /// declaration, never from the store, and a non-resizable window
+    /// opens normal (no host maximizes one).
+    pub fn applySavedPlacement(self: *WindowOptions, saved: WindowState) void {
+        self.default_frame = saved.frame;
+        self.initial_placement = .restored;
+        self.initial_maximized = saved.maximized and self.resizable;
     }
 };
 
@@ -2860,6 +2900,32 @@ pub const PlatformServices = struct {
     /// without the verbs leave these null.
     maximize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     unmaximize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// The window's PLACEMENT (see `WindowPlacement`): its normal-state
+    /// content frame and maximized mode, which the runtime persists to
+    /// the window-state store instead of the live frame a frame event
+    /// carries. Optional and additive: hosts that leave it null keep the
+    /// runtime's fallback of persisting the frame event's own values.
+    ///
+    /// The host contract:
+    /// - Answer from a host-side cache, never from the live native
+    ///   window, and keep answering after the native window is
+    ///   destroyed: the close event's save asks after the window is gone.
+    ///   Return null only for a window the host never created.
+    /// - Maximized: the frame Restore returns to, with `maximized = true`.
+    /// - Minimized: the pre-minimize mode and its normal frame
+    ///   (minimized-from-maximized stays `maximized = true`).
+    /// - Fullscreen: the pre-fullscreen normal frame (fullscreen itself
+    ///   is never persisted or restored).
+    /// - Advance the cache only at settle points: the end of an
+    ///   interactive move or size, maximize/restore transitions,
+    ///   programmatic frame changes, and just before destroy. A drag in
+    ///   progress keeps answering the pre-drag placement, so the frame
+    ///   events it emits leave the persisted record — and the file —
+    ///   untouched.
+    /// - Emit a frame event after a settle point that changed the
+    ///   placement; the runtime persists on frame events, so a change
+    ///   with no event behind it is saved only by the next one.
+    window_placement_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) ?WindowPlacement = null,
     /// Ask the window to close the way the user's close button does
     /// (Windows posts `WM_CLOSE`), so `close_policy` decides between
     /// hiding and closing. Unlike `close_window_fn` this only queues the
@@ -3354,6 +3420,14 @@ pub const PlatformServices = struct {
     pub fn unmaximizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const unmaximize_fn = self.unmaximize_window_fn orelse return error.UnsupportedService;
         return unmaximize_fn(self.context, window_id);
+    }
+
+    /// Null when the host does not implement the placement query, or
+    /// has no placement for the window; the runtime's persistence then
+    /// uses its fallback (`runtimeWindowStateForPersistence`).
+    pub fn windowPlacement(self: PlatformServices, window_id: WindowId) ?WindowPlacement {
+        const placement_fn = self.window_placement_fn orelse return null;
+        return placement_fn(self.context, window_id);
     }
 
     pub fn requestCloseWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
