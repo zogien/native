@@ -409,22 +409,82 @@ struct WindowsDialogResult {
 using EventCallback = void (*)(void *, const WindowsEvent *);
 using BridgeCallback = void (*)(void *, uint64_t, const char *, size_t, const char *, size_t, const char *, size_t);
 
+/* A window's PLACEMENT (window_placement_fn): its normal-state content
+ * frame plus whether it is maximized over it. The units are the ones the
+ * create path accepts back as a restored or explicit frame: the origin is
+ * the content area's top-left in PHYSICAL virtual-screen pixels (screen
+ * coordinates, never GetWindowPlacement's workspace coordinates), and the
+ * size is the content size in LOGICAL points at the DPI of the monitor
+ * the normal frame sits on. A physical origin names one point on one
+ * monitor whatever the monitors' scales (logical virtual-screen
+ * coordinates overlap or leave gaps between monitors of different
+ * scales), and a logical size keeps a window the same apparent size when
+ * it reopens on a monitor whose scale changed. Both round-trip exactly:
+ * the origin is a whole pixel, and the size converts through the same
+ * frame insets at the same DPI in both directions. */
+struct WindowPlacementCache {
+    bool valid = false;
+    double x = 0;
+    double y = 0;
+    double width = 0;
+    double height = 0;
+    bool maximized = false;
+};
+
+/* initial_placement and restore_policy as the Zig side passes them
+ * (initialPlacementInt, restorePolicyInt). */
+constexpr int kInitialPlacementRestored = 0;
+constexpr int kInitialPlacementExplicit = 1;
+constexpr int kInitialPlacementDefault = 2;
+constexpr int kRestorePolicyCenterOnPrimary = 1;
+
 struct Window {
     uint64_t id = 1;
     HWND hwnd = nullptr;
     std::string label;
     std::string title;
+    /* The requested frame until the window exists, then its last LIVE
+     * content frame, refreshed on every emit while the native window
+     * exists, hidden or not (a minimized window keeps the frame it had
+     * before): the
+     * origin in physical screen pixels, the size in logical points (the
+     * units of WindowPlacementCache). Frame events report these, so the
+     * close event after WM_DESTROY still carries real geometry. */
     double x = 0;
     double y = 0;
     double width = 720;
     double height = 480;
+    double scale = 1.0;
     bool resizable = true;
-    /* 0 standard, 1 hidden_inset, 2 hidden_inset_tall. The hidden styles
-     * keep the FULL system frame and the DWM-drawn caption buttons; only
-     * the caption band is handed to the client (WM_NCCALCSIZE), so the
-     * app draws its header into the band while min/max/close, snap
-     * layouts, and the resize borders stay the OS's own. */
+    /* 0 standard, 1 hidden_inset, 2 hidden_inset_tall, 3 chromeless. The
+     * hidden styles keep the FULL system frame and the DWM-drawn caption
+     * buttons; only the caption band is handed to the client
+     * (WM_NCCALCSIZE), so the app draws its header into the band while
+     * min/max/close, snap layouts, and the resize borders stay the OS's
+     * own. */
     int titlebar_style = 0;
+    /* The styles the window was created with, minus the state bits
+     * (WS_MAXIMIZE). Every content<->outer conversion uses these, so the
+     * create path and the placement cache are exact inverses. */
+    DWORD frame_style = 0;
+    DWORD frame_ex_style = 0;
+    /* Create-time placement: why the requested origin is there
+     * (kInitialPlacement*), what to do when it is off screen
+     * (kRestorePolicy*), and whether to open maximized over the
+     * requested frame. */
+    int initial_placement = kInitialPlacementDefault;
+    int restore_policy = 0;
+    bool initial_maximized = false;
+    /* See WindowPlacementCache. Advanced only at settle points and kept
+     * after WM_DESTROY clears hwnd: the close event's save asks after the
+     * window is gone. */
+    WindowPlacementCache placement;
+    /* Between WM_ENTERSIZEMOVE and WM_EXITSIZEMOVE: the interactive move
+     * or size loop is running, so frame changes do not settle. */
+    bool in_size_move = false;
+    /* Counts kWindowFrame emits, so a settle point can tell whether the
+     * WM_MOVE/WM_SIZE it caused already carried the new placement. */
+    uint64_t frame_events = 0;
     /* Declared content min-size floor for user resizes; axes <= 0 keep
      * the natural minimum (WM_GETMINMAXINFO applies the floor). */
     double min_width = 0;
@@ -1613,27 +1673,47 @@ static bool windowOwnsKeyboardFocus(const Window &window) {
     return focused && GetAncestor(focused, GA_ROOT) == window.hwnd;
 }
 
-static void emit(Host *host, const Window &window, EventKind kind) {
+/* Record the window's live content frame (see Window::x). Window
+ * geometry crosses the runtime boundary with the SIZE in LOGICAL points:
+ * the client rect is physical pixels, so it is divided by the window's
+ * device scale. In a DPI-unaware process the reported DPI is 96 and the
+ * two units coincide, so this stays the identity there. The ORIGIN stays
+ * in physical screen pixels, the unit the placement cache and the create
+ * path use, because logical virtual-screen coordinates are ambiguous
+ * across monitors of different scales. A minimized window (0x0 client
+ * parked at -32000) keeps the frame it had before it was minimized. */
+static void refreshLiveGeometry(Window &window) {
+    if (!window.hwnd || IsIconic(window.hwnd)) return;
+    RECT client = {};
+    if (!GetClientRect(window.hwnd, &client) || client.right <= client.left || client.bottom <= client.top) return;
+    POINT origin = { 0, 0 };
+    if (!ClientToScreen(window.hwnd, &origin)) return;
+    const double scale = (double)dpiForWindow(window.hwnd) / 96.0;
+    window.x = (double)origin.x;
+    window.y = (double)origin.y;
+    window.width = (double)(client.right - client.left) / scale;
+    window.height = (double)(client.bottom - client.top) / scale;
+    window.scale = scale;
+}
+
+static void emit(Host *host, Window &window, EventKind kind) {
     if (!host || !host->callback) return;
-    RECT rect = {};
-    if (window.hwnd) GetClientRect(window.hwnd, &rect);
+    refreshLiveGeometry(window);
     WindowsEvent event = {};
     event.kind = kind;
     event.window_id = window.id;
-    /* Window geometry crosses the runtime boundary in LOGICAL points:
-     * the client rect is physical pixels, so divide by the window's
-     * device scale. In a DPI-unaware process the reported DPI is 96 and
-     * the two units coincide, so this stays the identity there. */
-    const double scale = window.hwnd ? (double)dpiForWindow(window.hwnd) / 96.0 : 1.0;
-    event.width = rect.right > rect.left ? (double)(rect.right - rect.left) / scale : window.width;
-    event.height = rect.bottom > rect.top ? (double)(rect.bottom - rect.top) / scale : window.height;
-    event.scale = scale;
+    event.width = window.width;
+    event.height = window.height;
+    event.scale = window.scale;
     event.x = window.x;
     event.y = window.y;
     event.open = window.hwnd != nullptr;
     event.focused = windowOwnsKeyboardFocus(window);
     event.hidden = window.policy_hidden ? 1 : 0;
-    event.maximized = window.hwnd && IsZoomed(window.hwnd) ? 1 : 0;
+    /* Live while the window exists; after WM_DESTROY, the state it last
+     * reported (a window closed maximized says so on its close event). */
+    event.maximized = window.hwnd ? (IsZoomed(window.hwnd) ? 1 : 0) : (window.maximized ? 1 : 0);
+    if (kind == kWindowFrame) window.frame_events++;
     event.label = window.label.c_str();
     event.label_len = window.label.size();
     event.title = window.title.c_str();
@@ -2742,6 +2822,25 @@ static Window *chromelessWindowForHwnd(Host *host, HWND hwnd) {
 
 static UINT systemDpi();
 
+/* A monitor's effective DPI through shcore's GetDpiForMonitor (Windows
+ * 8.1+), or 0 where shcore or the monitor is unavailable. */
+static UINT effectiveMonitorDpi(HMONITOR monitor) {
+    using GetDpiForMonitorFn = HRESULT(WINAPI *)(HMONITOR, int, UINT *, UINT *);
+    static GetDpiForMonitorFn get_monitor_dpi = []() -> GetDpiForMonitorFn {
+        HMODULE shcore = LoadLibraryW(L"shcore.dll");
+        if (!shcore) return nullptr;
+        return reinterpret_cast<GetDpiForMonitorFn>(
+            reinterpret_cast<void *>(GetProcAddress(shcore, "GetDpiForMonitor")));
+    }();
+    if (!get_monitor_dpi || !monitor) return 0;
+    UINT dpi_x = 0;
+    UINT dpi_y = 0;
+    /* 0 = MDT_EFFECTIVE_DPI, spelled numerically so headers that predate
+     * shellscalingapi.h still compile. */
+    if (get_monitor_dpi(monitor, 0, &dpi_x, &dpi_y) == S_OK && dpi_y > 0) return dpi_y;
+    return 0;
+}
+
 /* Per-window DPI, resolved dynamically to mirror the awareness chain
  * the embedded manifest declares. GetDpiForWindow (Windows 10 1607+,
  * per-monitor v2 — modern Wine prefixes export it too) is preferred;
@@ -2759,22 +2858,19 @@ static UINT dpiForWindow(HWND hwnd) {
         const UINT dpi = get_dpi(hwnd);
         if (dpi > 0) return dpi;
     }
-    using GetDpiForMonitorFn = HRESULT(WINAPI *)(HMONITOR, int, UINT *, UINT *);
-    static GetDpiForMonitorFn get_monitor_dpi = []() -> GetDpiForMonitorFn {
-        HMODULE shcore = LoadLibraryW(L"shcore.dll");
-        if (!shcore) return nullptr;
-        return reinterpret_cast<GetDpiForMonitorFn>(
-            reinterpret_cast<void *>(GetProcAddress(shcore, "GetDpiForMonitor")));
-    }();
-    if (get_monitor_dpi && hwnd) {
-        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        UINT dpi_x = 0;
-        UINT dpi_y = 0;
-        /* 0 = MDT_EFFECTIVE_DPI, spelled numerically so headers that
-         * predate shellscalingapi.h still compile. */
-        if (monitor && get_monitor_dpi(monitor, 0, &dpi_x, &dpi_y) == S_OK && dpi_y > 0) return dpi_y;
+    if (hwnd) {
+        const UINT dpi = effectiveMonitorDpi(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
+        if (dpi > 0) return dpi;
     }
     return systemDpi();
+}
+
+/* The DPI a window on `monitor` has (a window that does not exist yet,
+ * or a rect the window is not at right now), down the same chain as
+ * dpiForWindow: the monitor's effective DPI, then the system DPI. */
+static UINT dpiForMonitor(HMONITOR monitor) {
+    const UINT dpi = effectiveMonitorDpi(monitor);
+    return dpi > 0 ? dpi : systemDpi();
 }
 
 /* Caption metrics MUST scale with the monitor the window sits on, or a
@@ -2789,10 +2885,11 @@ static int systemMetricForDpi(int index, UINT dpi) {
     return GetSystemMetrics(index);
 }
 
-/* System DPI for sizing a window that does not exist yet (creation
- * scales the requested logical content size to physical pixels before
- * the first monitor is known; WM_DPICHANGED re-derives the frame when
- * the window lands elsewhere), and the tail of dpiForWindow's chain
+/* System DPI for sizing a window that does not exist yet and has no
+ * requested origin (creation scales the requested logical content size
+ * to physical pixels before the OS picks its monitor; the create path
+ * re-sizes it if it lands on a monitor of another scale), and the tail
+ * of dpiForWindow's chain
  * where no per-monitor API is available. GetDpiForSystem is resolved
  * dynamically (Windows 10 1607+) with the desktop DC's LOGPIXELSY,
  * then 96, as fallbacks. A DPI-unaware process reports 96 on every
@@ -3177,8 +3274,9 @@ static void applyHiddenTitlebarFrame(Window &window) {
  * The borders must come from the real style: dropping WS_CAPTION to get
  * "borders without a caption" also drops WS_BORDER, one pixel per edge,
  * and the hidden styles then opened 2x1 px smaller than requested — a
- * window that shrank on every relaunch. The create path and the
- * min-size floor both convert through here. */
+ * window that shrank on every relaunch. Create (content -> outer), the
+ * min-size floor, and the placement cache (outer -> content) all convert
+ * through here, so the conversions are exact inverses. */
 static RECT normalFrameInsets(const Window &window, DWORD style, DWORD ex_style, bool has_menu, UINT dpi) {
     RECT frame = { 0, 0, 0, 0 };
     const bool reclaims_top = windowReclaimsTopFrame(window, has_menu);
@@ -3985,9 +4083,53 @@ static bool presentTransparentWindow(Host *host, Window &window) {
     return updated != FALSE;
 }
 
+/* The no-activate show verb for a window that may already be maximized
+ * while hidden (an initial_maximized window before its first show, or a
+ * maximized window a hide took off the glass). SW_SHOWNOACTIVATE shows
+ * "in its most recent size and position" like SW_SHOWNORMAL, which
+ * RESTORES a maximized window; SW_SHOWNA shows it in its current state.
+ * A window that is not maximized keeps SW_SHOWNOACTIVATE, the passive
+ * show every no-activate path used before. (SW_SHOW, the activating
+ * show, keeps the current state either way.) */
+static int passiveShowCommand(HWND hwnd) {
+    return IsZoomed(hwnd) ? SW_SHOWNA : SW_SHOWNOACTIVATE;
+}
+
+/* Whether the launcher asked for this process's first window to start
+ * minimized or hidden: a shortcut set to "Run: Minimized", `start /min`,
+ * `Start-Process -WindowStyle Hidden`. */
+static bool launcherAsksMinimizedOrHidden() {
+    static const bool asks = [] {
+        STARTUPINFOW info = {};
+        info.cb = sizeof(info);
+        GetStartupInfoW(&info);
+        if ((info.dwFlags & STARTF_USESHOWWINDOW) == 0) return false;
+        return info.wShowWindow == SW_HIDE || info.wShowWindow == SW_SHOWMINIMIZED || info.wShowWindow == SW_MINIMIZE ||
+            info.wShowWindow == SW_SHOWMINNOACTIVE || info.wShowWindow == SW_FORCEMINIMIZE;
+    }();
+    return asks;
+}
+
+/* The activating show verb. SW_SHOW keeps a window's current state,
+ * except on the process's FIRST show of a captioned, unowned top-level
+ * window when the launcher passed STARTF_USESHOWWINDOW, which Explorer,
+ * shortcuts, and ShellExecute always do (normally with SW_SHOWNORMAL):
+ * Windows then replaces SW_SHOW and SW_SHOWNORMAL with
+ * STARTUPINFO.wShowWindow, and SW_SHOWNORMAL restores a window that is
+ * maximized while hidden. Measured: a saved-maximized window opened
+ * maximized when started through CreateProcess and restored when started
+ * through ShellExecute. A maximized window therefore shows with
+ * SW_SHOWMAXIMIZED, which Windows does not replace — unless the launcher
+ * asked to start minimized or hidden, which SW_SHOW leaves Windows to
+ * apply as it does for every other window (Restore from minimized then
+ * returns it to maximized). */
+static int activatingShowCommand(HWND hwnd) {
+    return IsZoomed(hwnd) && !launcherAsksMinimizedOrHidden() ? SW_SHOWMAXIMIZED : SW_SHOW;
+}
+
 static void showWindowImplicit(Window &window) {
     if (!window.hwnd || window.shown || window.policy_hidden) return;
-    ShowWindow(window.hwnd, window.activate_on_show ? SW_SHOW : SW_SHOWNOACTIVATE);
+    ShowWindow(window.hwnd, window.activate_on_show ? activatingShowCommand(window.hwnd) : passiveShowCommand(window.hwnd));
     window.shown = true;
     window.deferred_show_started_ms = 0;
     UpdateWindow(window.hwnd);
@@ -6703,6 +6845,244 @@ static void endSession(Host *host) {
     EnumThreadWindows(GetCurrentThreadId(), closeOwnedDialog, reinterpret_cast<LPARAM>(host));
 }
 
+/* ------------------------------------------------------------------------
+ * Window placement.
+ *
+ * The placement cache answers window_placement_fn (WindowPlacementCache
+ * has its units). It advances only at settle points: the end of an
+ * interactive move or size (WM_EXITSIZEMOVE), any other window-position
+ * change outside that loop (WM_WINDOWPOSCHANGED: programmatic moves,
+ * Win+arrow, maximize, restore even when it keeps the rect, DPI changes),
+ * creation, and just before WM_DESTROY
+ * clears the hwnd. Inside the interactive loop it keeps the pre-drag
+ * answer, so a drag's frame events leave the persisted record alone and
+ * the drag is written once, when it ends. */
+
+static Window *windowEntryForHwnd(Host *host, HWND hwnd) {
+    if (!host || !hwnd) return nullptr;
+    for (auto &entry : host->windows) {
+        if (entry.second.hwnd == hwnd) return &entry.second;
+    }
+    return nullptr;
+}
+
+static bool monitorWorkArea(HMONITOR monitor, RECT *work) {
+    MONITORINFO info = {};
+    info.cbSize = sizeof(info);
+    if (!monitor || !GetMonitorInfoW(monitor, &info)) return false;
+    *work = info.rcWork;
+    return true;
+}
+
+/* GetWindowPlacement reports rcNormalPosition in WORKSPACE coordinates
+ * for ordinary top-level windows: relative to the work area of the
+ * monitor the rect is on, so a taskbar docked at the top or left of that
+ * monitor offsets them from screen coordinates by its thickness (tool
+ * windows get screen coordinates). The offset belongs to the monitor of
+ * the SCREEN rect, which the workspace rect can miss by up to that
+ * thickness near a monitor edge, so a result that lands on another
+ * monitor is converted once more with that monitor's offset. */
+static RECT screenRectFromWorkspace(HWND hwnd, const RECT &workspace) {
+    if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return workspace;
+    RECT screen = workspace;
+    HMONITOR monitor = MonitorFromRect(&workspace, MONITOR_DEFAULTTOPRIMARY);
+    for (int pass = 0; pass < 2; ++pass) {
+        MONITORINFO info = {};
+        info.cbSize = sizeof(info);
+        if (!monitor || !GetMonitorInfoW(monitor, &info)) break;
+        screen = workspace;
+        OffsetRect(&screen, info.rcWork.left - info.rcMonitor.left, info.rcWork.top - info.rcMonitor.top);
+        HMONITOR landing = MonitorFromRect(&screen, MONITOR_DEFAULTTOPRIMARY);
+        if (landing == monitor) break;
+        monitor = landing;
+    }
+    return screen;
+}
+
+/* The placement for a NORMAL-state outer rect at `dpi`: the exact
+ * inverse of outerRectAtContentOrigin. Invalid when the rect leaves no
+ * content (nothing worth persisting). */
+static WindowPlacementCache placementFromOuterRect(const Window &window, const RECT &outer, bool has_menu, UINT dpi, bool maximized) {
+    const RECT insets = normalFrameInsets(window, window.frame_style, window.frame_ex_style, has_menu, dpi);
+    const LONG content_width = outer.right - outer.left - insets.left - insets.right;
+    const LONG content_height = outer.bottom - outer.top - insets.top - insets.bottom;
+    WindowPlacementCache placement;
+    if (content_width <= 0 || content_height <= 0) return placement;
+    const double scale = (double)dpi / 96.0;
+    placement.valid = true;
+    placement.x = (double)(outer.left + insets.left);
+    placement.y = (double)(outer.top + insets.top);
+    placement.width = (double)content_width / scale;
+    placement.height = (double)content_height / scale;
+    placement.maximized = maximized;
+    return placement;
+}
+
+/* A settle point: read the window's placement from Win32 and replace the
+ * cache. Returns whether the cached answer changed.
+ *  - Normal: the live window rect. A window snapped to a screen edge is
+ *    normal too, so its snapped rect is what reopens (as a normal window);
+ *    rcNormalPosition would hold the rect from before the snap, the frame
+ *    Chromium and VS Code also decline to restore.
+ *  - Maximized: rcNormalPosition, the frame Restore returns to, read at
+ *    the DPI of the monitor it lies on.
+ *  - Minimized: the frame settled before the minimize, with the mode a
+ *    restore returns to (WPF_RESTORETOMAXIMIZED keeps
+ *    minimized-from-maximized maximized).
+ * A failed GetWindowPlacement keeps the last settled answer. `has_menu`
+ * says whether the frame carries a menu bar strip; only creation passes
+ * it explicitly, before the menu bar it sized the window for is
+ * attached. */
+static bool settleWindowPlacement(Window &window, bool has_menu) {
+    if (!window.hwnd) return false;
+    WINDOWPLACEMENT native = {};
+    native.length = sizeof(native);
+    if (!GetWindowPlacement(window.hwnd, &native)) return false;
+    const bool iconic = IsIconic(window.hwnd) != FALSE;
+    const bool zoomed = IsZoomed(window.hwnd) != FALSE;
+    const bool maximized = zoomed || (iconic && (native.flags & WPF_RESTORETOMAXIMIZED) != 0);
+    WindowPlacementCache next;
+    if (iconic && window.placement.valid) {
+        next = window.placement;
+        next.maximized = maximized;
+    } else if (iconic || zoomed) {
+        const RECT outer = screenRectFromWorkspace(window.hwnd, native.rcNormalPosition);
+        next = placementFromOuterRect(window, outer, has_menu, dpiForMonitor(MonitorFromRect(&outer, MONITOR_DEFAULTTONEAREST)), maximized);
+    } else {
+        RECT outer = {};
+        if (!GetWindowRect(window.hwnd, &outer)) return false;
+        next = placementFromOuterRect(window, outer, has_menu, dpiForWindow(window.hwnd), false);
+    }
+    if (!next.valid) return false;
+    const WindowPlacementCache &current = window.placement;
+    if (current.valid && current.x == next.x && current.y == next.y && current.width == next.width &&
+        current.height == next.height && current.maximized == next.maximized) {
+        return false;
+    }
+    window.placement = next;
+    return true;
+}
+
+static bool settleWindowPlacement(Window &window) {
+    return window.hwnd && settleWindowPlacement(window, GetMenu(window.hwnd) != nullptr);
+}
+
+/* A requested origin as a whole screen pixel. A restored origin is
+ * whatever the state file holds, so a value far outside any virtual
+ * screen is clamped first: rounding or offsetting it would overflow. The
+ * placement policy then moves such a window onto a monitor. */
+static LONG screenCoordinate(double value) {
+    constexpr double kLimit = (double)(1 << 24);
+    if (!std::isfinite(value)) return 0;
+    if (value > kLimit) value = kLimit;
+    if (value < -kLimit) value = -kLimit;
+    return (LONG)std::lround(value);
+}
+
+/* The outer rect that puts the window's requested content size (logical
+ * points, window.width/height) at a content origin in physical screen
+ * pixels, at `dpi`. */
+static RECT outerRectAtContentOrigin(const Window &window, bool has_menu, LONG content_x, LONG content_y, UINT dpi) {
+    const double scale = (double)dpi / 96.0;
+    const RECT insets = normalFrameInsets(window, window.frame_style, window.frame_ex_style, has_menu, dpi);
+    RECT outer = {};
+    outer.left = content_x - insets.left;
+    outer.top = content_y - insets.top;
+    outer.right = content_x + physicalContentExtent(window.width * scale) + insets.right;
+    outer.bottom = content_y + physicalContentExtent(window.height * scale) + insets.bottom;
+    return outer;
+}
+
+/* Move (never resize) a rect so it lies inside `area`; a rect larger
+ * than the area keeps its top-left corner inside. */
+static void moveRectInto(RECT *rect, const RECT &area) {
+    const LONG width = rect->right - rect->left;
+    const LONG height = rect->bottom - rect->top;
+    LONG left = rect->left;
+    LONG top = rect->top;
+    if (left + width > area.right) left = area.right - width;
+    if (top + height > area.bottom) top = area.bottom - height;
+    if (left < area.left) left = area.left;
+    if (top < area.top) top = area.top;
+    OffsetRect(rect, left - rect->left, top - rect->top);
+}
+
+/* clamp_to_visible_screen leaves a frame where it was put while the
+ * user can still grab it: the window's top strip (where its caption or
+ * the app's own header is, kMinVisibleExtent / 2 logical px tall) must
+ * lie within one monitor's work area vertically — its top edge not above
+ * it — with at least kMinVisibleExtent logical px of its width inside it
+ * (all of it, for a narrower window). Anything less — a monitor that is
+ * gone, a smaller resolution, a hand-edited origin, or a record from
+ * before origins were saved, whose (0, 0) content origin puts a standard
+ * caption above the screen — moves the window onto the nearest monitor. */
+constexpr int kMinVisibleExtent = 64;
+
+static bool outerRectReachable(const RECT &outer, UINT dpi) {
+    const LONG extent = MulDiv(kMinVisibleExtent, (int)dpi, 96);
+    const LONG width = outer.right - outer.left;
+    const LONG height = outer.bottom - outer.top;
+    RECT strip = outer;
+    strip.bottom = outer.top + std::min(height, extent / 2);
+    RECT work = {};
+    if (!monitorWorkArea(MonitorFromRect(&strip, MONITOR_DEFAULTTONULL), &work)) return false;
+    if (strip.top < work.top || strip.bottom > work.bottom) return false;
+    RECT visible = {};
+    if (!IntersectRect(&visible, &strip, &work)) return false;
+    return visible.right - visible.left >= std::min(width, extent);
+}
+
+/* Where a restored or explicit window opens: the outer rect for
+ * CreateWindowEx, sized at the DPI of the monitor it lands on (a per-
+ * monitor-aware window is created at that monitor's DPI), which is
+ * returned through `dpi_out`. The origin is the requested content
+ * origin, under the restore policy:
+ *  - center_on_primary (restored frames): the saved size, centered on
+ *    the primary monitor's work area; the saved origin is dropped.
+ *  - clamp_to_visible_screen (restored frames, and every explicit
+ *    origin): the origin as requested while the window stays reachable
+ *    (outerRectReachable), else moved into the work area of the nearest
+ *    monitor. */
+static RECT positionedOuterRect(const Window &window, bool has_menu, UINT *dpi_out) {
+    if (window.initial_placement == kInitialPlacementRestored && window.restore_policy == kRestorePolicyCenterOnPrimary) {
+        const POINT zero = { 0, 0 };
+        HMONITOR primary = MonitorFromPoint(zero, MONITOR_DEFAULTTOPRIMARY);
+        const UINT dpi = dpiForMonitor(primary);
+        RECT outer = outerRectAtContentOrigin(window, has_menu, 0, 0, dpi);
+        RECT work = {};
+        if (monitorWorkArea(primary, &work)) {
+            const LONG width = outer.right - outer.left;
+            const LONG height = outer.bottom - outer.top;
+            OffsetRect(&outer, work.left + (work.right - work.left - width) / 2 - outer.left, work.top + (work.bottom - work.top - height) / 2 - outer.top);
+            moveRectInto(&outer, work);
+        }
+        *dpi_out = dpi;
+        return outer;
+    }
+    const LONG x = screenCoordinate(window.x);
+    const LONG y = screenCoordinate(window.y);
+    const POINT origin = { x, y };
+    UINT dpi = dpiForMonitor(MonitorFromPoint(origin, MONITOR_DEFAULTTONEAREST));
+    RECT outer = outerRectAtContentOrigin(window, has_menu, x, y, dpi);
+    const UINT landing_dpi = dpiForMonitor(MonitorFromRect(&outer, MONITOR_DEFAULTTONEAREST));
+    if (landing_dpi != dpi) {
+        dpi = landing_dpi;
+        outer = outerRectAtContentOrigin(window, has_menu, x, y, dpi);
+    }
+    if (!outerRectReachable(outer, dpi)) {
+        HMONITOR nearest = MonitorFromRect(&outer, MONITOR_DEFAULTTONEAREST);
+        const UINT nearest_dpi = dpiForMonitor(nearest);
+        if (nearest_dpi != dpi) {
+            dpi = nearest_dpi;
+            outer = outerRectAtContentOrigin(window, has_menu, x, y, dpi);
+        }
+        RECT work = {};
+        if (monitorWorkArea(nearest, &work)) moveRectInto(&outer, work);
+    }
+    *dpi_out = dpi;
+    return outer;
+}
+
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
@@ -6964,6 +7344,45 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 }
             }
             return 0;
+        case WM_ENTERSIZEMOVE:
+            if (Window *window = windowEntryForHwnd(host, hwnd)) window->in_size_move = true;
+            break;
+        case WM_EXITSIZEMOVE:
+            /* The interactive move or size ended: the one settle point
+             * for everything the loop did (a drag-to-top maximize
+             * included). */
+            if (Window *window = windowEntryForHwnd(host, hwnd)) {
+                window->in_size_move = false;
+                if (settleWindowPlacement(*window)) emit(host, *window, kWindowFrame);
+            }
+            break;
+        case WM_WINDOWPOSCHANGED: {
+            /* Every other change settles here: programmatic moves,
+             * Win+arrow, maximize and restore, a DPI change's suggested
+             * rect, a menu bar attached later. Not only frame changes: a
+             * Restore of a maximized window that already sits at its
+             * normal rect changes the mode and nothing else. The settle
+             * compares against the cache, so a z-order or show change
+             * costs a GetWindowPlacement and emits nothing. Settling
+             * BEFORE DefWindowProc dispatches WM_MOVE and WM_SIZE lets the
+             * frame events those send carry the new placement; a change
+             * that sent no frame event (a resize that neither moves nor
+             * changes the maximized state, or a mode change that keeps
+             * the rect) gets one here. */
+            Window *window = windowEntryForHwnd(host, hwnd);
+            if (!window || window->in_size_move || !settleWindowPlacement(*window)) break;
+            const uint64_t window_id = window->id;
+            const uint64_t frame_events = window->frame_events;
+            DefWindowProcW(hwnd, message, wparam, lparam);
+            auto settled = host->windows.find(window_id);
+            if (settled != host->windows.end() && settled->second.hwnd == hwnd && settled->second.frame_events == frame_events) {
+                /* No WM_SIZE reported this one, so record the maximized
+                 * state the event carries as reported. */
+                settled->second.maximized = IsZoomed(hwnd) != FALSE;
+                emit(host, settled->second, kWindowFrame);
+            }
+            return 0;
+        }
         case WM_DPICHANGED:
             /* The window moved to a monitor with a different DPI (or the
              * user changed display scaling). Adopt the system-suggested
@@ -7045,9 +7464,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                     const double scale = (double)dpi / 96.0;
                     const double min_content_width = window.min_width > 0 ? window.min_width * scale : 0;
                     const double min_content_height = window.min_height > 0 ? window.min_height * scale : 0;
-                    const DWORD style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE) & ~(WS_MAXIMIZE | WS_MINIMIZE | WS_VISIBLE);
-                    const DWORD ex_style = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                    const SIZE outer = outerSizeForContent(window, style, ex_style, GetMenu(hwnd) != nullptr, min_content_width, min_content_height, dpi);
+                    const SIZE outer = outerSizeForContent(window, window.frame_style, window.frame_ex_style, GetMenu(hwnd) != nullptr, min_content_width, min_content_height, dpi);
                     MINMAXINFO *info = reinterpret_cast<MINMAXINFO *>(lparam);
                     if (window.min_width > 0) info->ptMinTrackSize.x = outer.cx;
                     if (window.min_height > 0) info->ptMinTrackSize.y = outer.cy;
@@ -7113,6 +7530,13 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
+                        /* The last settle point and the last live frame,
+                         * while the native window still answers: the
+                         * close event below and the placement query the
+                         * runtime's save makes after it read these. */
+                        settleWindowPlacement(entry.second);
+                        refreshLiveGeometry(entry.second);
+                        entry.second.in_size_move = false;
                         cancelDialogsForWindow(host, entry.first);
                         destroyNativeViewsForWindow(host, entry.first);
                         destroyChildWebViewsForWindow(host, entry.first);
@@ -7181,26 +7605,58 @@ static bool createNativeWindow(Host *host, Window &window) {
         style = WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX;
         if (window.resizable) style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
     }
+    window.frame_style = style;
+    window.frame_ex_style = windowExtendedStyle(window);
     /* The requested frame is a CONTENT size in LOGICAL points (the
      * other hosts size the content area); scale it to physical pixels
-     * at the DPI the window opens at (the system DPI — WM_DPICHANGED
-     * re-derives the frame if it lands on another monitor), then grow
-     * it by the style's normal frame insets so the client rect lands at
-     * the request. The menu bar is attached after creation, so account
-     * for it here when menus are declared. */
+     * at the DPI the window opens at, then grow it by the style's normal
+     * frame insets so the client rect lands at the request. The menu bar
+     * is attached after creation, so account for it here when menus are
+     * declared.
+     *
+     * A restored or explicit frame opens at its origin (a content origin
+     * in physical screen pixels, see WindowPlacementCache), on the
+     * monitor it names and at that monitor's DPI, under the restore
+     * policy (positionedOuterRect). A default frame keeps the OS's own
+     * placement, sized at the system DPI (re-sized below if the OS puts
+     * it on a monitor of another scale). */
     const bool has_menu = !host->menus.empty();
-    const UINT dpi = systemDpi();
-    const double scale = (double)dpi / 96.0;
-    const SIZE outer = outerSizeForContent(window, style, windowExtendedStyle(window), has_menu, window.width * scale, window.height * scale, dpi);
+    UINT dpi = systemDpi();
+    int outer_x = CW_USEDEFAULT;
+    int outer_y = CW_USEDEFAULT;
+    LONG outer_width = 0;
+    LONG outer_height = 0;
+    if (window.initial_placement == kInitialPlacementRestored || window.initial_placement == kInitialPlacementExplicit) {
+        const RECT outer = positionedOuterRect(window, has_menu, &dpi);
+        outer_x = outer.left;
+        outer_y = outer.top;
+        outer_width = outer.right - outer.left;
+        outer_height = outer.bottom - outer.top;
+    } else {
+        const double scale = (double)dpi / 96.0;
+        const SIZE outer = outerSizeForContent(window, style, window.frame_ex_style, has_menu, window.width * scale, window.height * scale, dpi);
+        outer_width = outer.cx;
+        outer_height = outer.cy;
+    }
+    /* Opening maximized: WS_MAXIMIZE at create is the one Win32 shape of
+     * a window that is maximized while still HIDDEN, with the create rect
+     * as the normal frame Restore returns to (on the monitor it names).
+     * Every show path then reveals it in that state: SW_SHOW and
+     * SW_SHOWNA keep a window's current state (passiveShowCommand picks
+     * SW_SHOWNA for the no-activate paths), so it opens maximized whether
+     * it shows now, on its first present, or when a hidden window is
+     * first shown, and whether or not the show activates it. A
+     * non-resizable window is never maximized. */
+    const bool open_maximized = window.initial_maximized && window.resizable;
     HWND hwnd = CreateWindowExW(
-        windowExtendedStyle(window),
+        window.frame_ex_style,
         L"NativeSdkWindowsHost",
         title.c_str(),
-        style,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        outer.cx,
-        outer.cy,
+        style | (open_maximized ? WS_MAXIMIZE : 0),
+        outer_x,
+        outer_y,
+        outer_width,
+        outer_height,
         nullptr,
         nullptr,
         host->instance,
@@ -7208,6 +7664,9 @@ static bool createNativeWindow(Host *host, Window &window) {
     if (!hwnd) return false;
     DragAcceptFiles(hwnd, TRUE);
     window.hwnd = hwnd;
+    /* The maximized state the runtime learns from this create (the
+     * returned info, or the startup frame event), not a transition. */
+    window.maximized = IsZoomed(hwnd) != FALSE;
     window.deferred_show_started_ms = window.show_on_first_present ? GetTickCount64() : 0;
     if (window.click_through && !window.transparent &&
         !SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)) {
@@ -7215,7 +7674,30 @@ static bool createNativeWindow(Host *host, Window &window) {
         window.hwnd = nullptr;
         return false;
     }
+    /* Seed the placement cache before anything below can dispatch a
+     * frame event (attaching the menu bar moves the client and sends
+     * WM_MOVE): the runtime saves on frame events, and without an answer
+     * it would save the event's live frame (a maximized client rect). The
+     * menu bar is not attached yet, so pass the fact the window was sized
+     * for. */
+    settleWindowPlacement(window, has_menu);
     applyMenusToWindow(host, window);
+    /* A per-monitor-aware window takes the DPI of the monitor it is
+     * created on, and no WM_DPICHANGED follows. If that is not the DPI
+     * the frame was sized at (a rect straddling monitors of different
+     * scales, or the OS's default position), re-size a normal window at
+     * the DPI it got, keeping its content origin; that resize settles
+     * like any other. */
+    const UINT created_dpi = dpiForWindow(hwnd);
+    RECT created = {};
+    if (created_dpi != dpi && !window.maximized && GetWindowRect(hwnd, &created)) {
+        const RECT insets = normalFrameInsets(window, style, window.frame_ex_style, has_menu, dpi);
+        const RECT outer = outerRectAtContentOrigin(window, has_menu, created.left + insets.left, created.top + insets.top, created_dpi);
+        SetWindowPos(hwnd, nullptr, outer.left, outer.top, outer.right - outer.left, outer.bottom - outer.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    /* Settle against the menu bar the window really has now; a change
+     * from the seed (a menu bar that failed to attach) is reported. */
+    if (settleWindowPlacement(window)) emit(host, window, kWindowFrame);
     applyWindowIcon(host, hwnd);
     /* Before the first show, so a dark-scheme launch never flashes a
      * light caption. */
@@ -7229,6 +7711,17 @@ static bool createNativeWindow(Host *host, Window &window) {
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         syncTopResizeStrip(host, window.id);
     }
+    if (window.maximized && windowIsChromeless(window)) {
+        /* The create-time maximize ran before the window was registered
+         * too, so WM_GETMINMAXINFO and WM_WINDOWPOSCHANGING could not
+         * apply the chromeless maximized frame (the work area, where a
+         * caption-less window would otherwise cover the whole monitor);
+         * a sized SetWindowPos re-derives it from the monitor now. */
+        RECT maximized = {};
+        if (GetWindowRect(hwnd, &maximized)) {
+            SetWindowPos(hwnd, nullptr, maximized.left, maximized.top, maximized.right - maximized.left, maximized.bottom - maximized.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+    }
     /* Initialize WS_EX_LAYERED through the same per-pixel path used by
      * canvas presents. A layered HWND is otherwise not displayable until
      * SetLayeredWindowAttributes or UpdateLayeredWindow has succeeded. */
@@ -7241,6 +7734,7 @@ static bool createNativeWindow(Host *host, Window &window) {
         showWindowImplicit(window);
     }
     SetTimer(hwnd, kFrameTimerId, 16, nullptr);
+    refreshLiveGeometry(window);
     return true;
 }
 
@@ -7578,8 +8072,6 @@ void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id);
 
 Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     (void)restore_frame;
-    (void)initial_placement;
-    (void)restore_policy;
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
     controls.dwICC = ICC_PROGRESS_CLASS | ICC_TAB_CLASSES;
@@ -7643,6 +8135,9 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.click_through = (window_flags & (1u << 2)) != 0;
     window.activate_on_show = (window_flags & (1u << 3)) == 0;
     window.window_drag_regions = (window_flags & (1u << 5)) != 0;
+    window.initial_maximized = (window_flags & (1u << 6)) != 0;
+    window.initial_placement = initial_placement;
+    window.restore_policy = restore_policy;
     window.show_on_first_present = show_policy == 1;
     window.policy_hidden = show_policy == 2;
     host->windows[window.id] = window;
@@ -8074,8 +8569,6 @@ void native_sdk_windows_set_shortcuts(Host *host, const char *const *ids, const 
 
 int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     (void)restore_frame;
-    (void)initial_placement;
-    (void)restore_policy;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
     Window window;
     window.id = window_id;
@@ -8094,6 +8587,9 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
     window.click_through = (window_flags & (1u << 2)) != 0;
     window.activate_on_show = (window_flags & (1u << 3)) == 0;
     window.window_drag_regions = (window_flags & (1u << 5)) != 0;
+    window.initial_maximized = (window_flags & (1u << 6)) != 0;
+    window.initial_placement = initial_placement;
+    window.restore_policy = restore_policy;
     window.show_on_first_present = show_policy == 1;
     window.policy_hidden = show_policy == 2;
     /* Register BEFORE creating: createNativeWindow's post-create frame
@@ -8249,7 +8745,7 @@ int native_sdk_windows_focus_window(Host *host, uint64_t window_id) {
     if (found == host->windows.end() || !found->second.hwnd) return 0;
     found->second.policy_hidden = false;
     if (!found->second.shown) {
-        ShowWindow(found->second.hwnd, SW_SHOW);
+        ShowWindow(found->second.hwnd, activatingShowCommand(found->second.hwnd));
         found->second.shown = true;
     }
     found->second.deferred_show_started_ms = 0;
@@ -8305,6 +8801,41 @@ int native_sdk_windows_unmaximize_window(Host *host, uint64_t window_id) {
     return 1;
 }
 
+/* window_placement_fn: the window's cached placement (see
+ * WindowPlacementCache for the units). Answers after the native window is
+ * destroyed too; returns 0 only for a window this host never created (or
+ * whose creation has not run yet). */
+int native_sdk_windows_window_placement(Host *host, uint64_t window_id, double *x, double *y, double *width, double *height, int *maximized) {
+    if (!host || !x || !y || !width || !height || !maximized) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.placement.valid) return 0;
+    const WindowPlacementCache &placement = found->second.placement;
+    *x = placement.x;
+    *y = placement.y;
+    *width = placement.width;
+    *height = placement.height;
+    *maximized = placement.maximized ? 1 : 0;
+    return 1;
+}
+
+/* The window's live frame as its frame events report it (see Window::x),
+ * for the info create_window returns: a window that opened maximized
+ * reports its maximized frame and state before its first WM_SIZE event. */
+int native_sdk_windows_window_frame(Host *host, uint64_t window_id, double *x, double *y, double *width, double *height, double *scale, int *maximized) {
+    if (!host || !x || !y || !width || !height || !scale || !maximized) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end()) return 0;
+    Window &window = found->second;
+    refreshLiveGeometry(window);
+    *x = window.x;
+    *y = window.y;
+    *width = window.width;
+    *height = window.height;
+    *scale = window.scale;
+    *maximized = (window.hwnd ? IsZoomed(window.hwnd) != FALSE : window.maximized) ? 1 : 0;
+    return 1;
+}
+
 /* The user-close request: post the same WM_CLOSE the caption close button
  * and Alt+F4 produce, so the WM_CLOSE handler applies close_policy.
  * native_sdk_windows_close_window stays the app's unconditional close.
@@ -8338,11 +8869,11 @@ int native_sdk_windows_show_window(Host *host, uint64_t window_id) {
     if (found == host->windows.end() || !found->second.hwnd) return 0;
     found->second.policy_hidden = false;
     if (found->second.activate_on_show) {
-        ShowWindow(found->second.hwnd, IsIconic(found->second.hwnd) ? SW_RESTORE : SW_SHOW);
+        ShowWindow(found->second.hwnd, IsIconic(found->second.hwnd) ? SW_RESTORE : activatingShowCommand(found->second.hwnd));
         SetForegroundWindow(found->second.hwnd);
         SetFocus(found->second.hwnd);
     } else {
-        ShowWindow(found->second.hwnd, SW_SHOWNOACTIVATE);
+        ShowWindow(found->second.hwnd, passiveShowCommand(found->second.hwnd));
     }
     found->second.shown = true;
     found->second.deferred_show_started_ms = 0;

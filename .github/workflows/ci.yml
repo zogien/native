@@ -230,6 +230,12 @@ jobs:
       # activation-argument parser, and the COM activator relaying one
       # parsed activation to the loop window.
       - run: zig build test-windows-toast-activation
+      # Window placement in the same host, on real windows: exact content
+      # size and origin round trips for every titlebar style (the
+      # hidden-titlebar styles used to shrink per relaunch), the placement
+      # cache's settle points, maximized opens through every show path,
+      # and the off-screen restore policies.
+      - run: zig build test-windows-window-placement
       # The loop, session-end and toast harnesses again for the MSVC ABI in
       # Debug, the build an MSVC app's `native dev` runs. Only that ABI
       # compiles the UCRT and MSVC STL inline functions into the host under
