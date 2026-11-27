@@ -370,4 +370,4 @@ window.zero.on("window:state", ({ maximized }) => {
 });
 ```
 
-Every method fails with `error.WindowNotFound` for an unknown or closed window. The verbs are implemented on Windows; other platforms return `error.UnsupportedService`, and `maximized` stays `false` there.
+Every method fails with `error.WindowNotFound` for an unknown or closed window. The verbs are implemented on Windows; other platforms return `error.UnsupportedService`. Windows and Linux report `maximized`, and so does macOS, where it means zoomed (see [Windows](/docs/windows)), except on the Chromium engine, where it stays `false`.
