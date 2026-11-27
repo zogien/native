@@ -326,21 +326,41 @@ static void caseSettleRule(int style) {
     CHECK(record && NSEqualRects(record->frame, content) && NSEqualRects(record->placement, content),
         "%s programmatic: the frame event already carries the new placement", styleName(style));
 
-    // An animated frame runs inside live-resize brackets: its frame
-    // events keep the old answer until the live resize ends.
+    // An animated frame runs inside live-resize brackets where AppKit
+    // animates it (measured on the test Mac): its frame events keep the
+    // old answer until the live resize ends, and none carries a placement
+    // from the middle of the animation. A window server that applies the
+    // frame at once, without a live resize (the CI runner's), makes it a
+    // programmatic frame, which settles at once; the checks after this
+    // one hold either way.
     NSRect before = content;
     mark = recordMark();
     NSRect animated = window.frame;
     animated.origin.y -= 30;
     animated.size.height += 20;
+    __block int liveResizes = 0;
+    id liveResizeObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowWillStartLiveResizeNotification object:window queue:nil usingBlock:^(NSNotification *note) {
+        (void)note;
+        liveResizes++;
+    }];
     [window setFrame:animated display:YES animate:YES];
     pump(0.05);
+    [NSNotificationCenter.defaultCenter removeObserver:liveResizeObserver];
     content = contentOf(windowId);
-    BOOL heldOld = NO;
-    for (int index = mark; index < record_count; index++) {
-        if (records[index].id == windowId && NSEqualRects(records[index].frame, content) && NSEqualRects(records[index].placement, before)) heldOld = YES;
+    if (liveResizes > 0) {
+        BOOL heldOld = NO;
+        int midway = -1;
+        for (int index = mark; index < record_count; index++) {
+            if (records[index].id != windowId) continue;
+            if (NSEqualRects(records[index].frame, content) && NSEqualRects(records[index].placement, before)) heldOld = YES;
+            if (midway < 0 && !NSEqualRects(records[index].placement, before) && !NSEqualRects(records[index].placement, content)) midway = index;
+        }
+        CHECK(heldOld, "%s animated: a frame event inside the live resize still carries the pre-resize placement", styleName(style));
+        CHECK(midway < 0, "%s animated: frame event %d carries a placement from the middle of the animation", styleName(style), midway);
+    } else {
+        skips++;
+        fprintf(stderr, "SKIP %s animated: AppKit applied the animated frame without a live resize, so it settled as a programmatic frame\n", styleName(style));
     }
-    CHECK(heldOld, "%s animated: a frame event inside the live resize still carries the pre-resize placement", styleName(style));
     expectPlacement(windowId, content, 0, "animated frame settled");
     expectLastEventCarries(windowId, mark, "animated frame");
 
