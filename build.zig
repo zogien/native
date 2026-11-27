@@ -918,6 +918,27 @@ pub fn build(b: *std.Build) void {
             b.step(probe.step, probe.description).dependOn(&probe_run.step);
             test_step.dependOn(&probe_run.step);
         }
+        // Window placement against the production AppKit host on real
+        // windows (zoom, minimize and live-resize animations take tens of
+        // seconds), so like the GTK and Windows harnesses it is its own
+        // step, not part of `zig build test`. It needs the user's window
+        // server session; the real fullscreen transition also needs an
+        // active app on an unlocked screen and is skipped loudly without
+        // one (see src/platform/macos/window_placement_test.m).
+        const placement_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc" });
+        for ([_][]const u8{ "AppKit", "AVFoundation", "ScreenCaptureKit", "MediaToolbox", "CoreMedia", "Accelerate", "Metal", "QuartzCore", "WebKit", "CoreFoundation", "CoreText", "ImageIO", "Security", "UniformTypeIdentifiers" }) |framework| {
+            placement_run.addArgs(&.{ "-framework", framework });
+        }
+        placement_run.addArgs(&.{ "-cflags", "-fobjc-arc", "-fno-sanitize=builtin", "-mmacosx-version-min=11.0" });
+        if (b.sysroot) |sysroot| placement_run.addArgs(&.{ "-isysroot", sysroot });
+        placement_run.addArg("--");
+        placement_run.addFileArg(b.path("src/platform/macos/window_placement_test.m"));
+        placement_run.addFileInput(b.path("src/platform/macos/appkit_host.m"));
+        placement_run.addFileInput(b.path("src/platform/macos/appkit_host.h"));
+        placement_run.addFileInput(b.path("src/platform/macos/user_notifications.h"));
+        placement_run.has_side_effects = true;
+        placement_run.expectExitCode(0);
+        b.step("test-macos-window-placement", "Verify the AppKit host's window placement: size round trips, settle points, zoomed opens (needs a window server session)").dependOn(&placement_run.step);
     }
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     test_step.dependOn(&file_crash_run.step);

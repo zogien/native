@@ -71,6 +71,10 @@ const AppKitEvent = extern struct {
     /// WINDOW_FRAME: nonzero while the window is alive but hidden by
     /// its close_policy (`open` stays 1 for the whole hidden stretch).
     hidden: c_int,
+    /// WINDOW_FRAME: nonzero while the window is zoomed right now (live;
+    /// the persisted mode is the placement query's). It fills the padding
+    /// before `label`, so every later field keeps its offset.
+    maximized: c_int,
     label: [*]const u8,
     label_len: usize,
     shortcut_id: [*]const u8,
@@ -212,6 +216,8 @@ extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_in
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_hide_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_show_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_window_placement(host: *AppKitHost, window_id: u64, x: *f64, y: *f64, width: *f64, height: *f64, maximized: *c_int) c_int;
+extern fn native_sdk_appkit_window_frame(host: *AppKitHost, window_id: u64, x: *f64, y: *f64, width: *f64, height: *f64, scale: *f64, maximized: *c_int) c_int;
 extern fn native_sdk_appkit_set_dock_presence(host: *AppKitHost, visible: c_int) c_int;
 extern fn native_sdk_appkit_launch_at_login_status(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_set_launch_at_login(host: *AppKitHost, enabled: c_int) c_int;
@@ -813,6 +819,10 @@ pub const MacPlatform = struct {
                 .minimize_window_fn = minimizeWindow,
                 .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
+                // The AppKit host's placement cache; the Chromium host
+                // keeps none yet, so the runtime keeps persisting its
+                // frame events' own values.
+                .window_placement_fn = if (self.web_engine == .system) windowPlacement else null,
                 .set_dock_presence_fn = setDockPresence,
                 .launch_at_login_status_fn = launchAtLoginStatus,
                 .set_launch_at_login_fn = setLaunchAtLogin,
@@ -1065,6 +1075,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
                 .open = event.open != 0,
                 .focused = event.focused != 0,
                 .hidden = event.hidden != 0,
+                .maximized = event.maximized != 0,
             } });
         },
         .view_focused => state.emit(.{ .view_focused = .{
@@ -1508,6 +1519,9 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (!options.activate_on_show) flags |= 1 << 3;
     if (!options.allows_fullscreen) flags |= 1 << 4;
     if (options.window_drag_regions) flags |= 1 << 5;
+    // Open zoomed over default_frame (the AppKit host skips it for a
+    // non-resizable window); the same bit the Windows and GTK hosts read.
+    if (options.initial_maximized) flags |= 1 << 6;
     return flags;
 }
 
@@ -1550,18 +1564,48 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, initialPlacementInt(options.initial_placement), restorePolicyInt(options.restore_policy), if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
     applyWindowContentMinSize(self.host, options.id, options.min_width, options.min_height);
     applyWindowClosePolicy(self.host, options.id, options.close_policy);
+    // The live frame, not the requested one: placement can move the
+    // window synchronously, and a window opened zoomed is already at its
+    // zoomed size, which the runtime's window table (and the shell's
+    // layout bounds) must know before the first frame event. The
+    // Chromium host does not answer and keeps the requested frame.
+    var live_x: f64 = frame.x;
+    var live_y: f64 = frame.y;
+    var live_width: f64 = frame.width;
+    var live_height: f64 = frame.height;
+    var live_scale: f64 = 1;
+    var live_maximized: c_int = 0;
+    _ = native_sdk_appkit_window_frame(self.host, options.id, &live_x, &live_y, &live_width, &live_height, &live_scale, &live_maximized);
     return .{
         .id = options.id,
         .label = options.label,
         .title = title,
-        // Placement can alter the origin synchronously in AppKit; the host's
-        // window_frame_changed event reports that actual frame immediately
-        // after startup/create and replaces this requested-frame placeholder.
-        .frame = frame,
-        .scale_factor = 1,
+        .frame = geometry.RectF.init(@floatCast(live_x), @floatCast(live_y), @floatCast(live_width), @floatCast(live_height)),
+        .scale_factor = @floatCast(live_scale),
         .open = true,
         .focused = options.activate_on_show and options.show == .immediate,
         .hidden = options.show == .hidden,
+        .maximized = live_maximized != 0,
+    };
+}
+
+/// `window_placement_fn` (AppKit host only): the host's placement cache,
+/// which keeps answering after the window closes. The frame is the
+/// normal-state content rect in screen points with the frame events'
+/// origin (Cocoa screen coordinates), which the create path accepts back
+/// as a restored frame; `maximized` is the zoomed mode (see
+/// `NativeSdkWindowPlacementEntry` in appkit_host.m).
+fn windowPlacement(context: ?*anyopaque, window_id: platform_mod.WindowId) ?platform_mod.WindowPlacement {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    var x: f64 = 0;
+    var y: f64 = 0;
+    var width: f64 = 0;
+    var height: f64 = 0;
+    var maximized: c_int = 0;
+    if (native_sdk_appkit_window_placement(self.host, window_id, &x, &y, &width, &height, &maximized) == 0) return null;
+    return .{
+        .frame = geometry.RectF.init(@floatCast(x), @floatCast(y), @floatCast(width), @floatCast(height)),
+        .maximized = maximized != 0,
     };
 }
 
@@ -2730,6 +2774,106 @@ test "macos chromium refuses transparent windows" {
         host_source,
         "if ((window_flags & (1u << 0)) != 0) return",
     ) >= 2);
+}
+
+test "macos window flags carry the zoomed open" {
+    // Bit 6 is the one the Windows and GTK hosts read; the AppKit host
+    // skips it for a non-resizable window.
+    try std.testing.expectEqual(@as(u32, 1 << 6), windowFlags(.{ .initial_maximized = true }) & (1 << 6));
+    try std.testing.expectEqual(@as(u32, 0), windowFlags(.{}) & (1 << 6));
+    // The zoom runs after the show bookkeeping (its frame event reports a
+    // hidden window hidden) and before the first show.
+    const host_source = @embedFile("appkit_host.m");
+    const create_at = std.mem.indexOf(u8, host_source, "- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain {") orelse return error.TestExpectedEqual;
+    const hidden_at = std.mem.indexOfPos(u8, host_source, create_at, "[self.policyHiddenWindows addObject:key];") orelse return error.TestExpectedEqual;
+    const zoom_at = std.mem.indexOfPos(u8, host_source, create_at, "if ((windowFlags & (1u << 6)) != 0 && resizable) {\n        [window zoom:nil];\n        [self settleWindowPlacementAndEmitForWindowId:windowId];") orelse return error.TestExpectedEqual;
+    const show_at = std.mem.indexOfPos(u8, host_source, create_at, "[self orderWindowForImplicitShow:windowId];") orelse return error.TestExpectedEqual;
+    try std.testing.expect(hidden_at < zoom_at and zoom_at < show_at);
+}
+
+test "macos frame events carry the live zoomed state at an unchanged layout" {
+    // `maximized` fills the padding after `hidden`, so every later
+    // field keeps the offset both hosts' C struct gives it.
+    try std.testing.expectEqual(@offsetOf(AppKitEvent, "hidden") + @sizeOf(c_int), @offsetOf(AppKitEvent, "maximized"));
+    try std.testing.expectEqual(@as(usize, 72), @offsetOf(AppKitEvent, "label"));
+    const header = @embedFile("appkit_host.h");
+    try std.testing.expect(std.mem.indexOf(u8, header, "    int hidden;\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "    int maximized;\n    const char *label;") != null);
+    const host_source = @embedFile("appkit_host.m");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, ".maximized = NativeSdkWindowIsZoomed(window) ? 1 : 0,") != null);
+}
+
+test "macos placement cache settles only at settle points and outlives the window" {
+    // The host is Objective-C this suite cannot execute
+    // (window_placement_test.m drives it on real windows); pin the
+    // settle points textually.
+    const host_source = @embedFile("appkit_host.m");
+    const delegate_at = std.mem.indexOf(u8, host_source, "@implementation NativeSdkWindowDelegate") orelse return error.TestExpectedEqual;
+    const delegate_end = std.mem.indexOfPos(u8, host_source, delegate_at, "\n@end") orelse return error.TestExpectedEqual;
+    const delegate = host_source[delegate_at..delegate_end];
+
+    // Moves and resizes settle BEFORE their frame emit, so the event a
+    // settled change produces carries the new placement.
+    for ([_][]const u8{ "- (void)windowDidResize:(NSNotification *)notification {", "- (void)windowDidMove:(NSNotification *)notification {" }) |handler| {
+        const at = std.mem.indexOf(u8, delegate, handler) orelse return error.TestExpectedEqual;
+        const note_at = std.mem.indexOfPos(u8, delegate, at, "[self.host noteWindowGeometryChangedForWindowId:self.windowId];") orelse return error.TestExpectedEqual;
+        const emit_at = std.mem.indexOfPos(u8, delegate, at, "[self.host emitWindowFrameForWindowId:self.windowId open:YES];") orelse return error.TestExpectedEqual;
+        try std.testing.expect(note_at < emit_at);
+    }
+    // The settle points with no frame change of their own.
+    for ([_][]const u8{
+        "- (void)windowDidEndLiveResize:",
+        "- (BOOL)windowShouldZoom:",
+        "- (void)windowWillMiniaturize:",
+        "- (void)windowWillEnterFullScreen:",
+        "- (void)windowDidExitFullScreen:",
+        "- (void)windowDidFailToEnterFullScreen:",
+    }) |handler| {
+        const at = std.mem.indexOf(u8, delegate, handler) orelse return error.TestExpectedEqual;
+        const end = std.mem.indexOfPos(u8, delegate, at, "\n}\n") orelse return error.TestExpectedEqual;
+        try std.testing.expect(std.mem.indexOf(u8, delegate[at..end], "[self.host settleWindowPlacementAndEmitForWindowId:self.windowId];") != null);
+    }
+    // AppKit sends no move or resize for a minimize: both edges emit the
+    // frame event themselves (a minimized window reports unzoomed), and
+    // the deminiaturized window settles first.
+    const mini_at = std.mem.indexOf(u8, delegate, "- (void)windowDidMiniaturize:(NSNotification *)notification {") orelse return error.TestExpectedEqual;
+    const mini_end = std.mem.indexOfPos(u8, delegate, mini_at, "\n}\n") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, delegate[mini_at..mini_end], "[self.host emitWindowFrameForWindowId:self.windowId open:YES];") != null);
+    const demini_at = std.mem.indexOf(u8, delegate, "- (void)windowDidDeminiaturize:(NSNotification *)notification {") orelse return error.TestExpectedEqual;
+    const demini_settle_at = std.mem.indexOfPos(u8, delegate, demini_at, "[self.host settleWindowPlacementForWindowId:self.windowId];") orelse return error.TestExpectedEqual;
+    const demini_emit_at = std.mem.indexOfPos(u8, delegate, demini_at, "[self.host emitWindowFrameForWindowId:self.windowId open:YES];") orelse return error.TestExpectedEqual;
+    const demini_end = std.mem.indexOfPos(u8, delegate, demini_at, "\n}\n") orelse return error.TestExpectedEqual;
+    try std.testing.expect(demini_settle_at < demini_emit_at and demini_emit_at < demini_end);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "(style & NSWindowStyleMaskFullScreen) == 0 && !window.isMiniaturized && window.isZoomed") != null);
+    // The mode is re-read only when the window moved or resized: the end
+    // of a fullscreen transition can report the fullscreen Space's visible
+    // frame, where the restored zoomed window does not look zoomed.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "if (NSEqualRects(windowFrame, entry.windowFrame)) return NO;") != null);
+    // The last settle runs while the window still answers.
+    const close_at = std.mem.indexOf(u8, delegate, "- (void)windowWillClose:(NSNotification *)notification {") orelse return error.TestExpectedEqual;
+    const close_settle_at = std.mem.indexOfPos(u8, delegate, close_at, "[self.host settleWindowPlacementForWindowId:self.windowId];") orelse return error.TestExpectedEqual;
+    const close_emit_at = std.mem.indexOfPos(u8, delegate, close_at, "[self.host emitWindowFrameForWindowId:self.windowId open:NO];") orelse return error.TestExpectedEqual;
+    const close_remove_at = std.mem.indexOfPos(u8, delegate, close_at, "[self.host.windows removeObjectForKey:key];") orelse return error.TestExpectedEqual;
+    try std.testing.expect(close_settle_at < close_emit_at and close_emit_at < close_remove_at);
+
+    // A deferred (dragged) settle lands before SHUTDOWN.
+    const shutdown_at = std.mem.indexOf(u8, host_source, "- (void)emitShutdown {") orelse return error.TestExpectedEqual;
+    const flush_at = std.mem.indexOfPos(u8, host_source, shutdown_at, "[self flushPendingWindowPlacements];") orelse return error.TestExpectedEqual;
+    const shutdown_emit_at = std.mem.indexOfPos(u8, host_source, shutdown_at, ".kind = NATIVE_SDK_APPKIT_EVENT_SHUTDOWN") orelse return error.TestExpectedEqual;
+    try std.testing.expect(flush_at < shutdown_emit_at);
+
+    // The query answers from the cache, never from the live window.
+    const query_at = std.mem.indexOf(u8, host_source, "int native_sdk_appkit_window_placement(") orelse return error.TestExpectedEqual;
+    const query_end = std.mem.indexOfPos(u8, host_source, query_at, "\n}\n") orelse return error.TestExpectedEqual;
+    const query = host_source[query_at..query_end];
+    try std.testing.expect(std.mem.indexOf(u8, query, "object.windowPlacements[@(window_id)]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, query, "object.windows") == null and std.mem.indexOf(u8, query, ".frame]") == null);
+
+    // The Chromium host keeps no cache: its query never answers.
+    const cef_source = @embedFile("cef_host.mm");
+    const cef_query_at = std.mem.indexOf(u8, cef_source, "int native_sdk_appkit_window_placement(") orelse return error.TestExpectedEqual;
+    const cef_query_end = std.mem.indexOfPos(u8, cef_source, cef_query_at, "\n}\n") orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, cef_source[cef_query_at..cef_query_end], "return 0;") != null);
 }
 
 fn testPlatformWithEngine(web_engine: platform_mod.WebEngine) MacPlatform {

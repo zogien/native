@@ -2864,6 +2864,33 @@ int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t windo
     return 1;
 }
 
+// The Chromium host keeps no placement cache yet (`window_placement_fn`
+// stays null for the .chromium engine, so the runtime keeps persisting
+// the frame events' own values here) and does not open windows zoomed.
+// Both entry points exist so the shared platform layer links.
+int native_sdk_appkit_window_placement(native_sdk_appkit_host_t *host, uint64_t window_id, double *x, double *y, double *width, double *height, int *maximized) {
+    (void)host;
+    (void)window_id;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    (void)maximized;
+    return 0;
+}
+
+int native_sdk_appkit_window_frame(native_sdk_appkit_host_t *host, uint64_t window_id, double *x, double *y, double *width, double *height, double *scale, int *maximized) {
+    (void)host;
+    (void)window_id;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    (void)scale;
+    (void)maximized;
+    return 0;
+}
+
 int native_sdk_appkit_set_dock_presence(native_sdk_appkit_host_t *host, int visible) {
     (void)host;
     NSApplicationActivationPolicy policy = visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;

@@ -267,6 +267,11 @@ typedef struct {
      * its close_policy (.hide intercepted a user close). open stays 1
      * for the window's whole hidden stretch. */
     int hidden;
+    /* WINDOW_FRAME: nonzero while the window is zoomed right now (the
+     * live state; the persisted mode is native_sdk_appkit_window_placement's).
+     * It sits in the padding before `label`, so every later field keeps
+     * its offset. */
+    int maximized;
     const char *label;
     size_t label_len;
     const char *shortcut_id;
@@ -481,6 +486,17 @@ int native_sdk_appkit_hide_window(native_sdk_appkit_host_t *host, uint64_t windo
 // close_policy .hide hide, and the tray-menu "Open" consequence.
 // Returns 0 when the window id is unknown.
 int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+// The window's PLACEMENT (window_placement_fn): its normal-state content
+// rect in screen points, the frame events' coordinates, which the create
+// path accepts back as a restored frame, and whether it is zoomed over
+// that rect. Answered from the host's cache, also after the window
+// closed. Returns 0 only for a window this host never created (the
+// Chromium host keeps no cache and always returns 0).
+int native_sdk_appkit_window_placement(native_sdk_appkit_host_t *host, uint64_t window_id, double *x, double *y, double *width, double *height, int *maximized);
+// An open window's live content rect (screen points), backing scale and
+// zoomed state, for the info createWindow returns. Returns 0 when the
+// window is not open (out-params untouched).
+int native_sdk_appkit_window_frame(native_sdk_appkit_host_t *host, uint64_t window_id, double *x, double *y, double *width, double *height, double *scale, int *maximized);
 // Change the process activation policy: visible = regular (Dock/app
 // switcher), hidden = accessory. Returns 1 when applied.
 int native_sdk_appkit_set_dock_presence(native_sdk_appkit_host_t *host, int visible);

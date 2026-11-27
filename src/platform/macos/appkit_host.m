@@ -110,6 +110,17 @@ static NSScreen *NativeSdkScreenForFrame(NSRect frame);
 static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen);
 static NSRect NativeSdkConstrainFrame(NSRect frame);
 static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen);
+/* What "maximized" means on macOS right now: a resizable window AppKit
+ * reports zoomed (its frame is the screen's standard zoom frame; AppKit
+ * calls every non-resizable window zoomed). A window in native
+ * fullscreen or minimized is not maximized, even where AppKit still
+ * calls it zoomed (a window minimized from zoomed does; Electron guards
+ * fullscreen the same way). */
+static BOOL NativeSdkWindowIsZoomed(NSWindow *window) {
+    if (!window) return NO;
+    const NSWindowStyleMask style = window.styleMask;
+    return (style & NSWindowStyleMaskResizable) != 0 && (style & NSWindowStyleMaskFullScreen) == 0 && !window.isMiniaturized && window.isZoomed;
+}
 static NSString *NativeSdkAppKitBridgeScript(void);
 static NSString *NativeSdkMenuKeyEquivalent(NSString *key);
 static NSString *NativeSdkMimeTypeForPath(NSString *path);
@@ -389,6 +400,46 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 /// window's `contentLayoutRect` (chrome re-query timing) and must
 /// unregister before the window closes.
 @property(nonatomic, assign) BOOL observesContentLayout;
+@end
+
+/// One window's PLACEMENT, the answer behind `window_placement_fn`: the
+/// NORMAL-state content rect and whether the window is zoomed over it.
+/// AppKit keeps no normal frame of its own (Electron records
+/// `original_frame_` for the same reason), so this cache records it at
+/// settle points while the window is in the normal state and freezes it
+/// while the window is zoomed, minimized or in native fullscreen:
+/// - the normal frame is recorded before a zoom (windowShouldZoom:),
+///   before a minimize, before fullscreen, at the end of a live resize
+///   (which brackets zoom animations and animated frames too), and on
+///   any other move/resize, unless a pointer button is held (a window
+///   drag: it settles when the button is released);
+/// - `maximized` is AppKit's isZoomed for a resizable window, read when
+///   the window moved or resized (see `windowFrame`). Minimized and
+///   fullscreen windows keep answering the mode they return to.
+/// Units are the frame events' own: the content rect in screen points
+/// (Cocoa coordinates, origin bottom-left of the primary screen), which
+/// createWindowWithId: accepts back as a restored frame. Entries outlive
+/// the window (the close event's save asks after it closed) and are
+/// replaced when a window with the same id is created again.
+@interface NativeSdkWindowPlacementEntry : NSObject
+@property(nonatomic, assign) NSRect frame;
+@property(nonatomic, assign) BOOL maximized;
+/// The window's outer frame at the last settle that read it. The mode
+/// is re-read only when the window moved or resized since: AppKit's
+/// isZoomed follows the screen's visible frame, which changes on its own
+/// (the Dock, the menu bar, the end of a fullscreen transition — measured:
+/// DidExitFullScreen can arrive while the screen still reports the
+/// fullscreen Space's visible frame) while the window stays put.
+@property(nonatomic, assign) NSRect windowFrame;
+/// From windowWillEnterFullScreen: until the window has left fullscreen
+/// (did exit, or failed to enter): every settle in between is a no-op.
+@property(nonatomic, assign) BOOL fullScreen;
+/// A move or resize arrived while a pointer button was held; the
+/// placement pointer timer settles it once the button is released.
+@property(nonatomic, assign) BOOL settlePending;
+@end
+
+@implementation NativeSdkWindowPlacementEntry
 @end
 
 /// NSApp's delegate, installed by runWithCallback: — this host
@@ -874,6 +925,11 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 /// hidden flag reports. Ordinary orderOut/minimize states never enter
 /// it.
 @property(nonatomic, strong) NSMutableSet<NSNumber *> *policyHiddenWindows;
+/// Every window's placement cache entry (see
+/// NativeSdkWindowPlacementEntry), kept after the window closes.
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkWindowPlacementEntry *> *windowPlacements;
+/// Polls the pointer buttons while a window drag holds a settle back.
+@property(nonatomic, strong) NSTimer *placementPointerTimer;
 /// Strong ref for NSApp.delegate (which is unretained): the tiny
 /// delegate that turns a Dock-icon reopen into re-showing
 /// policy-hidden windows.
@@ -1192,6 +1248,12 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)emitDeferredResizeForWindowId:(uint64_t)windowId;
 - (void)emitWindowFrame:(BOOL)open;
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open;
+- (BOOL)settleWindowPlacementForWindowId:(uint64_t)windowId;
+- (void)settleWindowPlacementAndEmitForWindowId:(uint64_t)windowId;
+- (void)noteWindowGeometryChangedForWindowId:(uint64_t)windowId;
+- (BOOL)windowPlacementPointerHeld;
+- (void)placementPointerTimerFired:(NSTimer *)timer;
+- (void)flushPendingWindowPlacements;
 - (void)scheduleFrame;
 - (void)requestFrameFromAnyThread;
 - (void)startAppTimerWithId:(uint64_t)timerId intervalNs:(uint64_t)intervalNs repeats:(BOOL)repeats;
@@ -1305,8 +1367,13 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 
 @implementation NativeSdkWindowDelegate
 
+// Placement settles BEFORE the frame emit, so the event a settled
+// change produces already carries the new placement (the runtime
+// persists on frame events). Inside a live resize, or while a pointer
+// button holds a window drag, the placement keeps its pre-gesture answer.
 - (void)windowDidResize:(NSNotification *)notification {
     (void)notification;
+    [self.host noteWindowGeometryChangedForWindowId:self.windowId];
     [self.host emitWindowFrameForWindowId:self.windowId open:YES];
     [self.host emitResizeForWindowId:self.windowId];
     [self.host emitDeferredResizeForWindowId:self.windowId];
@@ -1315,8 +1382,60 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 
 - (void)windowDidMove:(NSNotification *)notification {
     (void)notification;
+    [self.host noteWindowGeometryChangedForWindowId:self.windowId];
     [self.host emitWindowFrameForWindowId:self.windowId open:YES];
     [self.host scheduleFrame];
+}
+
+// Placement settle points with no frame change of their own: each emits
+// a frame event when the placement changed. AppKit runs a zoom's
+// animation (like an animated setFrame) inside live-resize brackets, so
+// the end of a live resize is also where a zoom or unzoom lands.
+- (void)windowDidEndLiveResize:(NSNotification *)notification {
+    (void)notification;
+    [self.host settleWindowPlacementAndEmitForWindowId:self.windowId];
+}
+
+// The last moment the window still sits at the frame a zoom leaves: the
+// normal frame the next unzoom returns to.
+- (BOOL)windowShouldZoom:(NSWindow *)window toFrame:(NSRect)newFrame {
+    (void)window;
+    (void)newFrame;
+    [self.host settleWindowPlacementAndEmitForWindowId:self.windowId];
+    return YES;
+}
+
+// miniaturize: returns before AppKit posts this: the window still
+// reports its pre-minimize state here, which the cache keeps while the
+// window sits in the Dock.
+- (void)windowWillMiniaturize:(NSNotification *)notification {
+    (void)notification;
+    [self.host settleWindowPlacementAndEmitForWindowId:self.windowId];
+}
+
+// AppKit sends no move or resize for a minimize, so these emit the frame
+// event themselves: a minimized window reports unzoomed on the frame
+// channel (as on Windows) while its placement keeps the pre-minimize
+// mode, and the deminiaturized window reports its live state again.
+- (void)windowDidMiniaturize:(NSNotification *)notification {
+    (void)notification;
+    [self.host emitWindowFrameForWindowId:self.windowId open:YES];
+}
+
+- (void)windowDidDeminiaturize:(NSNotification *)notification {
+    (void)notification;
+    [self.host settleWindowPlacementForWindowId:self.windowId];
+    [self.host emitWindowFrameForWindowId:self.windowId open:YES];
+}
+
+- (void)setPlacementFullScreen:(BOOL)fullScreen {
+    self.host.windowPlacements[@(self.windowId)].fullScreen = fullScreen;
+}
+
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window {
+    (void)window;
+    [self setPlacementFullScreen:NO];
+    [self.host settleWindowPlacementAndEmitForWindowId:self.windowId];
 }
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
@@ -1359,6 +1478,11 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 - (void)windowWillEnterFullScreen:(NSNotification *)notification {
     (void)notification;
     [self setToolbarVisible:NO];
+    // Fullscreen is never persisted: the placement settles on the
+    // pre-fullscreen state (normal frame, or zoomed over it) and stays
+    // frozen until the window is out again.
+    [self.host settleWindowPlacementAndEmitForWindowId:self.windowId];
+    [self setPlacementFullScreen:YES];
 }
 
 - (void)windowDidEnterFullScreen:(NSNotification *)notification {
@@ -1374,6 +1498,8 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 - (void)windowDidExitFullScreen:(NSNotification *)notification {
     (void)notification;
     [self setToolbarVisible:YES];
+    [self setPlacementFullScreen:NO];
+    [self.host settleWindowPlacementAndEmitForWindowId:self.windowId];
 }
 
 - (void)setToolbarVisible:(BOOL)visible {
@@ -1473,6 +1599,9 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
         [window removeObserver:self forKeyPath:@"contentLayoutRect"];
         self.observesContentLayout = NO;
     }
+    // The last placement settle, while the window still answers: the
+    // close event's save reads the cache after the window is gone.
+    [self.host settleWindowPlacementForWindowId:self.windowId];
     // A really-closing window is closed, not hidden: leave the
     // policy-hidden set before the frame emit so open=false never
     // carries a stale hidden=true.
@@ -8220,6 +8349,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.windowDragRegionWindows = [[NSMutableSet alloc] init];
     self.passiveShowWindows = [[NSMutableSet alloc] init];
     self.policyHiddenWindows = [[NSMutableSet alloc] init];
+    self.windowPlacements = [[NSMutableDictionary alloc] init];
     self.childWebViews = [[NSMutableDictionary alloc] init];
     self.nativeViews = [[NSMutableDictionary alloc] init];
     self.adoptedViewSurfaces = [[NSMutableDictionary alloc] init];
@@ -8418,6 +8548,13 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.windows[key] = window;
     self.delegates[key] = delegate;
     self.windowLabels[key] = label.length > 0 ? label : @"main";
+    // The placement cache starts at the placed frame: the normal frame
+    // even when the window opens zoomed below, and the answer a window
+    // closed before any other settle keeps.
+    NativeSdkWindowPlacementEntry *placement = [[NativeSdkWindowPlacementEntry alloc] init];
+    placement.frame = [window contentRectForFrameRect:window.frame];
+    placement.windowFrame = window.frame;
+    self.windowPlacements[key] = placement;
     // Present-before-show: a deferred window stays ordered OUT until its
     // first gpu-surface present lands (`showDeferredWindowIfPending`, at
     // the bottom of every present path) — the user never sees a blank
@@ -8433,6 +8570,20 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         });
     } else if (showPolicy == 2) {
         [self.policyHiddenWindows addObject:key];
+    }
+    // window_flags bit 6 (the Windows/GTK hosts' bit too): open zoomed
+    // over that normal frame. Zooming the still ordered-out window works
+    // for every show mode — AppKit zooms it at once, without animation,
+    // keeps it zoomed through the first show, and the first unzoom
+    // returns to the normal frame — so the window never shows at its
+    // normal size first. It runs after the show bookkeeping, so the
+    // frame event the zoom emits already reports a hidden window hidden,
+    // and before the first show. The settle catches a zoom whose resize
+    // settle a held pointer button deferred. Non-resizable windows have
+    // no zoom.
+    if ((windowFlags & (1u << 6)) != 0 && resizable) {
+        [window zoom:nil];
+        [self settleWindowPlacementAndEmitForWindowId:windowId];
     }
     if (makeMain) {
         self.window = window;
@@ -10801,6 +10952,8 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
     }
     [self.timer invalidate];
     self.timer = nil;
+    [self.placementPointerTimer invalidate];
+    self.placementPointerTimer = nil;
     [self invalidateAppTimers];
     [self audioCaptureStopSource:0];
     [self audioCaptureStopSource:1];
@@ -11033,9 +11186,82 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
         // frame emit while a window sits in the policy-hidden set
         // carries it, and hide/show flip the set before they emit.
         .hidden = [self.policyHiddenWindows containsObject:@(windowId)] ? 1 : 0,
+        .maximized = NativeSdkWindowIsZoomed(window) ? 1 : 0,
         .label = label.UTF8String,
         .label_len = [label lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
     }];
+}
+
+// A placement settle point: re-read the window and update its cache
+// entry, answering whether the placement changed. Fullscreen and
+// minimized windows keep the mode they return to; a zoomed window keeps
+// the normal frame recorded before it zoomed; a window that has not
+// moved or resized since the last settle keeps its placement.
+- (BOOL)settleWindowPlacementForWindowId:(uint64_t)windowId {
+    NativeSdkWindowPlacementEntry *entry = self.windowPlacements[@(windowId)];
+    NSWindow *window = self.windows[@(windowId)];
+    if (!entry || !window) return NO;
+    entry.settlePending = NO;
+    if (entry.fullScreen || (window.styleMask & NSWindowStyleMaskFullScreen) != 0 || window.isMiniaturized) return NO;
+    const NSRect windowFrame = window.frame;
+    if (NSEqualRects(windowFrame, entry.windowFrame)) return NO;
+    entry.windowFrame = windowFrame;
+    const BOOL maximized = NativeSdkWindowIsZoomed(window);
+    const NSRect frame = maximized ? entry.frame : [window contentRectForFrameRect:window.frame];
+    if (entry.maximized == maximized && NSEqualRects(entry.frame, frame)) return NO;
+    entry.frame = frame;
+    entry.maximized = maximized;
+    return YES;
+}
+
+- (void)settleWindowPlacementAndEmitForWindowId:(uint64_t)windowId {
+    if ([self settleWindowPlacementForWindowId:windowId]) [self emitWindowFrameForWindowId:windowId open:YES];
+}
+
+// A move or resize outside a live resize: settle now, unless a pointer
+// button is held — a window drag (the titlebar, or the drag channel's
+// performWindowDragWithEvent:) keeps the pre-drag answer and settles
+// when the button comes up. The caller emits the frame event right
+// after, so a settle here needs no emit of its own.
+- (void)noteWindowGeometryChangedForWindowId:(uint64_t)windowId {
+    NativeSdkWindowPlacementEntry *entry = self.windowPlacements[@(windowId)];
+    NSWindow *window = self.windows[@(windowId)];
+    if (!entry || !window || window.inLiveResize) return;
+    if (![self windowPlacementPointerHeld]) {
+        [self settleWindowPlacementForWindowId:windowId];
+        return;
+    }
+    entry.settlePending = YES;
+    if (self.placementPointerTimer) return;
+    // Common modes, so the poll keeps running during event tracking.
+    NSTimer *timer = [NSTimer timerWithTimeInterval:0.1
+                                             target:self
+                                           selector:@selector(placementPointerTimerFired:)
+                                           userInfo:nil
+                                            repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    self.placementPointerTimer = timer;
+}
+
+- (BOOL)windowPlacementPointerHeld {
+    return ([NSEvent pressedMouseButtons] & 1) != 0;
+}
+
+- (void)placementPointerTimerFired:(NSTimer *)timer {
+    (void)timer;
+    if ([self windowPlacementPointerHeld]) return;
+    [self.placementPointerTimer invalidate];
+    self.placementPointerTimer = nil;
+    [self flushPendingWindowPlacements];
+}
+
+// Settle every window a held pointer button deferred, with a frame
+// event for each change. Also the quit path's last word before SHUTDOWN.
+- (void)flushPendingWindowPlacements {
+    for (NSNumber *key in [self.windowPlacements.allKeys copy]) {
+        if (!self.windowPlacements[key].settlePending) continue;
+        [self settleWindowPlacementAndEmitForWindowId:key.unsignedLongLongValue];
+    }
 }
 
 - (void)scheduleFrame {
@@ -12639,6 +12865,15 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     if (self.didShutdown) {
         return;
     }
+    // A quit during a window drag: the frame event that settles the
+    // deferred placement must land before SHUTDOWN. Its handler can
+    // itself end the app, so check again after it.
+    [self.placementPointerTimer invalidate];
+    self.placementPointerTimer = nil;
+    [self flushPendingWindowPlacements];
+    if (self.didShutdown) {
+        return;
+    }
     self.didShutdown = YES;
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_SHUTDOWN }];
 }
@@ -13995,6 +14230,35 @@ int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t windo
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object showWindowWithId:window_id];
+    return 1;
+}
+
+// window_placement_fn: the cache only, never the live window, so a
+// closed window keeps answering what its last settle recorded.
+int native_sdk_appkit_window_placement(native_sdk_appkit_host_t *host, uint64_t window_id, double *x, double *y, double *width, double *height, int *maximized) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NativeSdkWindowPlacementEntry *entry = object.windowPlacements[@(window_id)];
+    if (!entry) return 0;
+    const NSRect frame = entry.frame;
+    *x = frame.origin.x;
+    *y = frame.origin.y;
+    *width = frame.size.width;
+    *height = frame.size.height;
+    *maximized = entry.maximized ? 1 : 0;
+    return 1;
+}
+
+int native_sdk_appkit_window_frame(native_sdk_appkit_host_t *host, uint64_t window_id, double *x, double *y, double *width, double *height, double *scale, int *maximized) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    const NSRect frame = [window contentRectForFrameRect:window.frame];
+    *x = frame.origin.x;
+    *y = frame.origin.y;
+    *width = frame.size.width;
+    *height = frame.size.height;
+    *scale = window.backingScaleFactor;
+    *maximized = NativeSdkWindowIsZoomed(window) ? 1 : 0;
     return 1;
 }
 
