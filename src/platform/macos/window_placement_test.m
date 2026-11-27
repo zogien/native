@@ -245,22 +245,35 @@ static BOOL zoomed(uint64_t windowId) {
 /* ------------------------------------------------------------------------
  * Cases. */
 
-static const NSRect kNormal = {{300, 300}, {720, 480}};
+/* The normal frame every case restores and expects back. It is placed
+ * inside the primary screen's visible frame, with room for the cases'
+ * moves and the titlebar, so clamp_to_visible_screen never moves it. A
+ * fixed origin fit the test Mac's screen but not a CI runner's smaller
+ * one, where every restored window was pushed down into the visible
+ * frame and no placement matched. Set in main(). */
+static NSRect normalFrame;
+
+static NSRect fittedFrame(CGFloat inset, CGFloat width, CGFloat height) {
+    const NSRect visible = NSScreen.screens.firstObject.visibleFrame;
+    return NSMakeRect(NSMinX(visible) + inset, NSMinY(visible) + inset,
+                      MIN(width, NSWidth(visible) - 3 * inset),
+                      MIN(height, NSHeight(visible) - 4 * inset));
+}
 
 static void caseRoundTrip(void) {
     for (int policy = 0; policy <= 1; policy++) {
         for (int style = 0; style <= 3; style++) {
-            NSRect frame = kNormal;
+            NSRect frame = normalFrame;
             NSRect first = NSZeroRect;
             for (int launch = 0; launch < 4; launch++) {
                 uint64_t windowId = restoreWindow(style, policy, frame, NO);
                 pump(0.05);
                 NSRect content = contentOf(windowId);
                 NSWindow *window = windowOf(windowId);
-                CHECK(NSEqualSizes(content.size, kNormal.size) && NSEqualSizes(window.contentView.bounds.size, kNormal.size),
+                CHECK(NSEqualSizes(content.size, normalFrame.size) && NSEqualSizes(window.contentView.bounds.size, normalFrame.size),
                     "%s/%s launch %d: content %s (view %.1fx%.1f), want 720x480", styleName(style), policy ? "center" : "clamp", launch,
                     R(content), window.contentView.bounds.size.width, window.contentView.bounds.size.height);
-                if (policy == 0) CHECK(NSEqualPoints(content.origin, kNormal.origin), "%s clamp launch %d: origin %s", styleName(style), launch, R(content));
+                if (policy == 0) CHECK(NSEqualPoints(content.origin, normalFrame.origin), "%s clamp launch %d: origin %s", styleName(style), launch, R(content));
                 if (launch == 0) first = content;
                 CHECK(NSEqualRects(content, first), "%s/%s launch %d: %s drifted from %s", styleName(style), policy ? "center" : "clamp", launch, R(content), R(first));
                 expectPlacement(windowId, content, 0, "round trip answer");
@@ -273,21 +286,21 @@ static void caseRoundTrip(void) {
 
 static void caseZoomedRoundTrip(void) {
     for (int style = 0; style <= 3; style++) {
-        NSRect frame = kNormal;
+        NSRect frame = normalFrame;
         for (int launch = 0; launch < 3; launch++) {
             int mark = recordMark();
             uint64_t windowId = restoreWindow(style, 0, frame, YES);
             pump(0.05);
             CHECK(zoomed(windowId), "%s zoomed launch %d: window opens zoomed", styleName(style), launch);
-            expectPlacement(windowId, kNormal, 1, "zoomed open answer");
+            expectPlacement(windowId, normalFrame, 1, "zoomed open answer");
             for (int index = mark; index < record_count; index++) {
                 if (records[index].id == windowId) CHECK(records[index].maximized == 1, "%s zoomed launch %d: frame event %d says unzoomed", styleName(style), launch, index);
             }
             if (launch == 2) {
                 [windowOf(windowId) zoom:nil];
                 pump(0.05);
-                CHECK(NSEqualRects(contentOf(windowId), kNormal), "%s: unzoom returns to %s, got %s", styleName(style), R(kNormal), R(contentOf(windowId)));
-                expectPlacement(windowId, kNormal, 0, "unzoomed answer");
+                CHECK(NSEqualRects(contentOf(windowId), normalFrame), "%s: unzoom returns to %s, got %s", styleName(style), R(normalFrame), R(contentOf(windowId)));
+                expectPlacement(windowId, normalFrame, 0, "unzoomed answer");
                 expectLastEventCarries(windowId, mark, "unzoom");
             }
             frame = placementOf(windowId).frame;
@@ -297,14 +310,14 @@ static void caseZoomedRoundTrip(void) {
 }
 
 static void caseSettleRule(int style) {
-    uint64_t windowId = restoreWindow(style, 0, kNormal, NO);
+    uint64_t windowId = restoreWindow(style, 0, normalFrame, NO);
     NSWindow *window = windowOf(windowId);
     pump(0.1);
-    expectPlacement(windowId, kNormal, 0, "seeded");
+    expectPlacement(windowId, normalFrame, 0, "seeded");
 
     // A programmatic frame settles before the frame event it causes.
     int mark = recordMark();
-    NSRect moved = NSOffsetRect([window frameRectForContentRect:kNormal], 40, -20);
+    NSRect moved = NSOffsetRect([window frameRectForContentRect:normalFrame], 40, -20);
     moved.size.width += 30;
     [window setFrame:moved display:YES];
     NSRect content = contentOf(windowId);
@@ -412,7 +425,7 @@ static void caseSettleRule(int style) {
 /* The fullscreen freeze through the delegate's own notifications: the
  * transition AppKit runs needs an active app, these do not. */
 static void caseFullScreenNotifications(BOOL fromZoomed) {
-    uint64_t windowId = restoreWindow(0, 0, kNormal, fromZoomed);
+    uint64_t windowId = restoreWindow(0, 0, normalFrame, fromZoomed);
     NSWindow *window = windowOf(windowId);
     NativeSdkWindowDelegate *delegate = (NativeSdkWindowDelegate *)window.delegate;
     pump(0.05);
@@ -426,9 +439,9 @@ static void caseFullScreenNotifications(BOOL fromZoomed) {
     const NSRect stand_in = NSMakeRect(NSMinX(screen.visibleFrame) + 10, NSMinY(screen.visibleFrame) + 10, 900, 600);
     [window setFrame:stand_in display:YES];
     pump(0.05);
-    expectPlacement(windowId, kNormal, fromZoomed ? 1 : 0, "frozen in fullscreen");
+    expectPlacement(windowId, normalFrame, fromZoomed ? 1 : 0, "frozen in fullscreen");
     const frame_record_t *record = lastRecord(windowId, mark);
-    CHECK(record && NSEqualRects(record->placement, kNormal), "fullscreen%s: frame events carry the pre-fullscreen placement (record=%d placement %s, window %s)",
+    CHECK(record && NSEqualRects(record->placement, normalFrame), "fullscreen%s: frame events carry the pre-fullscreen placement (record=%d placement %s, window %s)",
         fromZoomed ? " from zoomed" : "", record != NULL, record ? R(record->placement) : "-", R(window.frame));
     // Failing to enter, and exiting, return the window and thaw the
     // cache: the next change settles again.
@@ -436,21 +449,21 @@ static void caseFullScreenNotifications(BOOL fromZoomed) {
         if (fromZoomed) {
             [window zoom:nil];
             pump(0.05);
-            expectPlacement(windowId, kNormal, 0, what);
+            expectPlacement(windowId, normalFrame, 0, what);
             [window zoom:nil];
             pump(0.05);
-            expectPlacement(windowId, kNormal, 1, what);
+            expectPlacement(windowId, normalFrame, 1, what);
         } else {
             [window setFrameOrigin:NSMakePoint(before.origin.x + 15, before.origin.y + 15)];
-            expectPlacement(windowId, NSOffsetRect(kNormal, 15, 15), 0, what);
+            expectPlacement(windowId, NSOffsetRect(normalFrame, 15, 15), 0, what);
             [window setFrame:before display:YES];
-            expectPlacement(windowId, kNormal, 0, what);
+            expectPlacement(windowId, normalFrame, 0, what);
         }
     };
     [window setFrame:before display:YES];
     [delegate windowDidFailToEnterFullScreen:window];
     pump(0.05);
-    expectPlacement(windowId, kNormal, fromZoomed ? 1 : 0, "failed to enter fullscreen");
+    expectPlacement(windowId, normalFrame, fromZoomed ? 1 : 0, "failed to enter fullscreen");
     expectThawed("thawed after a failed fullscreen");
     [delegate windowWillEnterFullScreen:note];
     [window setFrame:stand_in display:YES];
@@ -458,7 +471,7 @@ static void caseFullScreenNotifications(BOOL fromZoomed) {
     NSNotification *exitNote = [NSNotification notificationWithName:NSWindowDidExitFullScreenNotification object:window];
     [delegate windowDidExitFullScreen:exitNote];
     pump(0.05);
-    expectPlacement(windowId, kNormal, fromZoomed ? 1 : 0, "exited fullscreen");
+    expectPlacement(windowId, normalFrame, fromZoomed ? 1 : 0, "exited fullscreen");
     expectThawed("thawed after fullscreen");
     // Entering again, then closing in fullscreen.
     [delegate windowWillEnterFullScreen:note];
@@ -466,9 +479,9 @@ static void caseFullScreenNotifications(BOOL fromZoomed) {
     mark = recordMark();
     [window close];
     pump(0.05);
-    expectPlacement(windowId, kNormal, fromZoomed ? 1 : 0, "closed in fullscreen");
+    expectPlacement(windowId, normalFrame, fromZoomed ? 1 : 0, "closed in fullscreen");
     record = lastRecord(windowId, mark);
-    CHECK(record && record->open == 0 && NSEqualRects(record->placement, kNormal) && record->placement_maximized == (fromZoomed ? 1 : 0),
+    CHECK(record && record->open == 0 && NSEqualRects(record->placement, normalFrame) && record->placement_maximized == (fromZoomed ? 1 : 0),
         "fullscreen close: the close event carries the pre-fullscreen placement");
 }
 
@@ -477,7 +490,7 @@ static BOOL fullScreenExited;
 static BOOL fullScreenFailed;
 
 static void caseRealFullScreen(BOOL fromZoomed) {
-    uint64_t windowId = restoreWindow(0, 0, kNormal, fromZoomed);
+    uint64_t windowId = restoreWindow(0, 0, normalFrame, fromZoomed);
     NSWindow *window = windowOf(windowId);
     id observer = [[NSNotificationCenter defaultCenter] addObserverForName:nil object:window queue:nil usingBlock:^(NSNotification *note) {
         if ([note.name isEqualToString:NSWindowDidEnterFullScreenNotification]) fullScreenEntered = YES;
@@ -495,7 +508,7 @@ static void caseRealFullScreen(BOOL fromZoomed) {
     // the pre-fullscreen placement.
     for (int index = mark; index < record_count; index++) {
         if (records[index].id != windowId) continue;
-        CHECK(NSEqualRects(records[index].placement, kNormal) && records[index].placement_maximized == (fromZoomed ? 1 : 0),
+        CHECK(NSEqualRects(records[index].placement, normalFrame) && records[index].placement_maximized == (fromZoomed ? 1 : 0),
             "real fullscreen%s: frame event %d carries %s max=%d", fromZoomed ? " from zoomed" : "", index, R(records[index].placement), records[index].placement_maximized);
     }
     if (!fullScreenEntered) {
@@ -503,10 +516,10 @@ static void caseRealFullScreen(BOOL fromZoomed) {
         fprintf(stderr, "SKIP real fullscreen%s: AppKit did not enter fullscreen (app active=%d; a locked screen or an inactive app cannot)\n",
             fromZoomed ? " from zoomed" : "", NSApp.isActive);
         if (getenv("NATIVE_SDK_TEST_REQUIRE_FULLSCREEN")) CHECK(0, "real fullscreen required");
-        expectPlacement(windowId, kNormal, fromZoomed ? 1 : 0, "after a failed fullscreen");
+        expectPlacement(windowId, normalFrame, fromZoomed ? 1 : 0, "after a failed fullscreen");
     } else {
         pump(0.5);
-        expectPlacement(windowId, kNormal, fromZoomed ? 1 : 0, "in real fullscreen");
+        expectPlacement(windowId, normalFrame, fromZoomed ? 1 : 0, "in real fullscreen");
         // A fullscreen window is not maximized on the frame channel.
         int inside = recordMark();
         [host emitWindowFrameForWindowId:windowId open:YES];
@@ -516,8 +529,8 @@ static void caseRealFullScreen(BOOL fromZoomed) {
         CHECK(pumpUntil(6.0, ^BOOL { return fullScreenExited; }), "real fullscreen: exited");
         pump(0.5);
         CHECK(zoomed(windowId) == fromZoomed, "real fullscreen: returns %s", fromZoomed ? "zoomed" : "normal");
-        if (!fromZoomed) CHECK(NSEqualRects(contentOf(windowId), kNormal), "real fullscreen: returns to %s, got %s", R(kNormal), R(contentOf(windowId)));
-        expectPlacement(windowId, kNormal, fromZoomed ? 1 : 0, "after real fullscreen");
+        if (!fromZoomed) CHECK(NSEqualRects(contentOf(windowId), normalFrame), "real fullscreen: returns to %s, got %s", R(normalFrame), R(contentOf(windowId)));
+        expectPlacement(windowId, normalFrame, fromZoomed ? 1 : 0, "after real fullscreen");
         expectLastEventCarries(windowId, mark, "after real fullscreen");
     }
     [[NSNotificationCenter defaultCenter] removeObserver:observer];
@@ -525,29 +538,29 @@ static void caseRealFullScreen(BOOL fromZoomed) {
 }
 
 static void caseCloseBeforeSettle(void) {
-    uint64_t windowId = restoreWindow(1, 0, kNormal, NO);
+    uint64_t windowId = restoreWindow(1, 0, normalFrame, NO);
     int mark = recordMark();
     [windowOf(windowId) close];
-    expectPlacement(windowId, kNormal, 0, "closed before any settle");
+    expectPlacement(windowId, normalFrame, 0, "closed before any settle");
     const frame_record_t *record = lastRecord(windowId, mark);
-    CHECK(record && record->open == 0 && NSEqualRects(record->placement, kNormal), "close before settle: the close event carries the seeded placement");
+    CHECK(record && record->open == 0 && NSEqualRects(record->placement, normalFrame), "close before settle: the close event carries the seeded placement");
     // A zoomed window closed at once.
-    windowId = restoreWindow(1, 0, kNormal, YES);
+    windowId = restoreWindow(1, 0, normalFrame, YES);
     mark = recordMark();
     [windowOf(windowId) close];
-    expectPlacement(windowId, kNormal, 1, "zoomed window closed at once");
+    expectPlacement(windowId, normalFrame, 1, "zoomed window closed at once");
     record = lastRecord(windowId, mark);
-    CHECK(record && record->open == 0 && record->placement_maximized == 1 && NSEqualRects(record->placement, kNormal), "zoomed close: the close event carries the zoomed placement");
+    CHECK(record && record->open == 0 && record->placement_maximized == 1 && NSEqualRects(record->placement, normalFrame), "zoomed close: the close event carries the zoomed placement");
     // A close during a drag (the app closes the window while the user
     // still holds the button): the close settles the dragged frame, and
     // the close event carries it.
-    windowId = restoreWindow(0, 0, kNormal, NO);
+    windowId = restoreWindow(0, 0, normalFrame, NO);
     NSWindow *window = windowOf(windowId);
     pump(0.05);
     host.pointerHeld = YES;
     [window setFrameOrigin:NSMakePoint(window.frame.origin.x + 40, window.frame.origin.y + 40)];
     const NSRect dragged = contentOf(windowId);
-    expectPlacement(windowId, kNormal, 0, "before a close during a drag");
+    expectPlacement(windowId, normalFrame, 0, "before a close during a drag");
     mark = recordMark();
     [window close];
     host.pointerHeld = NO;
@@ -579,16 +592,16 @@ static void caseZoomedOpenShowModes(void) {
     for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
         const show_case_t c = cases[index];
         int mark = recordMark();
-        uint64_t windowId = createWindow(c.style, 0, kNormal, 0, c.show, c.flags | (1u << 6), YES);
+        uint64_t windowId = createWindow(c.style, 0, normalFrame, 0, c.show, c.flags | (1u << 6), YES);
         NSWindow *window = windowOf(windowId);
         CHECK(zoomed(windowId), "%s: zoomed at create", c.name);
         CHECK(window.isVisible == (c.show == 0), "%s: visible=%d at create", c.name, window.isVisible);
-        expectPlacement(windowId, kNormal, 1, c.name);
+        expectPlacement(windowId, normalFrame, 1, c.name);
         double x = 0, y = 0, width = 0, height = 0, scale = 0;
         int maximized = 0;
         CHECK(native_sdk_appkit_window_frame((__bridge native_sdk_appkit_host_t *)host, windowId, &x, &y, &width, &height, &scale, &maximized) && maximized == 1,
             "%s: createWindow's info reports maximized", c.name);
-        CHECK(NSEqualRects(NSMakeRect(x, y, width, height), contentOf(windowId)) && width > kNormal.size.width, "%s: createWindow's info carries the zoomed frame", c.name);
+        CHECK(NSEqualRects(NSMakeRect(x, y, width, height), contentOf(windowId)) && width > normalFrame.size.width, "%s: createWindow's info carries the zoomed frame", c.name);
         if (c.show == 1) {
             CHECK(pumpUntil(3.0, ^BOOL { return window.isVisible; }), "%s: the fallback deadline reveals it", c.name);
         } else if (c.show == 2) {
@@ -607,8 +620,8 @@ static void caseZoomedOpenShowModes(void) {
         }
         [window zoom:nil];
         pump(0.05);
-        CHECK(NSEqualRects(contentOf(windowId), kNormal), "%s: unzoom returns to %s, got %s", c.name, R(kNormal), R(contentOf(windowId)));
-        expectPlacement(windowId, kNormal, 0, "unzoomed after a zoomed open");
+        CHECK(NSEqualRects(contentOf(windowId), normalFrame), "%s: unzoom returns to %s, got %s", c.name, R(normalFrame), R(contentOf(windowId)));
+        expectPlacement(windowId, normalFrame, 0, "unzoomed after a zoomed open");
         closeWindow(windowId);
     }
     // A zoomed open while a pointer button is held (the click that opened
@@ -616,21 +629,21 @@ static void caseZoomedOpenShowModes(void) {
     // own settle emits the frame event that carries the zoomed placement.
     int held = recordMark();
     host.pointerHeld = YES;
-    uint64_t heldId = createWindow(0, 0, kNormal, 0, 2, 1u << 6, YES);
-    expectPlacement(heldId, kNormal, 1, "zoomed open while a button is held");
+    uint64_t heldId = createWindow(0, 0, normalFrame, 0, 2, 1u << 6, YES);
+    expectPlacement(heldId, normalFrame, 1, "zoomed open while a button is held");
     expectLastEventCarries(heldId, held, "zoomed open while a button is held");
     host.pointerHeld = NO;
     pump(0.3);
-    expectPlacement(heldId, kNormal, 1, "zoomed open after the button is released");
+    expectPlacement(heldId, normalFrame, 1, "zoomed open after the button is released");
     closeWindow(heldId);
     // No zoom for a window that cannot resize. AppKit's own isZoomed
     // says YES for every non-resizable window (its frame is the only
     // frame it can have), which is why the host's notion of zoomed
     // requires a resizable window.
-    uint64_t windowId = createWindow(0, 0, kNormal, 0, 0, 1u << 6, NO);
+    uint64_t windowId = createWindow(0, 0, normalFrame, 0, 0, 1u << 6, NO);
     fprintf(stderr, "non-resizable window: AppKit isZoomed=%d\n", windowOf(windowId).isZoomed);
-    CHECK(!zoomed(windowId) && NSEqualRects(contentOf(windowId), kNormal), "non-resizable: not zoomed, at %s", R(contentOf(windowId)));
-    expectPlacement(windowId, kNormal, 0, "non-resizable");
+    CHECK(!zoomed(windowId) && NSEqualRects(contentOf(windowId), normalFrame), "non-resizable: not zoomed, at %s", R(contentOf(windowId)));
+    expectPlacement(windowId, normalFrame, 0, "non-resizable");
     int mark = recordMark();
     [host emitWindowFrameForWindowId:windowId open:YES];
     const frame_record_t *record = lastRecord(windowId, mark);
@@ -724,7 +737,8 @@ static BOOL startupVisibleBeforeRun;
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
-        startupNormal = NSMakeRect(200, 200, 640, 400);
+        normalFrame = fittedFrame(40, 720, 480);
+        startupNormal = fittedFrame(20, 640, 400);
         host = [[NativeSdkPlacementTestHost alloc] initWithAppName:@"placement-test" displayName:@"Placement Test" version:@"" aboutDescription:@""
             hasWebContent:NO webViewInspection:NO dockVisible:YES windowTitle:@"Placement Test" bundleIdentifier:@"dev.native_sdk.placement_test"
             iconPath:@"" windowLabel:@"main" x:startupNormal.origin.x y:startupNormal.origin.y width:startupNormal.size.width height:startupNormal.size.height
