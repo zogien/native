@@ -19,6 +19,8 @@ The first scene window adopts the startup window; additional scene windows are c
 
 Fresh windows use three-way placement. A successful state-store lookup restores the saved frame. Otherwise, an authored `x` or `y` places the window at that origin (constrained to the matching or nearest visible screen on macOS). With neither saved state nor an explicit origin, macOS centers the main window. Under the default `clamp_to_visible_screen` policy, restored frames stay on their matching or nearest display and fresh secondary windows cascade from the active window; `center_on_primary` centers restored and fresh default frames on the primary display. `restore_state = true` is only the persistence opt-in—it no longer makes a first launch look like a restored frame at `(0, 0)`.
 
+The store saves a window's placement, not its live geometry: the normal-state frame plus whether the window was maximized. A window quit while maximized reopens maximized, and Restore returns it to the saved normal frame. Fullscreen, minimized, and hidden states are never restored: a window closed in fullscreen or minimized reopens at its normal frame (maximized if it was maximized before it was minimized), and the declared show policy still decides whether it starts shown. A window with `restore_state = false` is neither restored nor written to the store.
+
 ## Overlay windows
 
 Window creation accepts four overlay controls:
@@ -154,7 +156,11 @@ JavaScript creation also accepts `titlebar: "standard" | "hidden_inset" | "hidde
     </tr>
     <tr>
       <td><code>WindowState</code></td>
-      <td>Persisted state: id, label, title, frame, open, focused, maximized, fullscreen, scale (the type also carries <code>hidden</code>, deliberately session-transient — it never persists, so every launch starts shown)</td>
+      <td>Frame-channel and persisted state: id, label, title, frame, open, focused, maximized, fullscreen, scale. In the store, <code>frame</code> is the normal frame and <code>fullscreen</code> is always false (see <a href="#window-state-persistence">Window state persistence</a>). The type also carries <code>hidden</code>, deliberately session-transient — it never persists, so every launch starts shown</td>
+    </tr>
+    <tr>
+      <td><code>WindowPlacement</code></td>
+      <td>A window's normal-state frame plus whether it is maximized over it: what the store persists. Hosts report it through the optional <code>window_placement_fn</code> platform service</td>
     </tr>
     <tr>
       <td><code>WindowRestorePolicy</code></td>
@@ -213,7 +219,9 @@ See the [tray page's lifecycle recipe](/docs/tray#the-menu-bar-app-lifecycle) an
 
 ## Window state persistence
 
-The `window_state.Store` persists geometry to `windows.zon` in the app's state directory. Startup restore uses the window `label` from the manifest and applies the saved frame; titles continue to come from the app manifest or runtime window creation options.
+The `window_state.Store` persists each window's placement to `windows.zon` in the app's state directory. Startup restore uses the window `label` from the manifest and applies the saved placement, and windows created later restore under their label the same way; titles continue to come from the app manifest or runtime window creation options.
+
+The runtime saves on window frame events, and only when the record changes. The placement comes from the host's `window_placement_fn` service, which answers from settled state, so a drag writes once when it ends rather than on every move; on a host without the service, each frame event's own frame is saved. A close sets `open` to false but keeps the last placement, so the window reopens where it was before it closed.
 
 <table>
   <thead>
@@ -233,15 +241,15 @@ The `window_state.Store` persists geometry to `windows.zon` in the app's state d
     </tr>
     <tr>
       <td><code>frame</code></td>
-      <td>Position and size (x, y, width, height)</td>
+      <td>The normal-state position and size (x, y, width, height), never the maximized, fullscreen, or minimized geometry</td>
     </tr>
     <tr>
       <td><code>maximized</code></td>
-      <td>Whether the window was maximized</td>
+      <td>Whether the window was maximized, including when it was minimized from maximized; restore opens it maximized over <code>frame</code></td>
     </tr>
     <tr>
       <td><code>fullscreen</code></td>
-      <td>Whether the window was fullscreen</td>
+      <td>Always false: fullscreen is never restored</td>
     </tr>
     <tr>
       <td><code>scale</code></td>
