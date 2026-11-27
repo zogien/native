@@ -399,9 +399,10 @@ jobs:
       # conditions is the linux-webkitgtk job's ELF cross-audit.)
       # x11-utils provides xwininfo, which the smoke script uses to find
       # the context-menu popover's override-redirect X window (and to
-      # dump the X window list in failure diagnostics).
-      - name: Install GTK, Xvfb, xauth, xdotool, and x11-utils
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xauth xdotool x11-utils
+      # dump the X window list in failure diagnostics). openbox is the
+      # window manager the window placement harness maximizes through.
+      - name: Install GTK, Xvfb, xauth, xdotool, x11-utils, and openbox
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xauth xdotool x11-utils openbox
       # The stub is the expected, configured state of every native-only
       # Linux app, so compiling the GTK host with the stub define must be
       # diagnostic-FREE, not merely successful: zig renders every clang
@@ -437,6 +438,17 @@ jobs:
       # and X window list) all live in the script.
       - name: Build and drive ui-inbox headless
         run: .github/scripts/linux-canvas-smoke.sh
+      # Window placement against the production GTK host (see
+      # src/platform/linux/window_placement_test.c): exact content size
+      # round trips for every titlebar style (hidden-titlebar windows used
+      # to open short by their header bar and shrink by it per relaunch),
+      # the settle rule, close and quit flushes, and, through openbox,
+      # maximize and maximized opens in every show mode. The harness
+      # fails instead of skipping those when no window manager came up.
+      - name: Linux window placement harness
+        run: |
+          export GTK_A11Y=none NATIVE_SDK_TEST_REQUIRE_WM=1
+          xvfb-run -a --server-args="-screen 0 1280x800x24" sh -c 'openbox --sm-disable & sleep 2; zig build test-linux-window-placement'
       # Durable receipt for the GLib 2.72 fallback (the pre-2.74
       # G_APPLICATION_DEFAULT_FLAGS shim in gtk_host.c): no stock image
       # pairs an old glib with GTK >= 4.10 (only backport distros do),

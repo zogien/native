@@ -25,6 +25,10 @@ struct GtkEvent {
     double y;
     int open;
     int focused;
+    /* Field order and offsets match native_sdk_gtk_event_t (gtk_host.h)
+     * up to title_len: the Zig side reads this as that struct. */
+    int hidden;
+    int maximized;
     const char *label;
     size_t label_len;
     const char *title;
@@ -296,6 +300,20 @@ int native_sdk_gtk_start_window_drag(Host *host, uint64_t window_id) {
     // through, so the drag request reports "window not draggable".
     (void)host;
     (void)window_id;
+    return 0;
+}
+
+int native_sdk_gtk_window_placement(Host *host, uint64_t window_id, double *x, double *y, double *width, double *height, int *maximized) {
+    // Headless CEF tooling host: no native windows, so no placement to
+    // answer for. The Zig side leaves window_placement_fn null on this
+    // engine and the runtime persists frame events as before.
+    (void)host;
+    (void)window_id;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    (void)maximized;
     return 0;
 }
 

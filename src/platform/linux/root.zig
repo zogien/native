@@ -51,6 +51,9 @@ const GtkEvent = extern struct {
     open: c_int,
     focused: c_int,
     hidden: c_int,
+    /// window_frame: maximized right now (live; the persisted mode is
+    /// the placement query's).
+    maximized: c_int,
     label: [*]const u8,
     label_len: usize,
     title: [*]const u8,
@@ -139,6 +142,7 @@ extern fn native_sdk_gtk_create_window(host: *GtkHost, window_id: u64, window_ti
 extern fn native_sdk_gtk_start_window_drag(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_set_window_drag_regions(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_gtk_window_chrome(host: *GtkHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
+extern fn native_sdk_gtk_window_placement(host: *GtkHost, window_id: u64, x: *f64, y: *f64, width: *f64, height: *f64, maximized: *c_int) c_int;
 extern fn native_sdk_gtk_start_timer(host: *GtkHost, timer_id: u64, interval_ns: u64, repeats: c_int) void;
 extern fn native_sdk_gtk_cancel_timer(host: *GtkHost, timer_id: u64) void;
 extern fn native_sdk_gtk_focus_window(host: *GtkHost, window_id: u64) c_int;
@@ -401,6 +405,9 @@ pub const LinuxPlatform = struct {
                 .start_window_drag_fn = startWindowDrag,
                 .set_window_drag_regions_fn = setWindowDragRegions,
                 .window_chrome_fn = windowChrome,
+                // The CEF tooling host has no real windows to answer
+                // for; without the query the runtime keeps its fallback.
+                .window_placement_fn = if (self.web_engine == .system) windowPlacement else null,
                 .create_view_fn = createView,
                 .update_view_fn = updateView,
                 .set_view_frame_fn = setViewFrame,
@@ -613,6 +620,7 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
                 .open = event.open != 0,
                 .focused = event.focused != 0,
                 .hidden = event.hidden != 0,
+                .maximized = event.maximized != 0,
             } });
         },
         .view_focused => state.emit(.{ .view_focused = .{
@@ -930,6 +938,9 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (!options.activate_on_show) flags |= 1 << 3;
     if (!options.allows_fullscreen) flags |= 1 << 4;
     if (options.window_drag_regions) flags |= 1 << 5;
+    // Open maximized over default_frame (the host skips it for a
+    // non-resizable window); the same bit the Windows host reads.
+    if (options.initial_maximized) flags |= 1 << 6;
     return flags;
 }
 
@@ -944,6 +955,10 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
     if (native_sdk_gtk_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, initialPlacementInt(options.initial_placement), restorePolicyInt(options.restore_policy), if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
+    // The placement seeded at create says whether the host opened the
+    // window maximized, so the runtime's table agrees with the frame
+    // events that follow.
+    const placement = windowPlacement(self, options.id);
     return .{
         .id = options.id,
         .label = options.label,
@@ -953,6 +968,26 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
         .open = true,
         .focused = options.activate_on_show and options.show == .immediate,
         .hidden = options.show == .hidden,
+        .maximized = if (placement) |seeded| seeded.maximized else false,
+    };
+}
+
+/// `window_placement_fn`: the host's placement cache (normal-state
+/// content size + maximized), which keeps answering after the window
+/// closes. GTK 4 cannot place toplevels, so the origin is the one the
+/// window was created with, passed through unchanged (see
+/// `native_sdk_gtk_placement_t` in gtk_host.c).
+fn windowPlacement(context: ?*anyopaque, window_id: platform_mod.WindowId) ?platform_mod.WindowPlacement {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    var x: f64 = 0;
+    var y: f64 = 0;
+    var width: f64 = 0;
+    var height: f64 = 0;
+    var maximized: c_int = 0;
+    if (native_sdk_gtk_window_placement(self.host, window_id, &x, &y, &width, &height, &maximized) == 0) return null;
+    return .{
+        .frame = geometry.RectF.init(@floatCast(x), @floatCast(y), @floatCast(width), @floatCast(height)),
+        .maximized = maximized != 0,
     };
 }
 
@@ -1986,6 +2021,28 @@ test "linux context menu action event maps token and item id" {
     try std.testing.expectEqualStrings("canvas", action.view_label);
     try std.testing.expectEqual(@as(u64, 42), action.token);
     try std.testing.expectEqual(@as(u32, 3), action.item_id);
+}
+
+test "linux window flags carry the maximized open" {
+    // Bit 6 is the same one the Windows host reads; the GTK host skips
+    // it for a non-resizable window.
+    try std.testing.expectEqual(@as(u32, 1 << 6), windowFlags(.{ .initial_maximized = true }) & (1 << 6));
+    try std.testing.expectEqual(@as(u32, 0), windowFlags(.{}) & (1 << 6));
+}
+
+test "linux frame events carry the live maximized state on both hosts" {
+    // The C structs place `maximized` right after `hidden`, where the
+    // padding before `label` was, so every later field keeps its offset;
+    // the CEF tooling host's twin declares both so its frame events
+    // line up with what the Zig side reads.
+    try std.testing.expectEqual(@offsetOf(GtkEvent, "hidden") + @sizeOf(c_int), @offsetOf(GtkEvent, "maximized"));
+    try std.testing.expectEqual(@as(usize, 72), @offsetOf(GtkEvent, "label"));
+    const host_source = @embedFile("gtk_host.c");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, ".maximized = gtk_window_is_maximized(win->gtk_window) ? 1 : 0,") != null);
+    const cef_source = @embedFile("cef_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, cef_source, "    int hidden;\n    int maximized;\n    const char *label;") != null);
+    // No real windows there, so no placement answer either.
+    try std.testing.expect(std.mem.indexOf(u8, cef_source, "int native_sdk_gtk_window_placement(Host *host,") != null);
 }
 
 fn testPlatformWithEngine(web_engine: platform_mod.WebEngine) LinuxPlatform {
