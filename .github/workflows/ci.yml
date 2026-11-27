@@ -98,6 +98,12 @@ jobs:
       # The zero-config TypeScript runner must load app manifest menus before
       # automation can select their registered command ids.
       - run: zig build test-menu-bar-smoke
+      # Window placement against the production AppKit host on real
+      # windows: content-size round trips per titlebar style, the settle
+      # rule, zoomed opens through every show mode, close and quit
+      # flushes. The real fullscreen transition needs an active app and is
+      # skipped loudly when the runner's session cannot give it one.
+      - run: zig build test-macos-window-placement
       # Signed-package seal pin: an ad-hoc signed package must pass
       # codesign --verify --strict (macOS runners are the only tier with
       # codesign; the step skips loudly anywhere else).
