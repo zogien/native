@@ -75,6 +75,15 @@ typedef struct native_sdk_absent_content_manager WebKitUserContentManager;
 #define NATIVE_SDK_MAX_NATIVE_VIEWS 32
 #define NATIVE_SDK_MAX_SHORTCUTS 64
 #define NATIVE_SDK_MAX_MENU_ITEMS 128
+/* Placement cache entries (native_sdk_gtk_placement_t): every open
+ * window's plus the most recent closed ones'. */
+#define NATIVE_SDK_MAX_PLACEMENTS 64
+
+/* How long a window's default size must stay unchanged before its
+ * placement settles. GTK has no end-of-resize event: an interactive
+ * resize is a stream of configures, each of which updates the default
+ * size, arriving far faster than this. */
+#define NATIVE_SDK_PLACEMENT_SETTLE_MS 300
 
 /* Tall hidden-titlebar band floor in logical pixels: the same 52 the
  * macOS host's unified-toolbar band settles at, so a toolbar-height app
@@ -354,11 +363,25 @@ typedef struct native_sdk_gtk_window {
     char *asset_origin;
     char *bridge_origin;
     int spa_fallback;
+    /* The create-time origin, passed through: GTK 4 cannot place a
+     * toplevel (the compositor owns positions), so frame events and the
+     * placement cache carry back exactly what the window was created
+     * with. */
     double x;
     double y;
     double emitted_width;
     double emitted_height;
     double emitted_scale;
+    /* What the window's default size adds around the content (root_box)
+     * in its normal state, measured once at create — see
+     * native_sdk_window_measure_chrome. Every content <-> default size
+     * conversion uses these, so create and the placement cache are exact
+     * inverses. */
+    int chrome_width;
+    int chrome_height;
+    /* The pending placement settle after a default-size change; 0 when
+     * none (see native_sdk_gtk_placement_t). */
+    guint placement_settle_source;
     int transparent;
     int always_on_top;
     int click_through;
@@ -366,6 +389,9 @@ typedef struct native_sdk_gtk_window {
     int show_on_first_present;
     int policy_hidden;
     int shown;
+    /* Set by the first show and never cleared: from then on the runtime
+     * has had the window's frame events, hidden or not. */
+    int shown_once;
     /* One-second safety reveal for a canvas window whose first present
      * never arrives. Zero once cancelled/fired. */
     guint deferred_show_source;
@@ -416,6 +442,42 @@ typedef struct native_sdk_gtk_dialog {
     GPtrArray *paths;
 } native_sdk_gtk_dialog_t;
 
+/* One window's PLACEMENT, the answer to window_placement_fn: its
+ * normal-state content size, its create-time origin, and whether it is
+ * maximized. Kept per window id on the host, apart from the window
+ * slots, so it outlives the window: the close event's save asks after
+ * the GtkWindow is gone, and a slot can be reused by the next window.
+ *
+ * Units and sources:
+ *  - Size: logical pixels, the CONTENT (root_box) size the window's
+ *    frame events report. GTK's default size is the normal-state size
+ *    the platform itself keeps for this — it follows the user's resizes
+ *    and stays put while the window is maximized, fullscreen, tiled or
+ *    minimized — so the content size is the default size minus the
+ *    window's measured chrome, the exact inverse of create.
+ *  - Origin: passed through from create. GTK 4 has no window positions
+ *    (the compositor places toplevels and never reports where), so a
+ *    persisted origin is carried back unchanged and never applied.
+ *  - Maximized: gtk_window_is_maximized, which also covers a window
+ *    minimized or fullscreened from maximized.
+ *
+ * Settle points (the only places the cached answer advances): creation;
+ * a maximize or unmaximize (notify::maximized), at once; a default-size
+ * change, once it has held for NATIVE_SDK_PLACEMENT_SETTLE_MS — GTK has
+ * no end-of-resize event, so an interactive resize keeps answering the
+ * pre-resize placement until its stream of configures stops; and a
+ * close or quit, at once, which also folds in a still-pending change.
+ * A settle that changed the answer emits a window frame event, since
+ * the runtime persists on frame events. */
+typedef struct {
+    uint64_t id;
+    double x;
+    double y;
+    double width;
+    double height;
+    int maximized;
+} native_sdk_gtk_placement_t;
+
 struct native_sdk_gtk_host {
     GtkApplication *app;
     /* Display providers are global and the display retains them until
@@ -449,6 +511,9 @@ struct native_sdk_gtk_host {
 
     native_sdk_gtk_window_t windows[NATIVE_SDK_MAX_WINDOWS];
     int window_count;
+    /* See native_sdk_gtk_placement_t; oldest first. */
+    native_sdk_gtk_placement_t placements[NATIVE_SDK_MAX_PLACEMENTS];
+    int placement_count;
     /* App timers (runtime `startTimer`) on the GLib main loop. */
     native_sdk_gtk_app_timer_t timers[NATIVE_SDK_MAX_TIMERS];
     int did_shutdown;
@@ -1937,6 +2002,10 @@ static void native_sdk_clear_window(native_sdk_gtk_window_t *win) {
         g_source_remove(win->deferred_show_source);
         win->deferred_show_source = 0;
     }
+    if (win->placement_settle_source) {
+        g_source_remove(win->placement_settle_source);
+        win->placement_settle_source = 0;
+    }
     native_sdk_clear_native_views(win);
     native_sdk_clear_webviews(win);
     native_sdk_clear_window_source(win);
@@ -2464,10 +2533,12 @@ static void native_sdk_window_content_size(native_sdk_gtk_window_t *win, int *ou
         h = gtk_widget_get_height(GTK_WIDGET(win->gtk_window));
     }
     if (w <= 0 || h <= 0) {
+        /* The default size is the whole window's: its content is what
+         * is left inside the measured chrome. */
         int default_w = 0, default_h = 0;
         gtk_window_get_default_size(win->gtk_window, &default_w, &default_h);
-        if (w <= 0) w = default_w;
-        if (h <= 0) h = default_h;
+        if (w <= 0) w = default_w - win->chrome_width;
+        if (h <= 0) h = default_h - win->chrome_height;
     }
     *out_width = w;
     *out_height = h;
@@ -2580,6 +2651,11 @@ static void native_sdk_emit_window_frame(native_sdk_gtk_host_t *host, native_sdk
         .open = open,
         .focused = focused,
         .hidden = open ? win->policy_hidden : 0,
+        /* Live, like the rest of the event (the placement cache holds
+         * the persisted mode). True from the moment a maximized open
+         * asks for it, before the window is mapped, so the first events
+         * agree with what createWindow reported. */
+        .maximized = gtk_window_is_maximized(win->gtk_window) ? 1 : 0,
         .label = win->label ? win->label : "",
         .label_len = win->label ? strlen(win->label) : 0,
         .title = win->title ? win->title : "",
@@ -2599,6 +2675,143 @@ static void native_sdk_emit_resize(native_sdk_gtk_host_t *host, native_sdk_gtk_w
         .width = (double)w, .height = (double)h,
         .scale = scale,
     });
+}
+
+/* ------------------------------------------------------------------------
+ * Window placement (see native_sdk_gtk_placement_t). */
+
+static native_sdk_gtk_placement_t *native_sdk_find_placement(native_sdk_gtk_host_t *host, uint64_t id) {
+    for (int i = 0; i < host->placement_count; i++) {
+        if (host->placements[i].id == id) return &host->placements[i];
+    }
+    return NULL;
+}
+
+/* Replace a window's cached placement; returns whether the answer
+ * changed. A full cache first drops its oldest entry for a window that
+ * is no longer open: at most NATIVE_SDK_MAX_WINDOWS are open at once,
+ * and a closed window's entry is only asked for by its own close event,
+ * which comes before. */
+static int native_sdk_store_placement(native_sdk_gtk_host_t *host, const native_sdk_gtk_placement_t *next) {
+    native_sdk_gtk_placement_t *entry = native_sdk_find_placement(host, next->id);
+    if (entry) {
+        if (entry->x == next->x && entry->y == next->y && entry->width == next->width &&
+            entry->height == next->height && entry->maximized == next->maximized) {
+            return 0;
+        }
+        *entry = *next;
+        return 1;
+    }
+    if (host->placement_count == NATIVE_SDK_MAX_PLACEMENTS) {
+        int victim = 0;
+        for (int i = 0; i < host->placement_count; i++) {
+            if (!native_sdk_find_window(host, host->placements[i].id)) {
+                victim = i;
+                break;
+            }
+        }
+        memmove(&host->placements[victim], &host->placements[victim + 1],
+                (size_t)(host->placement_count - victim - 1) * sizeof(host->placements[0]));
+        host->placement_count--;
+    }
+    host->placements[host->placement_count++] = *next;
+    return 1;
+}
+
+/* The window's titlebar, whichever one GtkWindow lays out: the hidden
+ * styles' own header bar, or the default decoration GTK adds at realize
+ * to a client-side decorated standard window (Wayland compositors
+ * without server-side decorations). GTK gives both the "titlebar" style
+ * class; the window's other child is the content. */
+static GtkWidget *native_sdk_window_titlebar(native_sdk_gtk_window_t *win) {
+    for (GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(win->gtk_window)); child; child = gtk_widget_get_next_sibling(child)) {
+        if (child == win->root_box || !gtk_widget_has_css_class(child, "titlebar")) continue;
+        if (gtk_widget_get_visible(child) && gtk_widget_get_child_visible(child)) return child;
+    }
+    return NULL;
+}
+
+/* What the window's default size adds around its content (root_box), in
+ * the normal state, from the measurements GtkWindow sizes itself with:
+ * its minimum is its own frame (CSS border and padding — the solid-csd
+ * frame of an uncomposited X11 desktop) around the titlebar stacked on
+ * the content, and the titlebar is allocated its natural height for the
+ * content width. GTK's default size is the size of the whole window, so
+ * passing the requested CONTENT size there would open every
+ * client-side decorated window short by its titlebar (and narrow by its
+ * frame). Measured on the realized window before it is first mapped,
+ * in the normal state the conversions are about. */
+static void native_sdk_window_measure_chrome(native_sdk_gtk_window_t *win, int content_width) {
+    GtkWidget *window = GTK_WIDGET(win->gtk_window);
+    GtkWidget *titlebar = native_sdk_window_titlebar(win);
+    int window_min_width = 0, window_min_height = 0;
+    int content_min_width = 0, content_min_height = 0;
+    int titlebar_min_width = 0, titlebar_min_height = 0, titlebar_height = 0;
+    gtk_widget_measure(window, GTK_ORIENTATION_HORIZONTAL, -1, &window_min_width, NULL, NULL, NULL);
+    gtk_widget_measure(window, GTK_ORIENTATION_VERTICAL, -1, &window_min_height, NULL, NULL, NULL);
+    gtk_widget_measure(win->root_box, GTK_ORIENTATION_HORIZONTAL, -1, &content_min_width, NULL, NULL, NULL);
+    gtk_widget_measure(win->root_box, GTK_ORIENTATION_VERTICAL, -1, &content_min_height, NULL, NULL, NULL);
+    if (titlebar) {
+        gtk_widget_measure(titlebar, GTK_ORIENTATION_HORIZONTAL, -1, &titlebar_min_width, NULL, NULL, NULL);
+        gtk_widget_measure(titlebar, GTK_ORIENTATION_VERTICAL, -1, &titlebar_min_height, NULL, NULL, NULL);
+        gtk_widget_measure(titlebar, GTK_ORIENTATION_VERTICAL, content_width, NULL, &titlebar_height, NULL, NULL);
+    }
+    const int frame_width = window_min_width - MAX(titlebar_min_width, content_min_width);
+    const int frame_height = window_min_height - titlebar_min_height - content_min_height;
+    win->chrome_width = MAX(frame_width, 0);
+    win->chrome_height = MAX(frame_height, 0) + titlebar_height;
+}
+
+/* A settle point: read the window's placement from GTK into the cache,
+ * folding in a pending default-size settle. Returns whether the cached
+ * answer changed. */
+static int native_sdk_settle_window_placement(native_sdk_gtk_window_t *win) {
+    if (!win || !win->gtk_window) return 0;
+    if (win->placement_settle_source) {
+        g_source_remove(win->placement_settle_source);
+        win->placement_settle_source = 0;
+    }
+    int default_width = 0, default_height = 0;
+    gtk_window_get_default_size(win->gtk_window, &default_width, &default_height);
+    const int width = default_width - win->chrome_width;
+    const int height = default_height - win->chrome_height;
+    if (width <= 0 || height <= 0) return 0;
+    const native_sdk_gtk_placement_t next = {
+        .id = win->id,
+        .x = win->x,
+        .y = win->y,
+        .width = (double)width,
+        .height = (double)height,
+        .maximized = gtk_window_is_maximized(win->gtk_window) ? 1 : 0,
+    };
+    return native_sdk_store_placement(win->host, &next);
+}
+
+static gboolean native_sdk_placement_settle_timeout(gpointer data) {
+    native_sdk_gtk_window_t *win = data;
+    win->placement_settle_source = 0;
+    if (native_sdk_settle_window_placement(win)) native_sdk_emit_window_frame(win->host, win, 1);
+    return G_SOURCE_REMOVE;
+}
+
+/* A default-size change: settle once it has held, restarting the wait on
+ * every further change (see native_sdk_gtk_placement_t). */
+static void native_sdk_schedule_placement_settle(native_sdk_gtk_window_t *win) {
+    /* A notify from a GtkWindow whose slot its close already cleared:
+     * nothing to settle, and no timer may outlive the slot. */
+    if (!win->gtk_window) return;
+    if (win->placement_settle_source) g_source_remove(win->placement_settle_source);
+    win->placement_settle_source = g_timeout_add(NATIVE_SDK_PLACEMENT_SETTLE_MS, native_sdk_placement_settle_timeout, win);
+}
+
+/* Quit: settle every open window now, so a resize still inside its
+ * settle wait reaches the store through the frame event this emits
+ * before the shutdown. */
+static void native_sdk_settle_all_window_placements(native_sdk_gtk_host_t *host) {
+    for (int i = 0; i < host->window_count; i++) {
+        native_sdk_gtk_window_t *win = &host->windows[i];
+        if (win->gtk_window && native_sdk_settle_window_placement(win)) native_sdk_emit_window_frame(host, win, 1);
+    }
 }
 
 static const char *native_sdk_shortcut_key_for_keyval(guint keyval, char *buffer, size_t buffer_len, int *uses_implicit_shift) {
@@ -2754,8 +2967,24 @@ static void on_resize(GtkWidget *widget, GParamSpec *pspec, gpointer data) {
     (void)pspec;
     (void)widget;
     native_sdk_gtk_window_t *win = data;
+    native_sdk_schedule_placement_settle(win);
     native_sdk_emit_window_frame(win->host, win, 1);
     native_sdk_emit_resize(win->host, win);
+}
+
+/* Maximize and unmaximize are settle points of their own, and the frame
+ * event reports the new live mode even when no allocation change
+ * follows. A window never shown yet has no event to send: GTK re-notifies
+ * a maximized open from inside the first present (for the main window,
+ * before START), and the show path emits the window's frame anyway. A
+ * window hidden after that still reports, or a change while it is
+ * hidden would reach the store only with its next settle. */
+static void on_maximized_changed(GtkWindow *window, GParamSpec *pspec, gpointer data) {
+    (void)pspec;
+    (void)window;
+    native_sdk_gtk_window_t *win = data;
+    native_sdk_settle_window_placement(win);
+    if (win->shown_once) native_sdk_emit_window_frame(win->host, win, 1);
 }
 
 static void on_focus(GtkWindow *window, GParamSpec *pspec, gpointer data) {
@@ -2778,6 +3007,9 @@ static gboolean on_close_request(GtkWindow *window, gpointer data) {
             break;
         }
     }
+    /* Just before destroy: fold a resize still inside its settle wait
+     * into the placement the close event's save reads. */
+    native_sdk_settle_window_placement(win);
     native_sdk_emit_window_frame(host, win, 0);
 
     if (closed_index >= 0) {
@@ -3210,6 +3442,7 @@ static void native_sdk_show_window_implicit(native_sdk_gtk_window_t *win) {
         gtk_widget_set_visible(GTK_WIDGET(win->gtk_window), TRUE);
     }
     win->shown = 1;
+    win->shown_once = 1;
 }
 
 static void native_sdk_cancel_deferred_show(native_sdk_gtk_window_t *win) {
@@ -3291,7 +3524,6 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
         gtk_widget_add_css_class(GTK_WIDGET(win->gtk_window), "native-sdk-transparent");
     }
     gtk_window_set_title(win->gtk_window, win->title);
-    gtk_window_set_default_size(win->gtk_window, (int)width, (int)height);
     gtk_window_set_resizable(win->gtk_window, resizable ? TRUE : FALSE);
     /* The hidden titlebar styles are client-side decorations, never an
      * undecorated window: a real GtkHeaderBar titlebar keeps the
@@ -3372,8 +3604,24 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     gtk_window_set_child(win->gtk_window, win->root_box);
     native_sdk_install_file_drop_target(win);
 
+    /* The requested size is the CONTENT size; GTK's default size is the
+     * whole window's, so add the measured chrome (realizing first: that
+     * is when GTK settles client-side decorations and gives a standard
+     * window that needs one its default titlebar). A maximized open
+     * (window_flags bit 6) is then asked for over that normal size,
+     * before the window is mapped in any show mode, so Unmaximize
+     * returns to it. Both precede the handlers below, and the placement
+     * seed is creation's settle point: nothing is emitted for a window
+     * the runtime has not been handed yet. */
+    gtk_widget_realize(GTK_WIDGET(win->gtk_window));
+    native_sdk_window_measure_chrome(win, (int)width);
+    gtk_window_set_default_size(win->gtk_window, (int)width + win->chrome_width, (int)height + win->chrome_height);
+    if ((window_flags & (1u << 6)) != 0 && resizable) gtk_window_maximize(win->gtk_window);
+    native_sdk_settle_window_placement(win);
+
     g_signal_connect(win->gtk_window, "notify::default-width", G_CALLBACK(on_resize), win);
     g_signal_connect(win->gtk_window, "notify::default-height", G_CALLBACK(on_resize), win);
+    g_signal_connect(win->gtk_window, "notify::maximized", G_CALLBACK(on_maximized_changed), win);
     g_signal_connect(win->gtk_window, "notify::is-active", G_CALLBACK(on_focus), win);
     g_signal_connect(win->gtk_window, "close-request", G_CALLBACK(on_close_request), win);
     GtkEventController *shortcut_controller = gtk_event_controller_key_new();
@@ -3574,6 +3822,13 @@ static gboolean native_sdk_stop_idle(gpointer data) {
      * cannot be double-removed (destroy) or wrongly treated as still
      * pending (a re-quit during the shutdown dispatch below). */
     host->stop_idle_source = 0;
+    if (!host->did_shutdown) {
+        /* The quit closes no window, so their placements are settled
+         * here, while the runtime still persists frame events. */
+        native_sdk_settle_all_window_placements(host);
+    }
+    /* Checked again: a frame event the settle emitted may have closed
+     * the last window, whose close already emitted the shutdown. */
     if (!host->did_shutdown) {
         host->did_shutdown = 1;
         native_sdk_emit(host, (native_sdk_gtk_event_t){ .kind = NATIVE_SDK_GTK_EVENT_SHUTDOWN });
@@ -4216,6 +4471,20 @@ int native_sdk_gtk_window_chrome(native_sdk_gtk_host_t *host, uint64_t window_id
     return 1;
 }
 
+/* window_placement_fn: the placement cache (native_sdk_gtk_placement_t),
+ * which keeps answering after the window closes. */
+int native_sdk_gtk_window_placement(native_sdk_gtk_host_t *host, uint64_t window_id, double *x, double *y, double *width, double *height, int *maximized) {
+    if (!host) return 0;
+    const native_sdk_gtk_placement_t *placement = native_sdk_find_placement(host, window_id);
+    if (!placement) return 0;
+    *x = placement->x;
+    *y = placement->y;
+    *width = placement->width;
+    *height = placement->height;
+    *maximized = placement->maximized;
+    return 1;
+}
+
 int native_sdk_gtk_focus_window(native_sdk_gtk_host_t *host, uint64_t window_id) {
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     if (!win || !win->gtk_window) return 0;
@@ -4223,6 +4492,7 @@ int native_sdk_gtk_focus_window(native_sdk_gtk_host_t *host, uint64_t window_id)
     win->policy_hidden = 0;
     gtk_window_present(win->gtk_window);
     win->shown = 1;
+    win->shown_once = 1;
     native_sdk_emit_window_frame(host, win, 1);
     return 1;
 }

@@ -48,6 +48,9 @@ typedef struct {
     int open;
     int focused;
     int hidden;
+    /* WINDOW_FRAME: the window is maximized right now (live, like the
+     * frame; the persisted mode is native_sdk_gtk_window_placement's). */
+    int maximized;
     const char *label;
     size_t label_len;
     const char *title;
@@ -249,6 +252,12 @@ int native_sdk_gtk_set_window_drag_regions(native_sdk_gtk_host_t *host, uint64_t
  * the band is hidden) report zero. Returns 0 only when the window is
  * unknown. */
 int native_sdk_gtk_window_chrome(native_sdk_gtk_host_t *host, uint64_t window_id, double *top, double *left, double *bottom, double *right, double *buttons_x, double *buttons_y, double *buttons_width, double *buttons_height);
+/* The window's placement (window_placement_fn): its normal-state content
+ * size in logical pixels, its create-time origin passed through (GTK 4
+ * cannot place toplevels), and whether it is maximized. Answered from a
+ * host-side cache that keeps the entry after the window closes; returns
+ * 0 only for a window id the host has no entry for. */
+int native_sdk_gtk_window_placement(native_sdk_gtk_host_t *host, uint64_t window_id, double *x, double *y, double *width, double *height, int *maximized);
 /* App timers on the GLib main loop: starting an id that is already
  * scheduled replaces it; a non-repeating timer drops its slot before
  * emitting so the handler may re-arm the same id. */

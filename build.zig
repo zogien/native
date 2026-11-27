@@ -272,6 +272,27 @@ pub fn build(b: *std.Build) void {
     gtk_pixels_test_run.expectExitCode(0);
     const gtk_pixels_test_step = b.step("test-gtk-pixels", "Run GTK software pixel conversion tests");
     gtk_pixels_test_step.dependOn(&gtk_pixels_test_run.step);
+    if (b.graph.host.result.os.tag == .linux) {
+        // Window placement against the production GTK host, compiled into
+        // the harness (see src/platform/linux/window_placement_test.c):
+        // content size round trips per titlebar style, the settle rule,
+        // close and quit flushes, and — with a window manager on the
+        // display — maximize and maximized opens. It needs GTK and an X11
+        // display, so it is its own step (CI runs it under Xvfb with
+        // openbox), never part of `zig build test`.
+        const placement_mod = b.createModule(.{ .target = b.graph.host, .optimize = optimize, .link_libc = true });
+        placement_mod.addCSourceFile(.{ .file = b.path("src/platform/linux/window_placement_test.c"), .flags = &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
+        placement_mod.linkSystemLibrary("gtk4", .{});
+        placement_mod.linkSystemLibrary("X11", .{});
+        placement_mod.linkSystemLibrary("dl", .{});
+        const placement_test = b.addExecutable(.{ .name = "linux-window-placement-test", .root_module = placement_mod });
+        const placement_run = b.addRunArtifact(placement_test);
+        placement_run.expectExitCode(0);
+        // The outcome depends on the display and its window manager,
+        // which are no cache inputs: always run it.
+        placement_run.has_side_effects = true;
+        b.step("test-linux-window-placement", "Verify the GTK host's window placement: size round trips, settle points, maximized opens (needs an X11 display)").dependOn(&placement_run.step);
+    }
     const spectrum_bins_test_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc", "-cflags", "-std=c11", "-Wall", "-Wextra", "-Werror", "--" });
     spectrum_bins_test_run.addFileArg(b.path("src/platform/macos/spectrum_bins_test.c"));
     spectrum_bins_test_run.addFileInput(b.path("src/platform/macos/spectrum_bins.h"));
