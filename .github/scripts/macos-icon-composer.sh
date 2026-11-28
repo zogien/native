@@ -46,6 +46,35 @@ with open(sys.argv[1]) as catalog:
 assert any(e.get("Name") == "AppIcon" and e.get("AssetType") == "IconImageStack" for e in entries)
 PY
 
+# Reuse the same bundle when switching to PNG. A clean PNG build is the
+# reference in CI. Pass a baseline CLI as $1 to compare across revisions.
+(
+    cd "$project"
+    args=(package --target macos --binary /bin/ls --signing none)
+    write_manifest '"assets/icon.png"'
+    "${1:-$cli}" "${args[@]}" --output "$work/reference/beacon.app"
+
+    check_repack() {
+        local output="$1"
+        shift
+        write_manifest '"Beacon.icon","assets/icon.png"'
+        "$cli" "${args[@]}" "$@"
+        test -s "$output/Contents/Resources/Assets.car"
+        write_manifest '"assets/icon.png"'
+        "$cli" "${args[@]}" "$@"
+        diff -qr "$work/reference/beacon.app" "$output"
+    }
+
+    check_repack zig-out/package/beacon.app
+    check_repack "$work/fixed output/beacon.app" --output "$work/fixed output/beacon.app"
+
+    # A pre-existing catalog in a PNG-only bundle still belongs to its owner.
+    printf 'additional app resources' > "$work/user.car"
+    cp "$work/user.car" zig-out/package/beacon.app/Contents/Resources/Assets.car
+    "$cli" "${args[@]}"
+    cmp "$work/user.car" zig-out/package/beacon.app/Contents/Resources/Assets.car
+)
+
 bundle="$work/Signed Beacon.app"
 resources="$bundle/Contents/Resources"
 plist="$bundle/Contents/Info.plist"

@@ -438,6 +438,7 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
 
     const info_plist = try macosInfoPlist(allocator, options.metadata, executable_name);
     defer allocator.free(info_plist);
+    if (resolveIconPlan(options.metadata).composer == null) try removePreviousComposerCatalog(allocator, io, package_dir);
     try writeFile(package_dir, io, "Contents/Info.plist", info_plist);
     try writeFile(package_dir, io, "Contents/PkgInfo", "APPL????");
     try writeFile(package_dir, io, "Contents/Resources/README.txt", "Unsigned local Native SDK macOS app bundle.\n");
@@ -871,13 +872,34 @@ fn appRelativeAssetSubpath(assets_dir: []const u8) ?[]const u8 {
 const macos_minimum_version = "11.0";
 const macos_catalog_icon = "AppIcon";
 
+const macos_catalog_key = "  <key>CFBundleIconName</key>\n  <string>" ++ macos_catalog_icon ++ "</string>\n";
+
+/// A package may reuse an existing .app. Identify the packager's catalog
+/// before replacing Info.plist, so an unrelated Assets.car survives and
+/// the current asset tree can still supply its own catalog afterward.
+fn removePreviousComposerCatalog(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !void {
+    const catalog = "Contents/Resources/Assets.car";
+    dir.access(io, catalog, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    const previous_plist = dir.readFileAlloc(io, "Contents/Info.plist", allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer allocator.free(previous_plist);
+    if (std.mem.indexOf(u8, previous_plist, macos_catalog_key) != null) {
+        dir.deleteFile(io, catalog) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+}
+
 fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, executable_name: []const u8) ![]const u8 {
     const plan = resolveIconPlan(metadata);
     const icon_name = if (plan.prebuilt_icns) |path| std.fs.path.basename(path) else "AppIcon.icns";
-    const catalog_key = if (plan.composer != null)
-        "  <key>CFBundleIconName</key>\n  <string>" ++ macos_catalog_icon ++ "</string>\n"
-    else
-        "";
+    const catalog_key = if (plan.composer != null) macos_catalog_key else "";
     const bundle_id = try xmlEscapeAlloc(allocator, metadata.id);
     defer allocator.free(bundle_id);
     const display_name = try xmlEscapeAlloc(allocator, metadata.displayName());
