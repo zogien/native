@@ -11,6 +11,7 @@ resources="$bundle/Contents/Resources"
 mkdir -p "$project/assets"
 cp -R "$repo/tests/fixtures/Beacon.icon" "$project/Beacon.icon"
 cp "$repo/assets/icon.png" "$project/assets/icon.png"
+cp "$repo/assets/icon.icns" "$project/Legacy.icns"
 manifest="$project/app.json"
 write_manifest() {
     printf '{"id":"dev.example.beacon","name":"beacon","version":"1.0.0","icons":[%s]}\n' "$1" > "$manifest"
@@ -38,13 +39,16 @@ test "$(plutil -extract CFBundleIconFile raw "$plist")" = AppIcon.icns
 test "$(plutil -extract LSMinimumSystemVersion raw "$plist")" = 11.0
 iconutil --convert iconset "$resources/AppIcon.icns" --output "$work/legacy.iconset"
 test -s "$work/legacy.iconset/icon_128x128.png"
-assetutil --info "$resources/Assets.car" > "$work/catalog.json"
-python3 - "$work/catalog.json" <<'PY'
+check_layered_icon() {
+    assetutil --info "$1" > "$work/catalog.json"
+    python3 - "$work/catalog.json" "$2" <<'PY'
 import json, sys
 with open(sys.argv[1]) as catalog:
     entries = json.load(catalog)
-assert any(e.get("Name") == "AppIcon" and e.get("AssetType") == "IconImageStack" for e in entries)
+assert any(e.get("Name") == sys.argv[2] and e.get("AssetType") == "IconImageStack" for e in entries)
 PY
+}
+check_layered_icon "$resources/Assets.car" AppIcon
 
 # Reuse the same bundle when switching to PNG. A clean PNG build is the
 # reference in CI. Pass a baseline CLI as $1 to compare across revisions.
@@ -102,6 +106,39 @@ PY
     check_failed_repack "$work/fixed output/beacon.app" missing-tool --output "$work/fixed output/beacon.app"
     check_failed_repack zig-out/package/beacon.app broken-source
 
+    # Absolute --assets overlays Resources directly. A locked plist must
+    # leave the existing layered bundle readable after the copy rolls back.
+    mkdir "$work/absolute assets"
+    cp "$user_catalog" "$work/absolute assets/Assets.car"
+    check_layered_icon "$work/absolute assets/Assets.car" UserBadge
+    cp "$plist" "$work/original-Info.plist"
+    cp "$resources/AppIcon.icns" "$work/original-AppIcon.icns"
+    cp "$resources/Assets.car" "$work/original-Assets.car"
+    check_locked_repack() (
+        chflags uchg "$plist"
+        trap 'chflags nouchg "$plist"' EXIT
+        expect_failure PermissionDenied "$cli" "${args[@]}" --output "$bundle" --assets "$work/absolute assets"
+        grep -F 'com.apple.actool.compilation-results' "$work/failure.log"
+        cmp "$work/original-Info.plist" "$plist"
+        cmp "$work/original-AppIcon.icns" "$resources/AppIcon.icns"
+        cmp "$work/original-Assets.car" "$resources/Assets.car"
+        check_layered_icon "$resources/Assets.car" AppIcon
+    )
+    write_manifest '"Beacon.icon","assets/icon.png"'
+    check_locked_repack
+
+    # The new manifest can also select a different fallback while the asset
+    # tree contains a file with the old fallback's name.
+    cp "$repo/assets/icon.icns" "$work/absolute assets/AppIcon.icns"
+    write_manifest '"Legacy.icns","Beacon.icon"'
+    check_locked_repack
+    test ! -e "$resources/Legacy.icns"
+    "$cli" "${args[@]}" --output "$bundle" --assets "$work/absolute assets"
+    test "$(plutil -extract CFBundleIconFile raw "$plist")" = Legacy.icns
+    cmp "$project/Legacy.icns" "$resources/Legacy.icns"
+    cmp "$work/absolute assets/AppIcon.icns" "$resources/AppIcon.icns"
+    check_layered_icon "$resources/Assets.car" AppIcon
+
     # If publishing the staged plist fails, restore both previous resources.
     output="$work/fixed output/beacon.app"
     mv "$output/Contents/Info.plist" "$work/original.plist"
@@ -119,7 +156,6 @@ PY
 bundle="$work/Signed Beacon.app"
 resources="$bundle/Contents/Resources"
 plist="$bundle/Contents/Info.plist"
-cp "$repo/assets/icon.icns" "$project/Legacy.icns"
 write_manifest '"Legacy.icns","Beacon.icon","assets/icon.png"'
 package adhoc
 codesign --verify --deep --strict "$bundle"

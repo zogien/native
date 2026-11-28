@@ -441,11 +441,11 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
     const plan = resolveIconPlan(options.metadata);
     try writeFile(package_dir, io, "Contents/PkgInfo", "APPL????");
     try writeFile(package_dir, io, "Contents/Resources/README.txt", "Unsigned local Native SDK macOS app bundle.\n");
-    const assets_output = try macosAssetOutputPath(allocator, options);
-    defer allocator.free(assets_output);
     const bundle_stats = if (plan.composer) |path|
-        try bundleComposerResources(allocator, io, package_dir, options, path, plan.prebuilt_icns, info_plist, assets_output)
+        try bundleComposerResources(allocator, io, package_dir, options, path, plan.prebuilt_icns, info_plist)
     else blk: {
+        const assets_output = try macosAssetOutputPath(allocator, options.output_path, options);
+        defer allocator.free(assets_output);
         try removePreviousComposerCatalog(allocator, io, package_dir);
         try writeFile(package_dir, io, "Contents/Info.plist", info_plist);
         const stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
@@ -838,12 +838,12 @@ fn assetOutputPath(allocator: std.mem.Allocator, output_path: []const u8, resour
 /// Resources. An absolute or parent-escaping --assets directory has no
 /// app-relative meaning a packaged process could resolve, so it keeps the
 /// flat Resources layout.
-fn macosAssetOutputPath(allocator: std.mem.Allocator, options: PackageOptions) ![]const u8 {
-    if (options.frontend != null) return assetOutputPath(allocator, options.output_path, "Contents/Resources", options);
+fn macosAssetOutputPath(allocator: std.mem.Allocator, output_path: []const u8, options: PackageOptions) ![]const u8 {
+    if (options.frontend != null) return assetOutputPath(allocator, output_path, "Contents/Resources", options);
     if (appRelativeAssetSubpath(options.assets_dir)) |subpath| {
-        return std.fs.path.join(allocator, &.{ options.output_path, "Contents/Resources", subpath });
+        return std.fs.path.join(allocator, &.{ output_path, "Contents/Resources", subpath });
     }
-    return std.fs.path.join(allocator, &.{ options.output_path, "Contents/Resources" });
+    return std.fs.path.join(allocator, &.{ output_path, "Contents/Resources" });
 }
 
 /// Where a Windows or Linux artifact carries the app's assets: the macOS
@@ -1112,7 +1112,6 @@ fn bundleComposerResources(
     path: []const u8,
     prebuilt: ?[]const u8,
     info_plist: []const u8,
-    assets_output: []const u8,
 ) !assets_tool.BundleStats {
     if (@import("builtin").os.tag != .macos) {
         std.debug.print("error: packaging {s} for macOS requires a macOS host with Xcode 26 or later\n", .{path});
@@ -1145,35 +1144,84 @@ fn bundleComposerResources(
     const term = try child.wait(io);
     if (term != .exited or term.exited != 0) return error.IconComposerFailed;
 
+    // Absolute --assets paths put user files at the root of Resources. Resolve
+    // collisions in staging, including when the old plist uses a different ICNS.
+    const assets_output = try macosAssetOutputPath(allocator, destination, options);
+    defer allocator.free(assets_output);
     const stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
+    var incoming = try stage.openDir(io, "Contents/Resources", .{ .iterate = true });
+    defer incoming.close(io);
+    const icns = if (prebuilt) |file| std.fs.path.basename(file) else "AppIcon.icns";
+    try stage.rename(icns, incoming, icns, io);
+    try stage.rename("Assets.car", incoming, "Assets.car", io);
+    try publishComposerResources(allocator, io, package_dir, stage, incoming, destination, &remove_stage);
+    return stats;
+}
+
+fn publishComposerResources(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    package_dir: std.Io.Dir,
+    stage: std.Io.Dir,
+    incoming: std.Io.Dir,
+    stage_path: []const u8,
+    remove_stage: *bool,
+) !void {
     var resources = try package_dir.openDir(io, "Contents/Resources", .{});
     defer resources.close(io);
-    const names = [_][]const u8{ if (prebuilt) |icns| std.fs.path.basename(icns) else "AppIcon.icns", "Assets.car" };
-    const backups = [_][]const u8{ "previous-icns", "previous-catalog" };
-    var saved = [_]bool{ false, false };
-    var installed: usize = 0;
-    errdefer for (names[0..installed], 0..) |name, i| {
-        if (saved[i]) {
-            stage.rename(backups[i], resources, name, io) catch |err| {
-                remove_stage = false;
-                std.debug.print("error: restoring {s} ({t}) - recover it from {s}/{s}/{s}\n", .{ name, err, options.output_path, temp, backups[i] });
+    try stage.createDir(io, "previous", .default_dir);
+    var previous = try stage.openDir(io, "previous", .{});
+    defer previous.close(io);
+
+    // Collect the paths before moving files out of the directory being walked.
+    const File = struct { path: []const u8, saved: bool = false };
+    var files: std.ArrayList(File) = .empty;
+    defer {
+        for (files.items) |file| allocator.free(file.path);
+        files.deinit(allocator);
+    }
+    var walker = try incoming.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        try files.ensureUnusedCapacity(allocator, 1);
+        files.appendAssumeCapacity(.{ .path = try allocator.dupe(u8, entry.path) });
+    }
+
+    var touched: usize = 0;
+    errdefer while (touched != 0) {
+        touched -= 1;
+        const file = files.items[touched];
+        if (file.saved) {
+            previous.rename(file.path, resources, file.path, io) catch |err| {
+                remove_stage.* = false;
+                std.debug.print("error: restoring {s} ({t}) - recover it from {s}/previous/{s}\n", .{ file.path, err, stage_path, file.path });
             };
         } else {
-            resources.deleteFile(io, name) catch |err| std.debug.print("error: removing {s}: {t}\n", .{ name, err });
+            resources.deleteFile(io, file.path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => std.debug.print("error: removing {s}: {t}\n", .{ file.path, err }),
+            };
         }
     };
-    for (names, 0..) |name, i| {
-        if (resources.copyFile(name, stage, backups[i], io, .{})) {
-            saved[i] = true;
-        } else |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
+    for (files.items) |*file| {
+        if (std.fs.path.dirname(file.path)) |parent| {
+            try resources.createDirPath(io, parent);
+            try previous.createDirPath(io, parent);
         }
-        try stage.rename(name, resources, name, io);
-        installed += 1;
+        const stat = resources.statFile(io, file.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (stat) |original| {
+            if (original.kind == .directory) return error.IsDir;
+            try resources.rename(file.path, previous, file.path, io);
+            file.saved = true;
+        }
+        touched += 1;
+        try incoming.rename(file.path, resources, file.path, io);
     }
     try stage.rename("Info.plist", package_dir, "Contents/Info.plist", io);
-    return stats;
 }
 
 fn copyMacosIcon(allocator: std.mem.Allocator, io: std.Io, package_dir: std.Io.Dir, plan: IconPlan) !void {
@@ -3450,7 +3498,7 @@ test "Composer packaging requires macOS before trying actool" {
     try std.testing.expectError(error.IconComposerRequiresMacos, bundleComposerResources(std.testing.allocator, std.testing.io, .cwd(), .{
         .metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .icons = &.{"Beacon.icon"} },
         .output_path = "Demo.app",
-    }, "Beacon.icon", null, "", "."));
+    }, "Beacon.icon", null, ""));
 }
 
 test "plist template includes identity executable and version" {
