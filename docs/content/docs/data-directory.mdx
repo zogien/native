@@ -1,0 +1,193 @@
+---
+title: "Data Directory"
+---
+
+Every path where the SDK keeps an app's data comes from one place, resolved once when the app starts. That covers the six app directories (`data`, `config`, `cache`, `state`, `logs`, `temp`) and the stores in them (`store.db`, `app.db`, `snapshot.nsd`). It also covers the window-state file, the logs, the URL media cache, the working directory of [TypeScript services](/docs/typescript/services), and the web engine profile. By default these paths follow the platform conventions below. One launch flag moves all of them under a directory you choose.
+
+## Default locations
+
+`<bundle-id>` is the manifest's `id` and `<name>` its short `name`.
+
+<table>
+  <thead>
+    <tr>
+      <th>Directory</th>
+      <th>macOS</th>
+      <th>Linux</th>
+      <th>Windows</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>data</code></td>
+      <td><code>&#126;/Library/Application Support/&lt;bundle-id&gt;</code></td>
+      <td><code>$XDG_DATA_HOME/&lt;bundle-id&gt;</code> (<code>&#126;/.local/share</code>)</td>
+      <td><code>%LOCALAPPDATA%\&lt;bundle-id&gt;\Data</code></td>
+    </tr>
+    <tr>
+      <td><code>config</code></td>
+      <td><code>&#126;/Library/Preferences/&lt;bundle-id&gt;</code></td>
+      <td><code>$XDG_CONFIG_HOME/&lt;bundle-id&gt;</code> (<code>&#126;/.config</code>)</td>
+      <td><code>%APPDATA%\&lt;bundle-id&gt;</code></td>
+    </tr>
+    <tr>
+      <td><code>cache</code></td>
+      <td><code>&#126;/Library/Caches/&lt;bundle-id&gt;</code></td>
+      <td><code>$XDG_CACHE_HOME/&lt;bundle-id&gt;</code> (<code>&#126;/.cache</code>)</td>
+      <td><code>%LOCALAPPDATA%\&lt;bundle-id&gt;\Cache</code></td>
+    </tr>
+    <tr>
+      <td><code>state</code> (holds <code>windows.zon</code>)</td>
+      <td><code>&#126;/Library/Application Support/&lt;bundle-id&gt;/State</code></td>
+      <td><code>$XDG_STATE_HOME/&lt;bundle-id&gt;</code> (<code>&#126;/.local/state</code>)</td>
+      <td><code>%LOCALAPPDATA%\&lt;bundle-id&gt;\State</code></td>
+    </tr>
+    <tr>
+      <td><code>logs</code></td>
+      <td><code>&#126;/Library/Logs/&lt;bundle-id&gt;</code></td>
+      <td><code>$XDG_STATE_HOME/&lt;bundle-id&gt;/logs</code></td>
+      <td><code>%LOCALAPPDATA%\&lt;bundle-id&gt;\Logs</code></td>
+    </tr>
+    <tr>
+      <td><code>temp</code></td>
+      <td><code>$TMPDIR/&lt;bundle-id&gt;</code></td>
+      <td><code>$TMPDIR/&lt;bundle-id&gt;</code> (<code>/tmp</code>)</td>
+      <td><code>%TEMP%\&lt;bundle-id&gt;</code></td>
+    </tr>
+    <tr>
+      <td>URL media cache</td>
+      <td><code>&#126;/Library/Caches/&lt;name&gt;</code></td>
+      <td><code>$XDG_CACHE_HOME/&lt;name&gt;</code></td>
+      <td><code>%LOCALAPPDATA%\&lt;name&gt;\Cache</code></td>
+    </tr>
+    <tr>
+      <td>Legacy data (<code>NATIVE_SDK_APP_LEGACY_DATA_DIR</code>)</td>
+      <td><code>&#126;/Library/Application Support/&lt;name&gt;</code></td>
+      <td><code>$XDG_DATA_HOME/&lt;name&gt;</code></td>
+      <td><code>%LOCALAPPDATA%\&lt;name&gt;\Data</code></td>
+    </tr>
+    <tr>
+      <td>Web engine profile</td>
+      <td>WKWebView: WebKit's default store. CEF: <code>&lt;data&gt;/CEF</code></td>
+      <td>WebKitGTK's default network session</td>
+      <td><code>%LOCALAPPDATA%\&lt;bundle-id&gt;\WebView2</code></td>
+    </tr>
+  </tbody>
+</table>
+
+The macOS CEF profile is per app. SDK versions before this one kept every CEF app's profile in one shared `~/Library/Application Support/native-sdk/CEF` folder; that folder is no longer used and can be deleted. iOS and Android keep their apps' sandbox containers (see [Embed](/docs/embed)).
+
+## Choosing a data directory
+
+Pass the root on the command line, or set the environment variable:
+
+```bash
+my-app --native-data-dir=./profiles/work
+my-app --native-data-dir ~/profiles/work
+NATIVE_SDK_DATA_DIR=/tmp/try-it native dev
+```
+
+<table>
+  <thead>
+    <tr>
+      <th>Input</th>
+      <th>Precedence</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>--native-data-dir=&lt;path&gt;</code> or <code>--native-data-dir &lt;path&gt;</code></td>
+      <td>Wins over the environment variable. Read only before a <code>--</code> argument; at most once.</td>
+    </tr>
+    <tr>
+      <td><code>NATIVE_SDK_DATA_DIR</code></td>
+      <td>Used when the flag is absent. <code>native dev</code> starts the app without arguments, so use the variable there.</td>
+    </tr>
+    <tr>
+      <td><code>NATIVE_SDK_LOG_DIR</code></td>
+      <td>Still wins for the logs, with or without a data directory (see <a href="/docs/debugging">Debugging</a>).</td>
+    </tr>
+  </tbody>
+</table>
+
+A relative path resolves against the working directory of the launch. The directory and its parents are created if missing, and the app uses the directory's canonical absolute path, so two spellings of one folder name the same data directory: symlinks and `..` are resolved, and on Windows the path takes the folder's long names and on-disk case. The SDK does not expand `~`; your shell does.
+
+An unusable root ends the launch before any window opens, with exit code 2 and a message on stderr that names the problem. The app never falls back to the default directories behind it. A root is unusable when:
+
+- the path is empty, or the flag has no path or appears twice;
+- the path, or a folder on the way to it, is a file;
+- the directory cannot be created, for example under a read-only parent;
+- its absolute path is longer than 960 bytes;
+- one of its layout folders cannot be created in it.
+
+## Layout
+
+Everything the SDK keeps for the app moves under the root, into fixed folders:
+
+<table>
+  <thead>
+    <tr>
+      <th>Folder</th>
+      <th>Holds</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>data/</code></td>
+      <td>The <code>data</code> directory: <code>store.db</code>, <code>app.db</code>, <code>snapshot.nsd</code>, <code>NATIVE_SDK_APP_DATA_DIR</code>, the services' working directory</td>
+    </tr>
+    <tr>
+      <td><code>config/</code></td>
+      <td>The <code>config</code> directory</td>
+    </tr>
+    <tr>
+      <td><code>cache/</code></td>
+      <td>The <code>cache</code> directory and the URL media cache</td>
+    </tr>
+    <tr>
+      <td><code>state/</code></td>
+      <td>The <code>state</code> directory: <code>windows.zon</code></td>
+    </tr>
+    <tr>
+      <td><code>logs/</code></td>
+      <td><code>native-sdk.jsonl</code>, <code>last-panic.txt</code></td>
+    </tr>
+    <tr>
+      <td><code>temp/</code></td>
+      <td>The <code>temp</code> directory</td>
+    </tr>
+    <tr>
+      <td><code>legacy-data/</code></td>
+      <td>The legacy data directory. It starts empty: a new root has no former identity to migrate from.</td>
+    </tr>
+    <tr>
+      <td><code>webview/</code></td>
+      <td>The web engine profile (below)</td>
+    </tr>
+  </tbody>
+</table>
+
+The six directory folders are created at launch; `legacy-data/` and `webview/` when first used. A root belongs to one app: the folders carry no bundle id, so two different apps pointed at one root would share it.
+
+## Web engine profile
+
+Each root gets its own web profile, so launches with different roots share no cookies, web storage, or caches:
+
+- **WebView2** keeps its user data folder in `webview\`. The legacy `<exe>.WebView2` folder beside the executable (see [Web Engines](/docs/web-engines)) only ever moves into the default folder, never into a root.
+- **CEF** on macOS uses `webview/` as its root cache path.
+- **WebKitGTK** uses a network session of its own, with website data in `webview/data/` and caches in `webview/cache/`.
+- **WKWebView** on macOS 14 and later uses a persistent data store keyed by an identifier derived from the root, so the same root reopens the same store. WebKit keeps that store in its own location under `~/Library/WebKit/` (`<app>/WebsiteDataStore/<identifier>`, where `<app>` is the bundle id of a packaged app), not in the root. Before macOS 14, WKWebView offers no such store: every root shares WebKit's default data store, and the app prints a warning at startup.
+
+## What stays outside the root
+
+- Credentials live in the OS credential store (Keychain, Credential Manager, Secret Service), keyed by the app's identity, so every root sees the same credentials.
+- App-driven updates belong to the installation. Their downloads and install scripts use the OS temporary directory, and the macOS install result stays in the default `data` directory. The relaunch after an update passes the app no arguments, so a root given with the flag is not carried over. On Windows the relaunch inherits the environment, `NATIVE_SDK_DATA_DIR` included; on macOS it goes through Launch Services and inherits neither.
+- One-off temporary files the hosts write for themselves (CEF's pages loaded from HTML strings) stay in the OS temporary directory.
+- Session recordings go wherever `NATIVE_SDK_SESSION_RECORD` names.
+- `native db status` and `native db reset`, and the `native dev --core` logic loop, work on the default `data` directory.
+
+## Arguments the app sees
+
+The flag is the SDK's, not the app's. The SDK removes `--native-data-dir`, and the path that follows it in the two-argument form, everywhere it reports launch arguments to the app: in the launches a [single-instance](/docs/app-zon) app receives on `native-sdk.app.launches`, and in `NATIVE_SDK_ARG_1`. Arguments after `--` are always the app's. A Zig app that reads `init.minimal.args` itself sees the raw arguments; `native_sdk.app_dirs.app_data.ArgumentFilter` drops the flag the same way.
+
+`single_instance` ownership stays per app, not per data directory. While a copy of the app runs, a later launch with another root hands its launch to that copy.

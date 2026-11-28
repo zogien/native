@@ -15,7 +15,12 @@
 //!                    it with the live system appearance. `.theme_accent`
 //!                    layers the manifest's one-accent brand override
 //!                    (`canvas.accentOverrides`) over the pack.
-//!   audio cache      the platform caches directory (app_dirs `.cache`),
+//!   directories      every path comes from the one `app_dirs.AppData`
+//!                    resolved first thing in `main`: the platform
+//!                    conventions, or a `--native-data-dir` /
+//!                    `NATIVE_SDK_DATA_DIR` root (an unusable one ends
+//!                    the launch with exit code 2).
+//!   audio cache      the media cache directory (`AppData.media_cache`),
 //!                    resolved at launch so a core's URL audio playback
 //!                    caches under the conventional content-addressed
 //!                    path with no `cachePath` in the core.
@@ -50,10 +55,12 @@
 //!                    its bytes arm, right after the boot command — the
 //!                    core itself never reads the environment (NS1005),
 //!                    and replay carries the recorded values. The runner
-//!                    synthesizes `NATIVE_SDK_APP_DATA_DIR` from app_dirs
-//!                    when a core requests it, so packaged apps never
-//!                    depend on their process working directory for
-//!                    durable files.
+//!                    synthesizes `NATIVE_SDK_APP_DATA_DIR` from the
+//!                    resolved data directory when a core requests it, so
+//!                    packaged apps never depend on their process working
+//!                    directory for durable files. `NATIVE_SDK_ARG_1` is
+//!                    the app's first argument, the SDK's
+//!                    `--native-data-dir` left out.
 //!   single instance  app.zon's `.single_instance` claims ownership first
 //!                    thing in `main`; a later launch exits after handing
 //!                    its cwd and arguments to the owner, whose core
@@ -206,51 +213,32 @@ pub fn testMain(init: std.process.Init) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
+    // The app's directories, resolved once for the whole process: the
+    // platform conventions, or a `--native-data-dir` / NATIVE_SDK_DATA_DIR
+    // root. Everything below and the runner take their paths from it.
+    const app_data = runner.resolveAppData(init, manifest.id, manifest.name);
     // Before persistence, services, or any window: a later launch of a
     // `single_instance` app exits here once the owner has its arguments.
     runner.enforceSingleInstance(init);
     var options = appOptions(init.io);
-    // The platform caches directory for this app: when the core's
+    // The caches directory for this app's URL media: when the core's
     // `Cmd.audioPlay` names a URL with no cachePath, the bridge derives
     // the conventional content-addressed path under this directory —
     // resolved once at launch (never inside update), so replay's
     // deterministic-init contract holds. Resolution failure just disables
     // the cache: streams still play, they re-download.
-    var cache_dir_buffer: [512]u8 = undefined;
-    const audio_cache_dir = native_sdk.app_dirs.resolveOne(
-        .{ .name = manifest.name },
-        native_sdk.app_dirs.currentPlatform(),
-        native_sdk.debug.envFromMap(init.environ_map),
-        .cache,
-        &cache_dir_buffer,
-    ) catch "";
-    // The durable per-app data directory, resolved by the platform app-data
-    // convention and keyed by the manifest's stable bundle identity. TS cores
-    // request it through the ordinary journaled envMsgs boundary under
-    // `app_data_dir_env`; it is framework-provided rather than trusted from
-    // the ambient environment, so package launch cwd and env differences
-    // disappear.
-    var data_dir_buffer: [512]u8 = undefined;
-    const app_data_dir = native_sdk.app_dirs.resolveOne(
-        // Durable state follows the reverse-DNS bundle identity, not the
-        // mutable short machine name. Two installed apps may share a name;
-        // their manifest ids are the stable isolation boundary.
-        .{ .name = manifest.id },
-        native_sdk.app_dirs.currentPlatform(),
-        native_sdk.debug.envFromMap(init.environ_map),
-        .data,
-        &data_dir_buffer,
-    ) catch "";
+    const audio_cache_dir = app_data.media_cache orelse "";
+    // The durable per-app data directory, keyed by the manifest's stable
+    // bundle identity (two installed apps may share a short name; their
+    // manifest ids are the isolation boundary). TS cores request it
+    // through the ordinary journaled envMsgs boundary under
+    // `app_data_dir_env`; it is framework-provided rather than trusted
+    // from the ambient environment, so package launch cwd and env
+    // differences disappear.
+    const app_data_dir = app_data.data orelse "";
     if (app_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(init.io, app_data_dir) catch {};
 
-    var legacy_data_dir_buffer: [512]u8 = undefined;
-    const legacy_data_dir = if (comptime requestsLegacyDataDirectory()) native_sdk.app_dirs.resolveOne(
-        .{ .name = manifest.name },
-        native_sdk.app_dirs.currentPlatform(),
-        native_sdk.debug.envFromMap(init.environ_map),
-        .data,
-        &legacy_data_dir_buffer,
-    ) catch "" else "";
+    const legacy_data_dir = if (comptime requestsLegacyDataDirectory()) app_data.legacy_data orelse "" else "";
     if (legacy_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(init.io, legacy_data_dir) catch {};
 
     // TypeScript services, on the build-selected carrier (service_carrier.zig).
@@ -317,10 +305,15 @@ pub fn main(init: std.process.Init) !void {
     // named variable once, here at the boundary — never inside update —
     // and hand the present values to the adapter, which dispatches them
     // as ordinary journaled Msgs right after the boot command.
+    // The app's own first argument: the SDK's `--native-data-dir` (and
+    // its path, in the two-argument form) is not the app's.
     var launch_args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer launch_args.deinit();
     _ = launch_args.next();
-    const first_launch_arg = launch_args.next();
+    var launch_arg_filter: native_sdk.app_dirs.app_data.ArgumentFilter = .{};
+    const first_launch_arg = while (launch_args.next()) |argument| {
+        if (launch_arg_filter.keep(argument)) break argument;
+    } else null;
     var env_values_buffer: [envMsgsLen()]Adapter.EnvValue = undefined;
     var env_value_count: usize = 0;
     if (comptime @hasDecl(core, "envMsgs")) {
@@ -455,6 +448,7 @@ pub fn main(init: std.process.Init) !void {
             .navigation = .{ .allowed_origins = allowed_origins },
         },
         .relational_migrations = &relational_migrations.migrations,
+        .app_data = &app_data,
     }, init);
 }
 

@@ -8305,6 +8305,13 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 }
 @end
 
+/* A data-directory override's web data store, process-wide
+ * (native_sdk_appkit_set_web_profile, before create): the identifier
+ * WebKit keys the persistent store by, and the store every WKWebView
+ * shares once the first one created it. Nil keeps WebKit's default store. */
+static NSUUID *g_native_sdk_web_data_store_identifier = nil;
+static id g_native_sdk_web_data_store = nil;
+
 @implementation NativeSdkAppKitHost
 
 - (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent webViewInspection:(BOOL)webViewInspection dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
@@ -8861,6 +8868,22 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     return YES;
 }
 
+/* Every WKWebView of an override root shares that root's persistent data
+ * store, keyed by an identifier the app derives from the root, so its
+ * cookies, storage and caches are its own and the same root reopens
+ * them. WebKit keeps the store under ~/Library/WebKit, not in the root.
+ * Before macOS 14 there is no such store: the views keep WebKit's
+ * default one (native_sdk_appkit_set_web_profile said so at startup). */
+- (void)applyWebDataStoreToConfiguration:(WKWebViewConfiguration *)configuration {
+    if (!g_native_sdk_web_data_store_identifier) return;
+#if defined(__MAC_14_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_14_0
+    if (@available(macOS 14.0, *)) {
+        if (!g_native_sdk_web_data_store) g_native_sdk_web_data_store = [WKWebsiteDataStore dataStoreForIdentifier:g_native_sdk_web_data_store_identifier];
+        configuration.websiteDataStore = (WKWebsiteDataStore *)g_native_sdk_web_data_store;
+    }
+#endif
+}
+
 // Create-on-first-use for a window's main WebView. Pure peek reads
 // (event emission, bridge completion echoes, reorder passes) keep going
 // through `webViewForWindowId:` and skip absent WebViews — a page that
@@ -8877,6 +8900,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     if (!container) return nil;
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+    [self applyWebDataStoreToConfiguration:configuration];
     NativeSdkAssetSchemeHandler *assetSchemeHandler = [[NativeSdkAssetSchemeHandler alloc] init];
     [configuration setURLSchemeHandler:assetSchemeHandler forURLScheme:@"zero"];
     WKUserContentController *userContentController = [[WKUserContentController alloc] init];
@@ -9563,6 +9587,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     if (existing) return NO;
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+    [self applyWebDataStoreToConfiguration:configuration];
     NativeSdkAssetSchemeHandler *assetSchemeHandler = [self assetHandlerForWindowId:windowId];
     if (assetSchemeHandler) {
         [configuration setURLSchemeHandler:assetSchemeHandler forURLScheme:@"zero"];
@@ -13526,6 +13551,23 @@ void native_sdk_appkit_configure_updates(native_sdk_appkit_host_t *host, const c
         object.updateCheckOnStart = check_on_start != 0;
         [object buildMenuBar];
     }
+}
+
+void native_sdk_appkit_set_web_profile(const char *path, size_t path_len, int isolated, const uint8_t *store_identifier) {
+    /* WKWebView stores are keyed by identifier, not directory: a default
+     * profile keeps WebKit's default store and the path is unused here. */
+    (void)path;
+    (void)path_len;
+    if (!isolated || !store_identifier || g_native_sdk_web_data_store) return;
+    @autoreleasepool {
+        g_native_sdk_web_data_store_identifier = [[NSUUID alloc] initWithUUIDBytes:store_identifier];
+    }
+#if defined(__MAC_14_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_14_0
+    if (@available(macOS 14.0, *)) return;
+    fprintf(stderr, "native-sdk: WKWebView keeps a data directory's web data apart only on macOS 14 and later; this launch shares WebKit's default web data store with the app's other launches\n");
+#else
+    fprintf(stderr, "native-sdk: this app was built with a macOS SDK older than 14, which has no per-directory WKWebView data store; this launch shares WebKit's default web data store with the app's other launches\n");
+#endif
 }
 
 int native_sdk_appkit_check_for_updates(native_sdk_appkit_host_t *host, int user_initiated) {

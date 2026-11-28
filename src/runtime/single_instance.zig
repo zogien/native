@@ -15,13 +15,15 @@ const std = @import("std");
 const builtin = @import("builtin");
 const effects = @import("effects.zig");
 const clock = @import("clock.zig");
+const app_data = @import("app_dirs").app_data;
 
 const is_windows = builtin.os.tag == .windows;
 
 pub const source_name = "native-sdk.app.launches";
 
 /// One launch notification is the later process's working directory,
-/// then each of its arguments (argv[0] excluded), every field preceded by
+/// then each of its arguments (argv[0] and the SDK's `--native-data-dir`
+/// excluded: `app_dirs.app_data.ArgumentFilter`), every field preceded by
 /// a NUL except the first. Paths and arguments never contain NUL, so the
 /// split is unambiguous; a launch without arguments is the bare working
 /// directory. The bound is the channel's post bound.
@@ -316,7 +318,10 @@ fn encodeCurrentLaunch(io: std.Io, gpa: std.mem.Allocator, args: std.process.Arg
     var iterator = std.process.Args.Iterator.initAllocator(args, gpa) catch return null;
     defer iterator.deinit();
     _ = iterator.next();
-    while (iterator.next()) |argument| writer.addArgument(argument);
+    var filter: app_data.ArgumentFilter = .{};
+    while (iterator.next()) |argument| {
+        if (filter.keep(argument)) writer.addArgument(argument);
+    }
     return writer.bytes();
 }
 

@@ -107,6 +107,27 @@ pub const Buffers = struct {
     }
 };
 
+/// The app's directories for one process: the platform conventions below,
+/// or everything under a `--native-data-dir` / `NATIVE_SDK_DATA_DIR` root.
+pub const app_data = @import("app_data.zig");
+pub const AppData = app_data.AppData;
+
+/// The variables `Env` reads, from a process environment map.
+pub fn envFromMap(env_map: *const std.process.Environ.Map) Env {
+    return .{
+        .home = env_map.get("HOME"),
+        .xdg_config_home = env_map.get("XDG_CONFIG_HOME"),
+        .xdg_cache_home = env_map.get("XDG_CACHE_HOME"),
+        .xdg_data_home = env_map.get("XDG_DATA_HOME"),
+        .xdg_state_home = env_map.get("XDG_STATE_HOME"),
+        .local_app_data = env_map.get("LOCALAPPDATA"),
+        .app_data = env_map.get("APPDATA"),
+        .temp = env_map.get("TEMP"),
+        .tmp = env_map.get("TMP"),
+        .tmpdir = env_map.get("TMPDIR"),
+    };
+}
+
 pub fn currentPlatform() Platform {
     if (comptime @hasField(@TypeOf(builtin.abi), "android")) {
         if (builtin.abi == .android) return .android;

@@ -2449,6 +2449,10 @@ fn runnerZig() []const u8 {
     \\    /// Explicit compatibility capability for an app's former data identity.
     \\    legacy_data_directory: bool = false,
     \\    relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
+    \\    /// The app's directories, resolved once by `runWithOptions`
+    \\    /// (`--native-data-dir` / NATIVE_SDK_DATA_DIR, else the platform
+    \\    /// conventions). Every path the runner uses comes from it.
+    \\    app_data: ?*const native_sdk.app_dirs.AppData = null,
     \\
     \\    fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
     \\        var info: native_sdk.AppInfo = .{
@@ -2470,6 +2474,7 @@ fn runnerZig() []const u8 {
     \\            .update_public_key = manifestUpdatePublicKeys(),
     \\            .update_check_on_start = manifestUpdateCheckOnStart(),
     \\            .update_mode = manifestUpdateMode(),
+    \\            .web_profile = if (self.app_data) |data| .resolved(data.isOverride(), data.web_profile) else .unresolved,
     \\        };
     \\        const windows = manifestWindowOptions(buffers);
     \\        if (windows.len > 0) {
@@ -2974,32 +2979,30 @@ fn runnerZig() []const u8 {
     \\    if (build_options.debug_overlay) {
     \\        std.debug.print("debug-overlay=true backend={s} web-engine={s} trace={s}\n", .{ build_options.platform, build_options.web_engine, build_options.trace });
     \\    }
+    \\    // The one resolution of the app's directories: the platform
+    \\    // conventions, or a `--native-data-dir` / NATIVE_SDK_DATA_DIR root
+    \\    // (an unusable one ends the launch here with exit code 2).
+    \\    const data = native_sdk.app_dirs.app_data.forLaunch(init, .{
+    \\        .bundle_id = options.bundle_id,
+    \\        .app_name = options.app_name,
+    \\        .web_engine = if (comptime std.mem.eql(u8, build_options.web_engine, "chromium")) .chromium else .system,
+    \\    });
     \\    const RecordStoreType = if (comptime manifestDeclaresStore()) native_sdk.RecordStore else void;
     \\    var record_store_value: RecordStoreType = undefined;
     \\    var record_store_open = false;
     \\    var resolved_options = options;
-    \\    var file_root_buffers: [6][1024]u8 = undefined;
+    \\    resolved_options.app_data = &data;
     \\    var file_roots: [7][]const u8 = undefined;
-    \\    var legacy_data_buffer: [1024]u8 = undefined;
-    \\    const resolved_file_dirs = native_sdk.app_dirs.resolve(
-    \\        .{ .name = options.bundle_id },
-    \\        native_sdk.app_dirs.currentPlatform(),
-    \\        native_sdk.debug.envFromMap(init.environ_map),
-    \\        native_sdk.app_dirs.Buffers.fromArray(1024, &file_root_buffers),
-    \\    ) catch null;
     \\    var file_root_count: usize = 0;
-    \\    if (resolved_file_dirs) |dirs| {
+    \\    if (data.all()) |dirs| {
     \\        file_roots[0..6].* = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
     \\        file_root_count = 6;
     \\    }
     \\    if (options.legacy_data_directory) {
-    \\        if (native_sdk.app_dirs.resolveOne(
-    \\            .{ .name = options.app_name }, native_sdk.app_dirs.currentPlatform(),
-    \\            native_sdk.debug.envFromMap(init.environ_map), .data, &legacy_data_buffer,
-    \\        )) |directory| {
+    \\        if (data.legacy_data) |directory| {
     \\            file_roots[file_root_count] = directory;
     \\            file_root_count += 1;
-    \\        } else |_| {}
+    \\        }
     \\    }
     \\    resolved_options.file_access = .{
     \\        .roots = file_roots[0..file_root_count],
@@ -3007,14 +3010,7 @@ fn runnerZig() []const u8 {
     \\        .enforce = options.file_access_enforce,
     \\    };
     \\    if (comptime manifestDeclaresStore()) {
-    \\        var data_dir_buffer: [512]u8 = undefined;
-    \\        const app_data_dir = native_sdk.app_dirs.resolveOne(
-    \\            .{ .name = options.bundle_id },
-    \\            native_sdk.app_dirs.currentPlatform(),
-    \\            native_sdk.debug.envFromMap(init.environ_map),
-    \\            .data,
-    \\            &data_dir_buffer,
-    \\        ) catch return error.StoreDataDirUnavailable;
+    \\        const app_data_dir = data.data orelse return error.StoreDataDirUnavailable;
     \\        try std.Io.Dir.cwd().createDirPath(init.io, app_data_dir);
     \\        record_store_value = try native_sdk.RecordStore.open(std.heap.page_allocator, app_data_dir);
     \\        record_store_open = true;
@@ -3027,14 +3023,7 @@ fn runnerZig() []const u8 {
     \\    var relational_store_value: RelationalStoreType = undefined;
     \\    var relational_store_open = false;
     \\    if (comptime manifestDeclaresSqlite()) {
-    \\        var data_dir_buffer: [512]u8 = undefined;
-    \\        const app_data_dir = native_sdk.app_dirs.resolveOne(
-    \\            .{ .name = options.bundle_id },
-    \\            native_sdk.app_dirs.currentPlatform(),
-    \\            native_sdk.debug.envFromMap(init.environ_map),
-    \\            .data,
-    \\            &data_dir_buffer,
-    \\        ) catch return error.SqliteDataDirUnavailable;
+    \\        const app_data_dir = data.data orelse return error.SqliteDataDirUnavailable;
     \\        try std.Io.Dir.cwd().createDirPath(init.io, app_data_dir);
     \\        const open_result = try native_sdk.RelationalStore.openMigrated(std.heap.page_allocator, app_data_dir, options.relational_migrations);
     \\        relational_store_value = switch (open_result.outcome) {
@@ -3062,7 +3051,7 @@ fn runnerZig() []const u8 {
     \\fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
-    \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    \\    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     \\    // Heap wrapper, latch-gated free: worker threads hold this address
     \\    // as the channel wake context and an abandoned wake call may
     \\    // dereference it after this frame unwinds (see
@@ -3071,7 +3060,7 @@ fn runnerZig() []const u8 {
     \\    defer null_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    \\    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     \\    if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     \\    var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     \\    var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -3121,7 +3110,7 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    configureUpdates(&app_info, init.environ_map);
-    \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    \\    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     \\    // Heap wrapper, latch-gated free: worker threads hold this address
     \\    // as the channel wake context and an abandoned wake call may
     \\    // dereference it after this frame unwinds (see
@@ -3130,7 +3119,7 @@ fn runnerZig() []const u8 {
     \\    defer mac_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    \\    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     \\    if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     \\    var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     \\    var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -3180,7 +3169,7 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    configureUpdates(&app_info, init.environ_map);
-    \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    \\    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     \\    // Heap wrapper, latch-gated free: worker threads hold this address
     \\    // as the channel wake context and an abandoned wake call may
     \\    // dereference it after this frame unwinds (see
@@ -3189,7 +3178,7 @@ fn runnerZig() []const u8 {
     \\    defer linux_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    \\    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     \\    if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     \\    var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     \\    var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -3239,7 +3228,7 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    configureUpdates(&app_info, init.environ_map);
-    \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    \\    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     \\    // Heap wrapper, latch-gated free: worker threads hold this address
     \\    // as the channel wake context and an abandoned wake call may
     \\    // dereference it after this frame unwinds (see
@@ -3248,7 +3237,7 @@ fn runnerZig() []const u8 {
     \\    defer windows_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    \\    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     \\    if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     \\    var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     \\    var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -3355,8 +3344,8 @@ fn runnerZig() []const u8 {
     \\    restored_windows: [native_sdk.platform.max_windows]native_sdk.WindowOptions = undefined,
     \\};
     \\
-    \\fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *native_sdk.AppInfo, buffers: *StateBuffers) ?native_sdk.window_state.Store {
-    \\    const paths = native_sdk.window_state.defaultPaths(&buffers.state_dir, &buffers.file_path, app_info.bundle_id, native_sdk.debug.envFromMap(env_map)) catch return null;
+    \\fn prepareStateStore(io: std.Io, app_data: *const native_sdk.app_dirs.AppData, app_info: *native_sdk.AppInfo, buffers: *StateBuffers) ?native_sdk.window_state.Store {
+    \\    const paths = native_sdk.window_state.pathsIn(&buffers.state_dir, &buffers.file_path, app_data.state orelse return null) catch return null;
     \\    const store = native_sdk.window_state.Store.init(io, paths.state_dir, paths.file_path);
     \\    if (app_info.windows.len > 0) {
     \\        const restored_windows = buffers.restored_windows[0..app_info.windows.len];
@@ -4391,7 +4380,14 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".relational_store = options.relational_store") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "file_access: ?native_sdk.FileAccessBinding = null") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "file_access_enforce: bool = true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "native_sdk.app_dirs.Buffers.fromArray") != null);
+    // Every path comes from the one startup resolution, which honors
+    // `--native-data-dir` / NATIVE_SDK_DATA_DIR; the hosts receive its web
+    // profile through AppInfo.
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "const data = native_sdk.app_dirs.app_data.forLaunch(init, .{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".web_profile = if (self.app_data) |data| .resolved(data.isOverride(), data.web_profile) else .unresolved,") != null);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, runner_zig_text, "prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);"));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, runner_zig_text, "setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers)"));
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "native_sdk.app_dirs.resolve") == null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".file_access = options.file_access") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "resolvedShortcuts") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "const manifest_windows") != null);

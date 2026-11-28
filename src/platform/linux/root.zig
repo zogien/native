@@ -123,6 +123,7 @@ const shortcut_modifier_shift: u32 = 1 << 4;
 
 extern fn native_sdk_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) ?*GtkHost;
 extern fn native_sdk_gtk_destroy(host: *GtkHost) void;
+extern fn native_sdk_gtk_set_web_profile(host: *GtkHost, path: [*]const u8, path_len: usize, isolated: c_int) void;
 extern fn native_sdk_gtk_run(host: *GtkHost, callback: GtkCallback, context: ?*anyopaque) void;
 extern fn native_sdk_gtk_stop(host: *GtkHost) void;
 extern fn native_sdk_gtk_wake(host: *GtkHost) void;
@@ -323,6 +324,13 @@ pub const LinuxPlatform = struct {
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
         const host = native_sdk_gtk_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
+        // A data-directory override's web profile rides right after the
+        // create (WebViews are created lazily). By default WebKitGTK keeps
+        // its default network session, so nothing is handed over.
+        switch (app_info.web_profile) {
+            .isolated => |path| native_sdk_gtk_set_web_profile(host, path.ptr, path.len, 1),
+            .unresolved, .default => {},
+        }
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -2128,7 +2136,7 @@ test "linux transparent windows clear the main webview background" {
         u8,
         host_source,
         ensure_at,
-        "WebKitWebView *wv = WEBKIT_WEB_VIEW(",
+        "WebKitWebView *wv = native_sdk_new_web_view(win->host, win->content_manager);",
     ) orelse return error.TestExpectedEqual;
     const assign_at = std.mem.indexOfPos(
         u8,

@@ -25,6 +25,10 @@ pub const RunOptions = struct {
     window_title: []const u8 = "",
     bundle_id: []const u8,
     icon_path: []const u8 = "assets/icon.png",
+    /// The app's directories, resolved once by `runWithOptions`
+    /// (`--native-data-dir` / NATIVE_SDK_DATA_DIR, else the platform
+    /// conventions). Every path the runner uses comes from it.
+    app_data: ?*const native_sdk.app_dirs.AppData = null,
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
@@ -51,6 +55,7 @@ pub const RunOptions = struct {
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
+            .web_profile = if (self.app_data) |data| .resolved(data.isOverride(), data.web_profile) else .unresolved,
             .main_window = .{
                 .id = 1,
                 .label = "main",
@@ -258,26 +263,36 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     if (build_options.debug_overlay) {
         std.debug.print("debug-overlay=true backend={s} web-engine={s} trace={s}\n", .{ build_options.platform, build_options.web_engine, build_options.trace });
     }
+    // The one resolution of the app's directories: the platform
+    // conventions, or a `--native-data-dir` / NATIVE_SDK_DATA_DIR root
+    // (an unusable one ends the launch here with exit code 2).
+    const data = native_sdk.app_dirs.app_data.forLaunch(init, .{
+        .bundle_id = options.bundle_id,
+        .app_name = options.app_name,
+        .web_engine = if (comptime std.mem.eql(u8, build_options.web_engine, "chromium")) .chromium else .system,
+    });
+    var resolved_options = options;
+    resolved_options.app_data = &data;
     if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
-        try runMacos(app, options, init);
+        try runMacos(app, resolved_options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
-        try runLinux(app, options, init);
+        try runLinux(app, resolved_options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
-        try runWindows(app, options, init);
+        try runWindows(app, resolved_options, init);
     } else {
-        try runNull(app, options, init);
+        try runNull(app, resolved_options, init);
     }
 }
 
 fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
     defer null_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -315,12 +330,12 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
 fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     const mac_platform = try native_sdk.platform.macos.MacPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
     defer mac_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -358,12 +373,12 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
 fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     const linux_platform = try native_sdk.platform.linux.LinuxPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
     defer linux_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -401,12 +416,12 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
 fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     const windows_platform = try native_sdk.platform.windows.WindowsPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
     defer windows_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -460,8 +475,8 @@ const StateBuffers = struct {
     restored_windows: [native_sdk.platform.max_windows]native_sdk.WindowOptions = undefined,
 };
 
-fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *native_sdk.AppInfo, buffers: *StateBuffers) ?native_sdk.window_state.Store {
-    const paths = native_sdk.window_state.defaultPaths(&buffers.state_dir, &buffers.file_path, app_info.bundle_id, native_sdk.debug.envFromMap(env_map)) catch return null;
+fn prepareStateStore(io: std.Io, app_data: *const native_sdk.app_dirs.AppData, app_info: *native_sdk.AppInfo, buffers: *StateBuffers) ?native_sdk.window_state.Store {
+    const paths = native_sdk.window_state.pathsIn(&buffers.state_dir, &buffers.file_path, app_data.state orelse return null) catch return null;
     const store = native_sdk.window_state.Store.init(io, paths.state_dir, paths.file_path);
     if (app_info.windows.len > 0) {
         const restored_windows = buffers.restored_windows[0..app_info.windows.len];

@@ -84,6 +84,15 @@ pub fn defaultPaths(output_dir: []u8, output_file: []u8, app_name: []const u8, e
     return .{ .state_dir = state_dir, .file_path = file_path };
 }
 
+/// The store inside the app's resolved state directory (`AppData.state`).
+pub fn pathsIn(output_dir: []u8, output_file: []u8, state_dir: []const u8) !StorePaths {
+    if (state_dir.len > output_dir.len) return error.NoSpaceLeft;
+    @memcpy(output_dir[0..state_dir.len], state_dir);
+    const dir = output_dir[0..state_dir.len];
+    const file_path = try app_dirs.join(app_dirs.currentPlatform(), output_file, &.{ dir, "windows.zon" });
+    return .{ .state_dir = dir, .file_path = file_path };
+}
+
 pub const StorePaths = struct {
     state_dir: []const u8,
     file_path: []const u8,
@@ -392,6 +401,16 @@ fn readPath(io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     return buffer[0..try file.readPositionalAll(io, buffer, 0)];
+}
+
+test "window state store paths sit in the resolved state directory" {
+    var dir_buffer: [64]u8 = undefined;
+    var file_buffer: [80]u8 = undefined;
+    const sep = std.fs.path.sep_str;
+    const paths = try pathsIn(&dir_buffer, &file_buffer, "root" ++ sep ++ "state");
+    try std.testing.expectEqualStrings("root" ++ sep ++ "state", paths.state_dir);
+    try std.testing.expectEqualStrings("root" ++ sep ++ "state" ++ sep ++ "windows.zon", paths.file_path);
+    try std.testing.expectError(error.NoSpaceLeft, pathsIn(dir_buffer[0..4], &file_buffer, "root" ++ sep ++ "state"));
 }
 
 test "window state writes and parses named records" {

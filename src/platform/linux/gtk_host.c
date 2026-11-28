@@ -533,6 +533,15 @@ struct native_sdk_gtk_host {
     int allowed_external_urls_count;
     int external_link_action;
     int scheme_registered;
+    /* A data-directory override's web profile folder
+     * (native_sdk_gtk_set_web_profile). Every WebView of this host then
+     * keeps its website data (data/) and caches (cache/) there, in a
+     * network session created with the first WebView, instead of in
+     * WebKit's default session. NULL keeps the default session. */
+    char *web_profile_root;
+#if NATIVE_SDK_HAS_WEBKITGTK
+    WebKitNetworkSession *network_session;
+#endif
     native_sdk_gtk_shortcut_t shortcuts[NATIVE_SDK_MAX_SHORTCUTS];
     int shortcut_count;
     GMenuModel *menu_model;
@@ -3164,6 +3173,28 @@ static void native_sdk_setup_bridge(native_sdk_gtk_window_t *win) {
     webkit_user_script_unref(script);
 }
 
+/* A new WebView in this host's network session: a data-directory
+ * override's own session when one is set (native_sdk_gtk_set_web_profile),
+ * WebKit's default session otherwise. The session is construct-only. */
+static WebKitWebView *native_sdk_new_web_view(native_sdk_gtk_host_t *host, WebKitUserContentManager *manager) {
+    if (host && host->web_profile_root && !host->network_session) {
+        char *data_dir = g_build_filename(host->web_profile_root, "data", NULL);
+        char *cache_dir = g_build_filename(host->web_profile_root, "cache", NULL);
+        host->network_session = webkit_network_session_new(data_dir, cache_dir);
+        g_free(data_dir);
+        g_free(cache_dir);
+    }
+    if (host && host->network_session) {
+        return WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
+            "user-content-manager", manager,
+            "network-session", host->network_session,
+            NULL));
+    }
+    return WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
+        "user-content-manager", manager,
+        NULL));
+}
+
 /* The zero:// custom scheme lives on the WebKitWebContext (every WebView
  * this host creates shares the default context) and WebKit aborts on a
  * second registration, so the first WebView actually created — window
@@ -3363,10 +3394,7 @@ static WebKitWebView *native_sdk_ensure_main_webview(native_sdk_gtk_window_t *wi
     if (!win->stack_root) return NULL;
 
     win->content_manager = webkit_user_content_manager_new();
-    WebKitWebView *wv = WEBKIT_WEB_VIEW(
-        g_object_new(WEBKIT_TYPE_WEB_VIEW,
-            "user-content-manager", win->content_manager,
-            NULL));
+    WebKitWebView *wv = native_sdk_new_web_view(win->host, win->content_manager);
     if (win->transparent) {
         GdkRGBA transparent_color = {0, 0, 0, 0};
         webkit_web_view_set_background_color(wv, &transparent_color);
@@ -3793,6 +3821,10 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
             G_ACTION_MAP(host->app), native_sdk_notification_action_name);
     }
     g_object_unref(host->app);
+#if NATIVE_SDK_HAS_WEBKITGTK
+    if (host->network_session) g_object_unref(host->network_session);
+#endif
+    free(host->web_profile_root);
     free(host->app_name);
     free(host->window_title);
     free(host->bundle_id);
@@ -3804,6 +3836,16 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
     native_sdk_clear_menu_actions(host);
     if (host->menu_model) g_object_unref(host->menu_model);
     free(host);
+}
+
+/* The web profile the app resolved at startup (app_dirs.AppData), set
+ * right after create and before any WebView. Only an isolated profile (a
+ * data-directory override root) changes anything: by default WebKitGTK
+ * keeps its default network session and directories. */
+void native_sdk_gtk_set_web_profile(native_sdk_gtk_host_t *host, const char *path, size_t path_len, int isolated) {
+    if (!host || host->web_profile_root) return;
+    if (!isolated || !path || path_len == 0) return;
+    host->web_profile_root = native_sdk_strndup(path, path_len);
 }
 
 void native_sdk_gtk_run(native_sdk_gtk_host_t *host, native_sdk_gtk_event_callback_t callback, void *context) {
@@ -5099,10 +5141,7 @@ int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_i
         webkit_user_content_manager_add_script(manager, script);
         webkit_user_script_unref(script);
     }
-    WebKitWebView *web_view = WEBKIT_WEB_VIEW(
-        g_object_new(WEBKIT_TYPE_WEB_VIEW,
-            "user-content-manager", manager,
-            NULL));
+    WebKitWebView *web_view = native_sdk_new_web_view(host, manager);
     g_object_unref(manager);
     if (!web_view) {
         free(label_copy);

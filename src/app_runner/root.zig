@@ -82,6 +82,10 @@ pub const RunOptions = struct {
     /// Explicit compatibility capability for an app's former data identity.
     legacy_data_directory: bool = false,
     relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
+    /// The app's directories, when the entry point resolved them before
+    /// calling `runWithOptions` (`resolveAppData`); null resolves them
+    /// there. Every path the runner uses comes from this one value.
+    app_data: ?*const native_sdk.app_dirs.AppData = null,
 
     fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
         var info: native_sdk.AppInfo = .{
@@ -107,6 +111,7 @@ pub const RunOptions = struct {
             .update_public_key = manifestUpdatePublicKeys(),
             .update_check_on_start = manifestUpdateCheckOnStart(),
             .update_mode = manifestUpdateMode(),
+            .web_profile = webProfile(self.app_data),
             .main_window = .{
                 .id = 1,
                 .label = "main",
@@ -167,6 +172,27 @@ pub const RunOptions = struct {
         return self.menus orelse storage.fromManifest();
     }
 };
+
+/// The web profile the hosts receive: the resolved one, or `.unresolved`
+/// (the platform layer then derives the default itself).
+fn webProfile(app_data: ?*const native_sdk.app_dirs.AppData) native_sdk.platform.WebProfile {
+    const data = app_data orelse return .unresolved;
+    return .resolved(data.isOverride(), data.web_profile);
+}
+
+/// Resolves the app's directories once per process, at startup
+/// (`app_dirs.app_data.forLaunch`): the platform conventions, or
+/// everything under a `--native-data-dir` / `NATIVE_SDK_DATA_DIR` root.
+/// An unusable override ends the launch here with exit code 2 and a
+/// message naming the problem; the SDK never falls back to the default
+/// directories behind it.
+pub fn resolveAppData(init: std.process.Init, bundle_id: []const u8, app_name: []const u8) native_sdk.app_dirs.AppData {
+    return native_sdk.app_dirs.app_data.forLaunch(init, .{
+        .bundle_id = bundle_id,
+        .app_name = app_name,
+        .web_engine = if (webEngine() == .chromium) .chromium else .system,
+    });
+}
 
 fn manifestUpdateString(comptime field: []const u8) []const u8 {
     if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return "";
@@ -743,34 +769,31 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY")) |journal_path| {
         return runSessionReplay(app, options, init, journal_path);
     }
+    // The one resolution of the app's directories, before ownership and
+    // before anything opens a store.
+    var own_app_data: native_sdk.app_dirs.AppData = undefined;
+    const data = options.app_data orelse data: {
+        own_app_data = resolveAppData(init, options.bundle_id, options.app_name);
+        break :data &own_app_data;
+    };
     enforceSingleInstance(init);
     const RecordStoreType = if (comptime manifestDeclaresStore()) native_sdk.RecordStore else void;
     var record_store_value: RecordStoreType = undefined;
     var record_store_open = false;
     var resolved_options = options;
+    resolved_options.app_data = data;
     resolved_options.credentials_enabled = manifestDeclaresCredentials();
-    var file_root_buffers: [6][1024]u8 = undefined;
     var file_roots: [7][]const u8 = undefined;
-    var legacy_data_buffer: [1024]u8 = undefined;
-    const resolved_file_dirs = native_sdk.app_dirs.resolve(
-        .{ .name = options.bundle_id },
-        native_sdk.app_dirs.currentPlatform(),
-        native_sdk.debug.envFromMap(init.environ_map),
-        native_sdk.app_dirs.Buffers.fromArray(1024, &file_root_buffers),
-    ) catch null;
     var file_root_count: usize = 0;
-    if (resolved_file_dirs) |dirs| {
+    if (data.all()) |dirs| {
         file_roots[0..6].* = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
         file_root_count = 6;
     }
     if (options.legacy_data_directory) {
-        if (native_sdk.app_dirs.resolveOne(
-            .{ .name = options.app_name }, native_sdk.app_dirs.currentPlatform(),
-            native_sdk.debug.envFromMap(init.environ_map), .data, &legacy_data_buffer,
-        )) |directory| {
+        if (data.legacy_data) |directory| {
             file_roots[file_root_count] = directory;
             file_root_count += 1;
-        } else |_| {}
+        }
     }
     // Fail closed if app-dir resolution is unavailable: a filesystem grant
     // still opens arbitrary paths, while an ungranted app gets no accidental
@@ -781,14 +804,7 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
         .enforce = options.file_access_enforce,
     };
     if (comptime manifestDeclaresStore()) {
-        var data_dir_buffer: [512]u8 = undefined;
-        const app_data_dir = native_sdk.app_dirs.resolveOne(
-            .{ .name = options.bundle_id },
-            native_sdk.app_dirs.currentPlatform(),
-            native_sdk.debug.envFromMap(init.environ_map),
-            .data,
-            &data_dir_buffer,
-        ) catch return error.StoreDataDirUnavailable;
+        const app_data_dir = data.data orelse return error.StoreDataDirUnavailable;
         try std.Io.Dir.cwd().createDirPath(init.io, app_data_dir);
         record_store_value = try native_sdk.RecordStore.open(std.heap.page_allocator, app_data_dir);
         record_store_open = true;
@@ -801,14 +817,7 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     var relational_store_value: RelationalStoreType = undefined;
     var relational_store_open = false;
     if (comptime manifestDeclaresSqlite()) {
-        var data_dir_buffer: [512]u8 = undefined;
-        const app_data_dir = native_sdk.app_dirs.resolveOne(
-            .{ .name = options.bundle_id },
-            native_sdk.app_dirs.currentPlatform(),
-            native_sdk.debug.envFromMap(init.environ_map),
-            .data,
-            &data_dir_buffer,
-        ) catch return error.SqliteDataDirUnavailable;
+        const app_data_dir = data.data orelse return error.SqliteDataDirUnavailable;
         try std.Io.Dir.cwd().createDirPath(init.io, app_data_dir);
         const open_result = try native_sdk.RelationalStore.openMigrated(std.heap.page_allocator, app_data_dir, options.relational_migrations);
         switch (open_result.outcome) {
@@ -836,7 +845,7 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
 fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
     // as the channel wake context and an abandoned wake call may
@@ -846,7 +855,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     defer null_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -910,7 +919,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     configureUpdates(&app_info, init.environ_map);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
     // as the channel wake context and an abandoned wake call may
@@ -921,7 +930,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     native_sdk.runtime.launch_timing.lap("host_ready");
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -983,7 +992,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     configureUpdates(&app_info, init.environ_map);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
     // as the channel wake context and an abandoned wake call may
@@ -993,7 +1002,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     defer linux_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -1066,7 +1075,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     configureUpdates(&app_info, init.environ_map);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = prepareStateStore(init.io, options.app_data.?, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
     // as the channel wake context and an abandoned wake call may
@@ -1076,7 +1085,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     defer windows_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
-    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    const log_setup = native_sdk.debug.setupLoggingIn(init.io, init.environ_map, options.app_data.?.logs, &log_buffers) catch null;
     if (log_setup) |setup| native_sdk.debug.installPanicCapture(init.io, setup.paths);
     var file_trace_sink: native_sdk.debug.FileTraceSink = undefined;
     var fanout_sinks: [2]native_sdk.trace.Sink = undefined;
@@ -1457,8 +1466,8 @@ const StateBuffers = struct {
     restored_windows: [native_sdk.platform.max_windows]native_sdk.WindowOptions = undefined,
 };
 
-fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *native_sdk.AppInfo, buffers: *StateBuffers) ?native_sdk.window_state.Store {
-    const paths = native_sdk.window_state.defaultPaths(&buffers.state_dir, &buffers.file_path, app_info.bundle_id, native_sdk.debug.envFromMap(env_map)) catch return null;
+fn prepareStateStore(io: std.Io, app_data: *const native_sdk.app_dirs.AppData, app_info: *native_sdk.AppInfo, buffers: *StateBuffers) ?native_sdk.window_state.Store {
+    const paths = native_sdk.window_state.pathsIn(&buffers.state_dir, &buffers.file_path, app_data.state orelse return null) catch return null;
     const store = native_sdk.window_state.Store.init(io, paths.state_dir, paths.file_path);
     window_placement.restoreStartupWindows(app_info, buffers.restored_windows[0..app_info.windows.len], store, &buffers.read);
     return store;

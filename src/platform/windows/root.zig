@@ -1,5 +1,6 @@
 const std = @import("std");
 const geometry = @import("geometry");
+const app_dirs = @import("app_dirs");
 const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
@@ -148,6 +149,7 @@ const shortcut_modifier_shift: u32 = 1 << 4;
 
 extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) ?*WindowsHost;
 extern fn native_sdk_windows_destroy(host: *WindowsHost) void;
+extern fn native_sdk_windows_set_web_profile(host: *WindowsHost, path: [*]const u8, path_len: usize, isolated: c_int) void;
 extern fn native_sdk_windows_run(host: *WindowsHost, callback: WindowsCallback, context: ?*anyopaque) void;
 extern fn native_sdk_windows_stop(host: *WindowsHost) void;
 extern fn native_sdk_windows_wake(host: *WindowsHost) c_int;
@@ -386,6 +388,9 @@ pub const WindowsPlatform = struct {
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
         const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
+        // The WebView2 user data folder rides right after the create:
+        // WebView2 environments are created lazily, with the first WebView.
+        applyWebProfile(host, web_engine, app_info);
         // Packet text must use the same Geist metrics the engine planned
         // against. Register both built-in faces directly from their
         // compile-time bytes; custom application fonts keep the public
@@ -1055,6 +1060,39 @@ fn closePolicyInt(policy: platform_mod.WindowClosePolicy) c_int {
 fn applyWindowClosePolicy(host: *WindowsHost, window_id: u64, policy: platform_mod.WindowClosePolicy) void {
     if (policy == .quit) return;
     _ = native_sdk_windows_set_window_close_policy(host, window_id, closePolicyInt(policy));
+}
+
+/// Hands the host the WebView2 user data folder resolved at startup
+/// (`app_dirs.AppData.web_profile`). The host names no folder itself: an
+/// empty default leaves WebView2's own default beside the executable.
+fn applyWebProfile(host: *WindowsHost, web_engine: platform_mod.WebEngine, app_info: platform_mod.AppInfo) void {
+    var buffer: [app_dirs.app_data.max_dir_bytes]u8 = undefined;
+    switch (app_info.web_profile) {
+        .unresolved => {
+            const path = unresolvedWebProfile(&buffer, web_engine, app_info.bundle_id);
+            native_sdk_windows_set_web_profile(host, path.ptr, path.len, 0);
+        },
+        .default => |path| native_sdk_windows_set_web_profile(host, path.ptr, path.len, 0),
+        .isolated => |path| native_sdk_windows_set_web_profile(host, path.ptr, path.len, 1),
+    }
+}
+
+/// The default folder for an AppInfo no startup resolution filled (an
+/// app-owned runner that predates it): the one `app_data.defaultWebProfile`
+/// names, from this process's LOCALAPPDATA, so such apps keep their data.
+fn unresolvedWebProfile(buffer: []u8, web_engine: platform_mod.WebEngine, bundle_id: []const u8) []const u8 {
+    if (comptime @import("builtin").target.os.tag != .windows) return "";
+    const environ: std.process.Environ = .{ .block = .global };
+    const wide = environ.getWindows(std.unicode.utf8ToUtf16LeStringLiteral("LOCALAPPDATA")) orelse return "";
+    var local_app_data: [app_dirs.app_data.max_dir_bytes]u8 = undefined;
+    if (std.unicode.calcWtf8Len(wide) > local_app_data.len) return "";
+    const len = std.unicode.wtf16LeToWtf8(&local_app_data, wide);
+    var fixed = std.heap.FixedBufferAllocator.init(buffer);
+    return app_dirs.app_data.defaultWebProfile(fixed.allocator(), .windows, .{
+        .bundle_id = bundle_id,
+        .app_name = bundle_id,
+        .web_engine = if (web_engine == .chromium) .chromium else .system,
+    }, .{ .local_app_data = local_app_data[0..len] }) catch "";
 }
 
 fn minSizeFloor(value: f32) f64 {
@@ -2993,17 +3031,34 @@ test "windows webview2 keeps its user data with the app's per-user data" {
     // WebView2's default user data folder sits beside the executable,
     // which is read-only under Program Files and is swapped away with
     // the program files on update. Every environment the host creates
-    // names the folder beside the app_dirs roots instead, and an earlier
-    // "<exe>.WebView2" folder moves there once.
+    // names the folder the app resolved at startup instead
+    // (app_dirs.AppData.web_profile, handed over after create; the host
+    // reads no environment variable itself), and for the default folder
+    // an earlier "<exe>.WebView2" folder moves there once. An override
+    // root's isolated profile never adopts it.
     const host_source = @embedFile("webview2_host.cpp");
     try std.testing.expect(std.mem.indexOf(u8, host_source, "factory(nullptr, webViewUserDataFolder(host), nullptr,") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "factory(nullptr, nullptr, nullptr,") == null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "GetEnvironmentVariableW(") == null);
     const resolve_at = std.mem.indexOf(u8, host_source, "static const wchar_t *webViewUserDataFolder(Host *host) {") orelse return error.TestExpectedEqual;
     const resolve = host_source[resolve_at..];
-    try std.testing.expect(std.mem.indexOf(u8, resolve, "GetEnvironmentVariableW(L\"LOCALAPPDATA\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resolve, "const std::wstring folder = app_root + L\"\\\\WebView2\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resolve, "const std::wstring folder = widen(host->web_profile);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resolve, "if (!host->web_profile_isolated && !webViewDirectoryExists(folder)) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, resolve, "MoveFileExW(legacy.c_str(), folder.c_str(), 0)") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "return path + L\".WebView2\";") != null);
+    // The platform layer hands the profile over right after create.
+    // (The pattern spans a real newline, so it cannot match this test.)
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("root.zig"), "orelse return error.CreateFailed;\n        // The WebView2 user data folder rides right after the create:") != null);
+}
+
+test "windows webview2 profile for an unresolved app info is the default folder" {
+    // Reads this process's LOCALAPPDATA: only meaningful on Windows.
+    if (comptime @import("builtin").target.os.tag != .windows) return error.SkipZigTest;
+    var buffer: [app_dirs.app_data.max_dir_bytes]u8 = undefined;
+    const path = unresolvedWebProfile(&buffer, .system, "dev.native_sdk.profile_test");
+    if (path.len == 0) return; // no LOCALAPPDATA in this environment
+    try std.testing.expect(std.mem.endsWith(u8, path, "\\dev.native_sdk.profile_test\\WebView2"));
+    try std.testing.expectEqualStrings("", unresolvedWebProfile(&buffer, .system, "bad:id"));
 }
 
 test "windows webview assets resolve against the packaged resources beside bin" {
