@@ -19,11 +19,11 @@ pub const RawManifest = struct {
     /// startup window is created; the runtime dock-presence command may
     /// still promote or demote the app later.
     dock_visible: bool = true,
-    /// Whether one process per data directory, user, and login session
+    /// Whether one process per data directory (per login session on Windows)
     /// owns the app (the default data directory by bundle id, any other
     /// override by its root). A later launch hands its working directory and arguments
     /// to the owner over the `native-sdk.app.launches` channel source and
-    /// exits before creating windows (Windows today).
+    /// exits before creating windows.
     single_instance: bool = false,
     persist: ?RawPersist = null,
     images: RawImages = .{},

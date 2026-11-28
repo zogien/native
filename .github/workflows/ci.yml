@@ -116,6 +116,8 @@ jobs:
       # live-resize check of an animated frame needs AppKit to animate it;
       # each is skipped loudly when the runner's session does not.
       - run: zig build test-macos-window-placement
+      - name: Hand off a second launch to its owning core
+        run: python3 tests/single-instance/probe.py
       # Signed-package seal pin: an ad-hoc signed package must pass
       # codesign --verify --strict (macOS runners are the only tier with
       # codesign; the step skips loudly anywhere else).
@@ -264,6 +266,7 @@ jobs:
       # Windows-only PowerShell probe natively so removing CREATE_NO_WINDOW
       # cannot leave the platform-neutral and Wine lanes green.
       - run: zig build test-windows-effects-no-console
+      - run: zig build test-single-instance
       # The registered-font receipt, natively on Windows: runs the
       # font-registry suite — registration validation, the glyph-budget
       # gate, present/reference pixel parity, and the Chinese-receipt
@@ -523,6 +526,8 @@ jobs:
       # gpu_nonblank=true, template widgets in the snapshot).
       - name: Scaffold and drive the Debug template headless
         run: .github/scripts/linux-dev-smoke.sh
+      - name: Hand off a second launch to its owning core
+        run: GTK_A11Y=none xvfb-run -a dbus-run-session -- python3 tests/single-instance/probe.py
 
   windows-canvas-smoke:
     name: Windows Canvas Smoke (Wine)
