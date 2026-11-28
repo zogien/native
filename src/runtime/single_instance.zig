@@ -1,5 +1,5 @@
 //! Single-instance ownership (manifest `single_instance`): one process per
-//! data directory, user, and login session owns the app's data. The
+//! data directory owns the app's data. The
 //! default data directory is keyed by the bundle id, also when a
 //! `--native-data-dir` / `NATIVE_SDK_DATA_DIR` root reaches it; data moved
 //! under any other root is keyed by that root (`Scope`). The first launch to claim ownership becomes the
@@ -9,11 +9,12 @@
 //! the `native-sdk.app.launches` channel source (`attach`) as one `"data"`
 //! event and decides what to do with it.
 //!
-//! Windows is the implemented host: a message-mode named pipe created with
+//! Windows uses a message-mode named pipe created with
 //! FILE_FLAG_FIRST_PIPE_INSTANCE is both the ownership lock and the
 //! notification endpoint. The kernel retires it with the process, so a
-//! normal exit or a crash leaves no stale ownership. Other hosts answer
-//! `.standalone` and run without ownership.
+//! normal exit or a crash leaves no stale ownership. macOS and Linux hold
+//! a kernel lock in the data directory and serve same-user launches on
+//! a Unix socket. A new lock holder can replace a stale socket.
 const std = @import("std");
 const builtin = @import("builtin");
 const effects = @import("effects.zig");
@@ -21,6 +22,7 @@ const clock = @import("clock.zig");
 const app_data = @import("app_dirs").app_data;
 
 const is_windows = builtin.os.tag == .windows;
+const is_posix_desktop = builtin.os.tag == .macos or (builtin.os.tag == .linux and !builtin.abi.isAndroid());
 
 pub const source_name = "native-sdk.app.launches";
 
@@ -93,8 +95,8 @@ pub const Claim = union(enum) {
 };
 
 /// What one owner owns: the platform-neutral key material. Each host
-/// derives its endpoint from a scope and the current OS user, so one
-/// scope has one owner per user and login session.
+/// derives its endpoint from a scope and the current OS user. Windows
+/// also includes the login session in the pipe name.
 pub const Scope = union(enum) {
     /// The default data directory, keyed by the app's bundle id. The
     /// Windows endpoint keeps the name it had before a data directory
@@ -120,7 +122,7 @@ pub const Scope = union(enum) {
 
     /// A fixed-size digest of the scope for one OS user, for endpoint
     /// names that cannot hold a whole path. `user` is any stable bytes
-    /// naming the user (the SID text on Windows). The scope's form is
+    /// naming the user (the SID text on Windows or the POSIX uid). The scope's form is
     /// hashed with its value, so an `.app` scope and a `.root` scope never
     /// digest alike, even for equal strings. The Windows `.app` endpoint
     /// does not use this: it keeps its original name formula.
@@ -145,8 +147,9 @@ pub const Scope = union(enum) {
 /// `.standalone` never re-attempts after its startup work has begun.
 pub fn claim(io: std.Io, gpa: std.mem.Allocator, args: std.process.Args, scope: Scope) ?Claim {
     if (!beginClaim()) return null;
-    if (comptime !is_windows) return .{ .standalone = "single_instance is not implemented on this platform yet" };
-    return claimWindows(io, gpa, args, scope);
+    if (comptime is_windows) return claimWindows(io, gpa, args, scope);
+    if (comptime is_posix_desktop) return Posix.claimScope(io, gpa, args, scope) catch .{ .secondary = .ipc_failed };
+    return .{ .standalone = "single_instance is not implemented on this platform yet" };
 }
 
 /// True exactly once per process: for the first claim attempt.
@@ -170,7 +173,7 @@ pub fn owned() bool {
 /// handle; launches held while no handle was live deliver to the new one.
 pub fn attach(payload: []const u8, handle: effects.ChannelHandle) !void {
     if (payload.len != 0) return error.InvalidChannelSourceArguments;
-    if (comptime !is_windows) return error.UnsupportedChannelSource;
+    if (comptime !is_windows and !is_posix_desktop) return error.UnsupportedChannelSource;
     owner.lock();
     defer owner.unlock();
     if (!owner.owned) return error.SingleInstanceNotOwned;
@@ -315,6 +318,258 @@ fn remainingMs(deadline: u64) ?u64 {
     const now = clock.monotonicMs();
     return if (now >= deadline) null else deadline - now;
 }
+
+const Posix = struct {
+    const c = std.c;
+    const Address = c.sockaddr.un;
+    const lock_name = ".native-sdk-instance.lock";
+
+    fn env(name: [*:0]const u8) ?[]const u8 {
+        return std.mem.span(c.getenv(name) orelse return null);
+    }
+
+    fn openLock(io: std.Io, scope: Scope) !std.Io.File {
+        const dirs = @import("app_dirs");
+        var buf: [app_data.max_dir_bytes]u8 = undefined;
+        const path = switch (scope) {
+            .root => |root| try dirs.join(dirs.currentPlatform(), &buf, &.{ root, app_data.layout.data }),
+            .app => |id| try dirs.resolveOne(.{ .name = id }, dirs.currentPlatform(), .{
+                .home = env("HOME"),
+                .xdg_data_home = env("XDG_DATA_HOME"),
+            }, .data, &buf),
+        };
+        var dir = try std.Io.Dir.cwd().createDirPathOpen(io, path, .{});
+        defer dir.close(io);
+        const fd = try std.posix.openat(dir.handle, lock_name, .{
+            .ACCMODE = .RDWR,
+            .CREAT = true,
+            .CLOEXEC = true,
+            .NOFOLLOW = true,
+            .NONBLOCK = true,
+        }, 0o600);
+        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+        errdefer file.close(io);
+        if ((try file.stat(io)).kind != .file) return error.InvalidLockFile;
+        return file;
+    }
+
+    fn socketAddress(dir: []const u8, scope: Scope, uid: c.uid_t) !Address {
+        var addr: Address = .{ .path = @splat(0) };
+        _ = try std.fmt.bufPrintZ(&addr.path, "{s}/native-sdk-{x}.sock", .{
+            std.mem.trimEnd(u8, dir, "/"), &scope.digest(std.mem.asBytes(&uid)),
+        });
+        return addr;
+    }
+
+    fn privateDirectory(io: std.Io, path: []const u8, uid: c.uid_t) bool {
+        if (!std.fs.path.isAbsolute(path)) return false;
+        var dir = std.Io.Dir.cwd().openDir(io, path, .{ .follow_symlinks = false }) catch return false;
+        defer dir.close(io);
+        if (builtin.os.tag == .linux) {
+            const linux = std.os.linux;
+            var stat: linux.Statx = undefined;
+            return linux.errno(linux.statx(dir.handle, "", linux.AT.EMPTY_PATH, .{ .MODE = true, .UID = true }, &stat)) == .SUCCESS and
+                stat.uid == uid and stat.mode & 0o777 == 0o700;
+        }
+        var stat: c.Stat = undefined;
+        return c.fstat(dir.handle, &stat) == 0 and stat.uid == uid and stat.mode & 0o777 == 0o700;
+    }
+
+    fn endpoint(io: std.Io, scope: Scope, uid: c.uid_t) !Address {
+        if (env(if (builtin.os.tag == .macos) "TMPDIR" else "XDG_RUNTIME_DIR")) |path| {
+            if (privateDirectory(io, path, uid)) {
+                if (socketAddress(path, scope, uid)) |addr| return addr else |_| {}
+            }
+        }
+        // The environment can be absent, shared, or longer than sun_path.
+        var fallback: [48]u8 = undefined;
+        const path = try std.fmt.bufPrint(&fallback, "/tmp/native-sdk-{d}", .{uid});
+        std.Io.Dir.cwd().createDir(io, path, .fromMode(0o700)) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        if (!privateDirectory(io, path, uid)) return error.UnsafeRuntimeDirectory;
+        return socketAddress(path, scope, uid);
+    }
+
+    fn claimScope(io: std.Io, gpa: std.mem.Allocator, args: std.process.Args, scope: Scope) !Claim {
+        const deadline = clock.monotonicMs() + notify_timeout_ms;
+        const addr = try endpoint(io, scope, c.geteuid());
+        const lock = try openLock(io, scope);
+        var held_for_process = false;
+        defer if (!held_for_process) lock.close(io);
+        var launch_buffer: [max_launch_bytes]u8 = undefined;
+        var launch: ?[]const u8 = null;
+        while (remainingMs(deadline) != null) {
+            if (try lock.tryLock(io, .exclusive)) {
+                const server = try listen(io, &addr);
+                errdefer _ = c.close(server);
+                const listener = try std.Thread.spawn(.{}, listenMain, .{server});
+                listener.detach();
+                // Never unlink the lock file: a waiting process already has
+                // this inode open. Closing the fd at process exit releases it.
+                held_for_process = true;
+                owner.lock();
+                owner.owned = true;
+                owner.unlock();
+                return .primary;
+            }
+            if (launch == null) launch = encodeCurrentLaunch(io, gpa, args, &launch_buffer) orelse return .{ .secondary = .too_large };
+            switch (notifyOwner(&addr, launch.?, deadline)) {
+                .result => |result| return .{ .secondary = result },
+                .vanished => try std.Io.sleep(io, .fromMilliseconds(10), .awake),
+            }
+        }
+        return .{ .secondary = .not_responding };
+    }
+
+    fn newSocket(nonblocking: bool) !c_int {
+        const fd = if (builtin.os.tag == .linux)
+            c.socket(c.AF.UNIX, c.SOCK.STREAM | c.SOCK.CLOEXEC | @as(u32, if (nonblocking) c.SOCK.NONBLOCK else 0), 0)
+        else
+            c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+        if (fd < 0) return error.SocketFailed;
+        errdefer _ = c.close(fd);
+        if (builtin.os.tag == .macos) {
+            try closeOnExec(fd);
+            const flags: c_int = @bitCast(@as(c.O, .{ .NONBLOCK = nonblocking }));
+            if (c.fcntl(fd, c.F.SETFL, flags) < 0) return error.SocketFailed;
+        }
+        return fd;
+    }
+
+    fn closeOnExec(fd: c_int) !void {
+        if (c.fcntl(fd, c.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) < 0) return error.SocketFailed;
+    }
+
+    /// Called under the data lock. Only its holder may replace a stale socket.
+    fn listen(io: std.Io, addr: *const Address) !c_int {
+        const path = std.mem.sliceTo(&addr.path, 0);
+        const cwd = std.Io.Dir.cwd();
+        if (cwd.statFile(io, path, .{ .follow_symlinks = false })) |stat| {
+            if (stat.kind != .unix_domain_socket) return error.UnexpectedEndpoint;
+            try cwd.deleteFile(io, path);
+        } else |err| if (err != error.FileNotFound) return err;
+        const fd = try newSocket(false);
+        errdefer _ = c.close(fd);
+        if (c.bind(fd, @ptrCast(addr), @sizeOf(Address)) != 0) return error.BindFailed;
+        errdefer cwd.deleteFile(io, path) catch {};
+        if (c.chmod(@ptrCast(&addr.path), 0o600) != 0) return error.SocketFailed;
+        if (c.listen(fd, 16) != 0) return error.SocketFailed;
+        return fd;
+    }
+
+    extern "c" fn getpeereid(fd: c_int, uid: *c.uid_t, gid: *c.gid_t) c_int;
+
+    fn trustedPeer(fd: c_int, uid: c.uid_t) bool {
+        if (builtin.os.tag == .macos) {
+            var peer: c.uid_t = undefined;
+            var group: c.gid_t = undefined;
+            return getpeereid(fd, &peer, &group) == 0 and peer == uid;
+        }
+        var cred: extern struct { pid: c.pid_t, uid: c.uid_t, gid: c.gid_t } = undefined;
+        var len: c.socklen_t = @sizeOf(@TypeOf(cred));
+        return c.getsockopt(fd, c.SOL.SOCKET, c.SO.PEERCRED, &cred, &len) == 0 and len == @sizeOf(@TypeOf(cred)) and cred.uid == uid;
+    }
+
+    // Use a single absolute deadline even across signal interruptions,
+    // partial transfers, and a full listen backlog.
+    fn waitReady(fd: c_int, events: i16, deadline: u64) TransferError!void {
+        var pollfd: c.pollfd = .{ .fd = fd, .events = events, .revents = 0 };
+        while (remainingMs(deadline)) |ms| {
+            const rc = c.poll(@ptrCast(&pollfd), 1, @intCast(ms));
+            if (rc > 0) return;
+            if (rc == 0) return error.Timeout;
+            if (c.errno(rc) != .INTR) return error.Failed;
+        }
+        return error.Timeout;
+    }
+
+    fn readSome(fd: c_int, buf: []u8, deadline: u64) TransferError!usize {
+        while (true) {
+            try waitReady(fd, c.POLL.IN, deadline);
+            const rc = c.recv(fd, buf.ptr, buf.len, c.MSG.DONTWAIT);
+            switch (c.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR, .AGAIN => continue,
+                else => return error.Failed,
+            }
+        }
+    }
+
+    fn writeAll(fd: c_int, bytes: []const u8, deadline: u64) TransferError!void {
+        var pending = bytes;
+        while (pending.len != 0) {
+            try waitReady(fd, c.POLL.OUT, deadline);
+            const rc = c.send(fd, pending.ptr, pending.len, c.MSG.DONTWAIT | c.MSG.NOSIGNAL);
+            switch (c.errno(rc)) {
+                .SUCCESS => {
+                    if (rc == 0) return error.Failed;
+                    pending = pending[@intCast(rc)..];
+                },
+                .INTR, .AGAIN => continue,
+                else => return error.Failed,
+            }
+        }
+    }
+
+    fn notifyOwner(addr: *const Address, launch: []const u8, deadline: u64) NotifyOutcome {
+        const failed: NotifyOutcome = .{ .result = .ipc_failed };
+        const fd = newSocket(true) catch return failed;
+        defer _ = c.close(fd);
+        switch (c.errno(c.connect(fd, @ptrCast(addr), @sizeOf(Address)))) {
+            .SUCCESS => {},
+            .NOENT, .CONNREFUSED, .AGAIN, .INTR => return .vanished,
+            .INPROGRESS => {
+                waitReady(fd, c.POLL.OUT, deadline) catch |err| return .{ .result = ioFailure(err) };
+                var status: c_int = undefined;
+                var len: c.socklen_t = @sizeOf(c_int);
+                if (c.getsockopt(fd, c.SOL.SOCKET, c.SO.ERROR, &status, &len) != 0) return failed;
+                if (status == @intFromEnum(c.E.CONNREFUSED)) return .vanished;
+                if (status != 0) return failed;
+            },
+            else => return failed,
+        }
+        if (!trustedPeer(fd, c.geteuid())) return failed;
+        writeAll(fd, request_magic, deadline) catch |err| return .{ .result = ioFailure(err) };
+        writeAll(fd, launch, deadline) catch |err| return .{ .result = ioFailure(err) };
+        if (c.shutdown(fd, c.SHUT.WR) != 0) return failed;
+        var byte: [1]u8 = undefined;
+        const n = readSome(fd, &byte, deadline) catch |err| return .{ .result = ioFailure(err) };
+        if (n != 1) return failed;
+        return .{ .result = @as(Reply, @enumFromInt(byte[0])).result() };
+    }
+
+    fn listenMain(server: c_int) void {
+        var threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
+        defer threaded.deinit();
+        var core: CoreSink = .{ .io = threaded.io() };
+        while (true) {
+            const fd = if (builtin.os.tag == .linux) c.accept4(server, null, null, c.SOCK.CLOEXEC) else c.accept(server, null, null);
+            if (fd < 0) {
+                std.Io.sleep(core.io, .fromMilliseconds(25), .awake) catch {};
+                continue;
+            }
+            defer _ = c.close(fd);
+            if (builtin.os.tag == .macos) closeOnExec(fd) catch continue;
+            if (!trustedPeer(fd, c.geteuid())) continue;
+            const deadline = clock.monotonicMs() + notify_timeout_ms;
+            const reply = readRequest(fd, core.sink(), deadline) catch continue;
+            writeAll(fd, &.{@intFromEnum(reply)}, deadline) catch continue;
+        }
+    }
+
+    fn readRequest(fd: c_int, sink: Sink, deadline: u64) TransferError!Reply {
+        var request: [request_capacity + 1]u8 = undefined;
+        var n: usize = 0;
+        while (n < request.len) {
+            const read = try readSome(fd, request[n..], deadline);
+            if (read == 0) return answer(request[0..n], sink);
+            n += read;
+        }
+        return .too_large;
+    }
+};
 
 fn claimWindows(io: std.Io, gpa: std.mem.Allocator, args: std.process.Args, scope: Scope) Claim {
     if (comptime !is_windows) unreachable;
@@ -842,7 +1097,7 @@ test "only the first claim in a process claims; later calls are no-ops" {
 
 test "the source refuses arguments, and refuses a process that does not own the app" {
     try testing.expectError(error.InvalidChannelSourceArguments, attach("x", .{}));
-    const expected = if (is_windows) error.SingleInstanceNotOwned else error.UnsupportedChannelSource;
+    const expected = if (is_windows or is_posix_desktop) error.SingleInstanceNotOwned else error.UnsupportedChannelSource;
     try testing.expectError(expected, attach("", .{}));
 }
 
@@ -1090,4 +1345,95 @@ fn initTestSecurity(security: *Security) !void {
     var identity: Identity = undefined;
     try testing.expect(identity.loadCurrent());
     try testing.expect(security.init(identity.sidText()));
+}
+
+test "POSIX socket names fit sun_path and never embed the data root" {
+    if (comptime !is_posix_desktop) return error.SkipZigTest;
+    const scope: Scope = .{ .root = &([_]u8{'x'} ** app_data.max_root_bytes) };
+    const uid = Posix.c.geteuid();
+    const addr = try Posix.socketAddress("/tmp/", scope, uid);
+    const name = std.mem.sliceTo(&addr.path, 0);
+    try testing.expect(std.mem.startsWith(u8, name, "/tmp/native-sdk-"));
+    try testing.expectEqual("/tmp/native-sdk-.sock".len + 2 * Scope.digest_len, name.len);
+    const room = addr.path.len - 1 - (name.len - "/tmp".len);
+    var dir: [108]u8 = @splat('x');
+    dir[0] = '/';
+    const longest = try Posix.socketAddress(dir[0..room], scope, uid);
+    try testing.expectEqual(longest.path.len - 1, std.mem.sliceTo(&longest.path, 0).len);
+    try testing.expectError(error.NoSpaceLeft, Posix.socketAddress(dir[0 .. room + 1], scope, uid));
+}
+
+test "POSIX locks survive contention and release on close without unlinking" {
+    if (comptime !is_posix_desktop) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(testing.io, &path);
+    const scope: Scope = .{ .root = path[0..n] };
+    const first = try Posix.openLock(testing.io, scope);
+    var first_open = true;
+    defer if (first_open) first.close(testing.io);
+    try testing.expect(try first.tryLock(testing.io, .exclusive));
+    try testing.expect(Posix.c.fcntl(first.handle, Posix.c.F.GETFD) & std.posix.FD_CLOEXEC != 0);
+    const second = try Posix.openLock(testing.io, scope);
+    defer second.close(testing.io);
+    try testing.expect(!try second.tryLock(testing.io, .exclusive));
+    try testing.expectEqual(@as(std.posix.mode_t, 0o600), (try second.stat(testing.io)).permissions.toMode() & 0o777);
+    first.close(testing.io);
+    first_open = false;
+    try testing.expect(try second.tryLock(testing.io, .exclusive));
+}
+
+test "POSIX verifies private directory ownership and socket permissions" {
+    if (comptime !is_posix_desktop) return error.SkipZigTest;
+    const io = testing.io;
+    const uid = Posix.c.geteuid();
+    var name: [48]u8 = undefined;
+    const path = try std.fmt.bufPrint(&name, "/tmp/nsl-{d}-{x}", .{ Posix.c.getpid(), testing.random_seed });
+    try std.Io.Dir.cwd().createDir(io, path, .fromMode(0o700));
+    defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
+    try testing.expect(Posix.privateDirectory(io, path, uid));
+    try testing.expect(!Posix.privateDirectory(io, path, uid ^ 1));
+    const addr = try Posix.socketAddress(path, .{ .app = "permissions" }, uid);
+    const fd = try Posix.listen(io, &addr);
+    defer _ = Posix.c.close(fd);
+    const stat = try std.Io.Dir.cwd().statFile(io, std.mem.sliceTo(&addr.path, 0), .{});
+    try testing.expectEqual(.unix_domain_socket, stat.kind);
+    try testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+}
+
+test "POSIX verifies both socket peers and reads a bounded EOF-delimited frame" {
+    if (comptime !is_posix_desktop) return error.SkipZigTest;
+    const c = Posix.c;
+    const uid = c.geteuid();
+    const cases = [_]struct { []const u8, Reply }{
+        .{ request_magic ++ "/cwd\x00one\x00", .accepted },
+        .{ request_magic ++ ("x" ** max_launch_bytes), .accepted },
+        .{ request_magic ++ ("x" ** (max_launch_bytes + 1)), .too_large },
+        .{ "NSL", .bad_request },
+    };
+    for (cases) |case| {
+        var pair: [2]c_int = undefined;
+        try testing.expect(c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &pair) == 0);
+        defer for (pair) |fd| {
+            _ = c.close(fd);
+        };
+        for (pair) |fd| {
+            try testing.expect(Posix.trustedPeer(fd, uid));
+            try testing.expect(!Posix.trustedPeer(fd, uid ^ 1));
+        }
+        var recorder: Recorder = .{ .answer = .accepted };
+        const sender = try std.Thread.spawn(.{}, sendTestFrame, .{ pair[0], case[0] });
+        defer sender.join();
+        try testing.expectEqual(case[1], try Posix.readRequest(pair[1], recorder.sink(), clock.monotonicMs() + 5_000));
+        if (case[1] == .accepted) try testing.expectEqualStrings(case[0][request_magic.len..], recorder.launch[0..recorder.launch_len]);
+    }
+}
+
+fn sendTestFrame(fd: c_int, frame: []const u8) void {
+    const deadline = clock.monotonicMs() + 5_000;
+    defer _ = Posix.c.shutdown(fd, Posix.c.SHUT.WR);
+    Posix.writeAll(fd, frame[0..2], deadline) catch return;
+    std.Io.sleep(testing.io, .fromMilliseconds(10), .awake) catch return;
+    Posix.writeAll(fd, frame[2..], deadline) catch return;
 }
