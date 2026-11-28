@@ -868,8 +868,16 @@ fn appRelativeAssetSubpath(assets_dir: []const u8) ?[]const u8 {
     return assets_dir;
 }
 
+const macos_minimum_version = "11.0";
+const macos_catalog_icon = "AppIcon";
+
 fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, executable_name: []const u8) ![]const u8 {
-    const icon_name = macosIconFile(metadata);
+    const plan = resolveIconPlan(metadata);
+    const icon_name = if (plan.prebuilt_icns) |path| std.fs.path.basename(path) else "AppIcon.icns";
+    const catalog_key = if (plan.composer != null)
+        "  <key>CFBundleIconName</key>\n  <string>" ++ macos_catalog_icon ++ "</string>\n"
+    else
+        "";
     const bundle_id = try xmlEscapeAlloc(allocator, metadata.id);
     defer allocator.free(bundle_id);
     const display_name = try xmlEscapeAlloc(allocator, metadata.displayName());
@@ -918,10 +926,10 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\  <string>{s}</string>
         \\  <key>CFBundleIconFile</key>
         \\  <string>{s}</string>
-        \\  <key>CFBundlePackageType</key>
+        \\{s}  <key>CFBundlePackageType</key>
         \\  <string>APPL</string>
         \\  <key>LSMinimumSystemVersion</key>
-        \\  <string>11.0</string>
+        \\  <string>{s}</string>
         \\  <key>CFBundleShortVersionString</key>
         \\  <string>{s}</string>
         \\  <key>CFBundleVersion</key>
@@ -930,7 +938,7 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\</dict>
         \\</plist>
         \\
-    , .{ bundle_id, display_name, display_name, executable, icon, version, version, launch_policy, about_line, privacy_descriptions, document_types, url_types });
+    , .{ bundle_id, display_name, display_name, executable, icon, catalog_key, macos_minimum_version, version, version, launch_policy, about_line, privacy_descriptions, document_types, url_types });
 }
 
 fn metadataHasPermission(metadata: manifest_tool.Metadata, name: []const u8) bool {
@@ -1002,13 +1010,14 @@ fn artifactReadme(target: PackageTarget) []const u8 {
 // in app.zon `.icons`) generates every platform's artifacts through the
 // built-in pipeline (`app_icon`). A prebuilt container in `.icons` always
 // wins untouched for its platform: `.icns` on macOS, `.ico` on Windows.
-// Precedence on macOS: explicit .icns > generated-from-image > the SDK
-// default icon.
+// On macOS a Composer source adds a layered asset catalog and supplies
+// the legacy .icns unless the app has provided its own.
 // ---------------------------------------------------------------------------
 
 /// How `.icons` resolves for packaging: at most one prebuilt container
 /// per platform plus at most one generatable source (first of each wins).
 const IconPlan = struct {
+    composer: ?[]const u8 = null,
     prebuilt_icns: ?[]const u8 = null,
     prebuilt_ico: ?[]const u8 = null,
     source_path: ?[]const u8 = null,
@@ -1018,7 +1027,9 @@ const IconPlan = struct {
 fn resolveIconPlan(metadata: manifest_tool.Metadata) IconPlan {
     var plan: IconPlan = .{};
     for (metadata.icons) |path| {
-        if (app_icon_tool.pathHasExtension(path, ".icns")) {
+        if (app_icon_tool.pathHasExtension(path, ".icon")) {
+            if (plan.composer == null) plan.composer = path;
+        } else if (app_icon_tool.pathHasExtension(path, ".icns")) {
             if (plan.prebuilt_icns == null) plan.prebuilt_icns = path;
         } else if (app_icon_tool.pathHasExtension(path, ".ico")) {
             if (plan.prebuilt_ico == null) plan.prebuilt_ico = path;
@@ -1065,16 +1076,28 @@ fn loadIconSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, ki
     }
 }
 
-fn macosIconFile(metadata: manifest_tool.Metadata) []const u8 {
-    // Only a prebuilt .icns keeps its own name; generated and default
-    // icons always ship as AppIcon.icns.
-    const plan = resolveIconPlan(metadata);
-    if (plan.prebuilt_icns) |path| return std.fs.path.basename(path);
-    return "AppIcon.icns";
-}
-
 fn copyMacosIcon(allocator: std.mem.Allocator, io: std.Io, package_dir: std.Io.Dir, options: PackageOptions) !void {
     const plan = resolveIconPlan(options.metadata);
+    if (plan.composer) |path| {
+        if (@import("builtin").os.tag != .macos) {
+            std.debug.print("error: packaging {s} for macOS requires a macOS host with Xcode 26 or later\n", .{path});
+            return error.IconComposerRequiresMacos;
+        }
+        const source = try std.fs.path.join(allocator, &.{ options.project_dir, path });
+        defer allocator.free(source);
+        const legacy = if (plan.prebuilt_icns) |icns| try std.fs.path.join(allocator, &.{ options.project_dir, icns }) else "";
+        defer if (plan.prebuilt_icns != null) allocator.free(legacy);
+        const resources = try package_dir.realPathFileAlloc(io, "Contents/Resources", allocator);
+        defer allocator.free(resources);
+        var child = try std.process.spawn(io, .{
+            .argv = &.{ "/bin/sh", "-c", @embedFile("compile_macos_icon.sh"), "compile-macos-icon", source, resources, macos_minimum_version, legacy, macos_catalog_icon },
+            .environ_map = options.env_map,
+            .stdin = .ignore,
+        });
+        const term = try child.wait(io);
+        if (term != .exited or term.exited != 0) return error.IconComposerFailed;
+        return;
+    }
     if (plan.prebuilt_icns) |path| {
         // Art-directed prebuilt .icns wins untouched.
         try copyMacosResourceIcon(allocator, io, package_dir, path, "configured app icon");
@@ -3323,6 +3346,34 @@ test "artifact names include metadata target and optimize mode" {
     try std.testing.expectEqualStrings("demo-1.2.3-macos-Debug.app", try artifactName(&buffer, metadata, .macos, "Debug"));
 }
 
+test "Composer plan keeps the first icon of each kind and declares both macOS icon resources" {
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.app",
+        .name = "demo",
+        .version = "1.0.0",
+        .icons = &.{ "shared.svg", "art/R&D.icon", "second.icon", "old.icns", "second.icns", "win.ico", "second.png" },
+    };
+    const plan = resolveIconPlan(metadata);
+    try std.testing.expectEqualStrings("art/R&D.icon", plan.composer.?);
+    try std.testing.expectEqualStrings("old.icns", plan.prebuilt_icns.?);
+    try std.testing.expectEqualStrings("shared.svg", plan.source_path.?);
+    try std.testing.expectEqual(app_icon_tool.SourceKind.svg, plan.source_kind);
+    try std.testing.expectEqualStrings("win.ico", plan.prebuilt_ico.?);
+
+    const plist = try macosInfoPlist(std.testing.allocator, metadata, metadata.name);
+    defer std.testing.allocator.free(plist);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "<key>CFBundleIconName</key>\n  <string>AppIcon</string>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "<key>CFBundleIconFile</key>\n  <string>old.icns</string>") != null);
+}
+
+test "Composer packaging requires macOS before trying actool" {
+    if (@import("builtin").os.tag == .macos) return error.SkipZigTest;
+    try std.testing.expectError(error.IconComposerRequiresMacos, copyMacosIcon(std.testing.allocator, std.testing.io, .cwd(), .{
+        .metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .icons = &.{"Beacon.icon"} },
+        .output_path = "Demo.app",
+    }));
+}
+
 test "plist template includes identity executable and version" {
     const metadata: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .display_name = "Demo App", .description = "A demo of the packaging pipeline.", .version = "1.2.3", .icons = &.{"assets/icon.icns"} };
     const plist = try macosInfoPlist(std.testing.allocator, metadata, "demo");
@@ -3339,6 +3390,7 @@ test "plist template includes identity executable and version" {
     try std.testing.expect(std.mem.indexOf(u8, plist, "icon.icns") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "LSMinimumSystemVersion") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "11.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "CFBundleIconName") == null);
     // The manifest description reaches the About panel's footer key.
     try std.testing.expect(std.mem.indexOf(u8, plist, "NSHumanReadableCopyright") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "A demo of the packaging pipeline.") != null);

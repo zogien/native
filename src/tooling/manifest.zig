@@ -1453,15 +1453,25 @@ fn validateIconPaths(icons: []const []const u8) !void {
 
 /// The app-icon teaching checks `native validate` and `native check`
 /// share with packaging (same messages, no packaging): every `.icons`
-/// entry must be a generatable source (.png/.svg) or a prebuilt
-/// container (.icns/.ico), and a source file that exists must decode to
-/// a square image. A missing file is packaging's problem (it warns and
-/// falls back); an undersized source prints the upscaling warning
+/// entry names a source (.png/.svg), prebuilt container (.icns/.ico),
+/// or Composer directory (.icon). Present image sources must decode to
+/// a square image. Packaging handles missing PNG/SVG files; an undersized source prints the upscaling warning
 /// without failing validation. Returns the error message or null when
 /// the icons pass. The returned message is allocated and intentionally
 /// lives until process exit (same policy as `zonParseFailureMessage`).
 fn checkIconSources(allocator: std.mem.Allocator, io: std.Io, manifest_dir: []const u8, icons: []const []const u8) !?[]const u8 {
     for (icons) |icon_path| {
+        if (app_icon_tool.pathHasExtension(icon_path, ".icon")) {
+            const resolved = try std.fs.path.join(allocator, &.{ manifest_dir, icon_path });
+            defer allocator.free(resolved);
+            var dir = std.Io.Dir.cwd().openDir(io, resolved, .{}) catch |err|
+                return try std.fmt.allocPrint(allocator, "cannot open .icon directory {s} ({t}) - supply an Icon Composer directory containing icon.json", .{ icon_path, err });
+            defer dir.close(io);
+            const json = dir.statFile(io, "icon.json", .{}) catch |err|
+                return try std.fmt.allocPrint(allocator, "{s}/icon.json is unavailable ({t}) - save the icon in Icon Composer", .{ icon_path, err });
+            if (json.kind != .file) return try std.fmt.allocPrint(allocator, "{s}/icon.json must be a regular file - save the icon in Icon Composer", .{icon_path});
+            continue;
+        }
         const is_prebuilt = app_icon_tool.pathHasExtension(icon_path, ".icns") or
             app_icon_tool.pathHasExtension(icon_path, ".ico");
         const kind = app_icon_tool.sourceKindForPath(icon_path) orelse {
@@ -3390,6 +3400,28 @@ test "validate surfaces the non-square icon teaching error with dimensions" {
     try std.testing.expect(!result.ok);
     try std.testing.expect(std.mem.indexOf(u8, result.message, "6x4") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.message, "square") != null);
+}
+
+test "validate requires a Composer directory and a regular icon.json file" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    const icons = &.{"Beacon.icon"};
+    try std.testing.expect((try checkIconSources(allocator, io, root, icons)) != null);
+    try tmp.dir.writeFile(io, .{ .sub_path = "Beacon.icon", .data = "" });
+    try std.testing.expect((try checkIconSources(allocator, io, root, icons)) != null);
+    try tmp.dir.deleteFile(io, "Beacon.icon");
+    try tmp.dir.createDirPath(io, "Beacon.icon");
+    try std.testing.expect((try checkIconSources(allocator, io, root, icons)) != null);
+    try tmp.dir.createDirPath(io, "Beacon.icon/icon.json");
+    try std.testing.expect((try checkIconSources(allocator, io, root, icons)) != null);
+    try tmp.dir.deleteDir(io, "Beacon.icon/icon.json");
+    try tmp.dir.writeFile(io, .{ .sub_path = "Beacon.icon/icon.json", .data = "{}" });
+    try std.testing.expect((try checkIconSources(allocator, io, root, icons)) == null);
 }
 
 test "validate rejects unsupported icon extensions naming the accepted forms" {

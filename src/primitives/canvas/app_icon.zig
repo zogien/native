@@ -130,7 +130,7 @@ pub fn formatSmallSourceMessage(buffer: []u8, path: []const u8, width: usize, he
 }
 
 pub fn formatBadExtensionMessage(buffer: []u8, path: []const u8) []const u8 {
-    return std.fmt.bufPrint(buffer, "app.zon icons entry {s} is not a supported form - use one square .png or .svg source (every platform's icons generate from it), or a prebuilt .icns (macOS) / .ico (Windows) that ships untouched", .{path}) catch "app.zon icons entries must be a .png or .svg source, or a prebuilt .icns/.ico";
+    return std.fmt.bufPrint(buffer, "app.zon icons entry {s} is not a supported form - use one square .png or .svg source (every platform's icons generate from it), a macOS Icon Composer .icon directory, or a prebuilt .icns (macOS) / .ico (Windows) that ships untouched", .{path}) catch "app.zon icons entries must be a .png or .svg source, a macOS .icon directory, or a prebuilt .icns/.ico";
 }
 
 // ---------------------------------------------------------------------------
