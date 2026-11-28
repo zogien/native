@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const geometry = @import("geometry");
+const app_dirs = @import("app_dirs");
 const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
@@ -194,6 +195,7 @@ extern fn native_sdk_appkit_set_window_color_scheme(host: *AppKitHost, window_id
 extern fn native_sdk_appkit_set_dock_icon_rgba(host: *AppKitHost, pixels: [*]const u8, width: usize, height: usize) void;
 extern fn native_sdk_appkit_set_dock_icon_file(host: *AppKitHost, path: [*]const u8, path_len: usize) void;
 extern fn native_sdk_appkit_configure_updates(host: *AppKitHost, feed_url: [*]const u8, feed_url_len: usize, public_key: [*]const u8, public_key_len: usize, check_on_start: c_int, target: [*]const u8, target_len: usize) void;
+extern fn native_sdk_appkit_set_web_profile(path: [*]const u8, path_len: usize, isolated: c_int, store_identifier: *const [16]u8) void;
 extern fn native_sdk_appkit_check_for_updates(host: *AppKitHost, user_initiated: c_int) c_int;
 extern fn native_sdk_appkit_run(host: *AppKitHost, callback: AppKitCallback, context: ?*anyopaque) void;
 extern fn native_sdk_appkit_stop(host: *AppKitHost) void;
@@ -722,6 +724,10 @@ pub const MacPlatform = struct {
         // the classic load byte-for-byte.
         const dock_icon = planDockIcon(app_info.icon_path);
         const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
+        // The web profile goes over BEFORE the create: the Chromium host
+        // initializes CEF inside it, and CEF fixes its root cache path
+        // then. WKWebView reads it when it creates its first WebView.
+        applyWebProfile(web_engine, app_info);
         const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, if (app_info.webview_inspection) 1 else 0, if (app_info.dock_visible) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
         const update_target = comptime update_feed.currentTarget() orelse "macos-unsupported";
         var update_feed_url_buffer: [update_feed.max_feed_url_bytes]u8 = undefined;
@@ -1543,6 +1549,41 @@ fn closePolicyInt(policy: platform_mod.WindowClosePolicy) c_int {
 fn applyWindowClosePolicy(host: *AppKitHost, window_id: u64, policy: platform_mod.WindowClosePolicy) void {
     if (policy == .quit) return;
     _ = native_sdk_appkit_set_window_close_policy(host, window_id, closePolicyInt(policy));
+}
+
+/// Hands the host the web profile resolved at startup
+/// (`app_dirs.AppData.web_profile`), process-wide and before the host is
+/// created. CEF keeps its root cache there; an isolated WKWebView profile
+/// becomes a persistent data store keyed by an identifier derived from
+/// the path (macOS 14 and later); a default WKWebView keeps WebKit's
+/// default store. The hosts name no folder themselves.
+fn applyWebProfile(web_engine: platform_mod.WebEngine, app_info: platform_mod.AppInfo) void {
+    var buffer: [app_dirs.app_data.max_dir_bytes]u8 = undefined;
+    var path: []const u8 = "";
+    var isolated = false;
+    switch (app_info.web_profile) {
+        .unresolved => path = unresolvedWebProfile(&buffer, web_engine, app_info.bundle_id),
+        .default => |default_path| path = default_path,
+        .isolated => |isolated_path| {
+            path = isolated_path;
+            isolated = true;
+        },
+    }
+    const identifier = app_dirs.app_data.webDataStoreIdentifier(path);
+    native_sdk_appkit_set_web_profile(path.ptr, path.len, if (isolated) 1 else 0, &identifier);
+}
+
+/// The default profile for an AppInfo no startup resolution filled (an
+/// app-owned runner that predates it): the one `app_data.defaultWebProfile`
+/// names, from this process's HOME.
+fn unresolvedWebProfile(buffer: []u8, web_engine: platform_mod.WebEngine, bundle_id: []const u8) []const u8 {
+    const home = std.c.getenv("HOME") orelse return "";
+    var fixed = std.heap.FixedBufferAllocator.init(buffer);
+    return app_dirs.app_data.defaultWebProfile(fixed.allocator(), .macos, .{
+        .bundle_id = bundle_id,
+        .app_name = bundle_id,
+        .web_engine = if (web_engine == .chromium) .chromium else .system,
+    }, .{ .home = std.mem.sliceTo(home, 0) }) catch "";
 }
 
 /// Apply a declared content min-size floor to a created window
@@ -3862,4 +3903,22 @@ test "both mac hosts carry the menu-bar lifecycle and fullscreen hooks" {
     const cancel_at = std.mem.indexOf(u8, hide_body, "[self.deferredShowWindows removeObjectForKey:@(windowId)];") orelse return error.TestExpectedEqual;
     const policy_at = std.mem.indexOf(u8, hide_body, "[self.policyHiddenWindows addObject:@(windowId)];") orelse return error.TestExpectedEqual;
     try std.testing.expect(cancel_at < policy_at);
+}
+
+test "macos hosts receive the web profile before the host is created" {
+    // The Chromium host initializes CEF inside native_sdk_appkit_create,
+    // and CEF fixes its root cache path there, so the profile resolved at
+    // startup must go over first. (The patterns span a real newline, so
+    // they cannot match this test's own text.)
+    const zig_source = @embedFile("root.zig");
+    try std.testing.expect(std.mem.indexOf(u8, zig_source, "applyWebProfile(web_engine, app_info);\n        const host = native_sdk_appkit_create(") != null);
+    const cef_source = @embedFile("cef_host.mm");
+    const init_at = std.mem.indexOf(u8, cef_source, "static void ensureCefInitialized() {") orelse return error.TestExpectedEqual;
+    const init_body = cef_source[init_at..];
+    try std.testing.expect(std.mem.indexOf(u8, init_body, "NSString *cefDataRoot = g_cef_profile_root;") != null);
+    // The profile is per app now, never the folder every CEF app shared.
+    try std.testing.expect(std.mem.indexOf(u8, cef_source, "@\"native-sdk/CEF\"") == null);
+    // WKWebView: every configuration takes the override's data store.
+    const appkit_source = @embedFile("appkit_host.m");
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, appkit_source, "    [self applyWebDataStoreToConfiguration:configuration];\n"));
 }

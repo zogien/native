@@ -204,6 +204,7 @@ typedef struct {
  * text); min_width/min_height <= 0 leave that axis unfloored. */
 native_sdk_gtk_host_t *native_sdk_gtk_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags);
 void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host);
+void native_sdk_gtk_set_web_profile(native_sdk_gtk_host_t *host, const char *path, size_t path_len, int isolated);
 void native_sdk_gtk_run(native_sdk_gtk_host_t *host, native_sdk_gtk_event_callback_t callback, void *context);
 void native_sdk_gtk_stop(native_sdk_gtk_host_t *host);
 /* Thread-safe: schedules a WAKE event on the GLib main loop via

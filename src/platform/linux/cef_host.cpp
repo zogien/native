@@ -158,6 +158,14 @@ void native_sdk_gtk_destroy(Host *host) {
     delete host;
 }
 
+void native_sdk_gtk_set_web_profile(Host *host, const char *path, size_t path_len, int isolated) {
+    /* This host embeds no browser yet, so there is no profile to place. */
+    (void)host;
+    (void)path;
+    (void)path_len;
+    (void)isolated;
+}
+
 void native_sdk_gtk_run(Host *host, EventCallback callback, void *context) {
     if (!host) return;
     host->callback = callback;

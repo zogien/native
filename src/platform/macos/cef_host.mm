@@ -275,6 +275,12 @@ static CefRefPtr<CefDictionaryValue> NativeSdkCefExtraInfo(bool bridge_enabled, 
 
 static bool g_cef_initialized = false;
 static bool g_cef_shutdown = false;
+/* The CEF root cache path the app resolved at startup
+ * (native_sdk_appkit_set_web_profile, called before the host is created,
+ * since creating it initializes CEF): by default the app's own data
+ * directory's CEF folder, or an override root's webview folder. Empty
+ * leaves CEF its default. */
+static NSString *g_cef_profile_root = nil;
 static CefScopedLibraryLoader g_cef_library_loader;
 static bool g_cef_library_loaded = false;
 
@@ -307,15 +313,20 @@ static void ensureCefInitialized() {
     settings.multi_threaded_message_loop = false;
     NSString *frameworkPath = NativeSdkCefFrameworkPath();
     NSString *resourcesPath = [frameworkPath stringByAppendingPathComponent:@"Resources"];
-    NSString *appSupport = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject ?: NSTemporaryDirectory();
-    NSString *cefDataRoot = [appSupport stringByAppendingPathComponent:@"native-sdk/CEF"];
-    NSString *cefCachePath = [cefDataRoot stringByAppendingPathComponent:@"Default"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:cefCachePath withIntermediateDirectories:YES attributes:nil error:nil];
+    /* One profile per app (and per data-directory override root): CEF's
+     * root cache holds cookies, storage and caches, and a root shared by
+     * every app (the former Application Support/native-sdk/CEF) let one
+     * app read another's data. */
+    NSString *cefDataRoot = g_cef_profile_root;
     NSString *executablePath = [NSBundle mainBundle].executablePath ?: [[[NSProcessInfo processInfo] arguments] firstObject];
     CefString(&settings.framework_dir_path).FromString(frameworkPath.UTF8String);
     CefString(&settings.resources_dir_path).FromString(resourcesPath.UTF8String);
-    CefString(&settings.root_cache_path).FromString(cefDataRoot.UTF8String);
-    CefString(&settings.cache_path).FromString(cefCachePath.UTF8String);
+    if (cefDataRoot.length > 0) {
+        NSString *cefCachePath = [cefDataRoot stringByAppendingPathComponent:@"Default"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:cefCachePath withIntermediateDirectories:YES attributes:nil error:nil];
+        CefString(&settings.root_cache_path).FromString(cefDataRoot.UTF8String);
+        CefString(&settings.cache_path).FromString(cefCachePath.UTF8String);
+    }
     if (executablePath.length > 0) {
         CefString(&settings.browser_subprocess_path).FromString(executablePath.UTF8String);
     }
@@ -2541,6 +2552,18 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
 void native_sdk_appkit_destroy(native_sdk_appkit_host_t *host) {
     if (!host) return;
     CFBridgingRelease(host);
+}
+
+void native_sdk_appkit_set_web_profile(const char *path, size_t path_len, int isolated, const uint8_t *store_identifier) {
+    /* CEF keys its profile by directory; the WKWebView store identifier
+     * is unused here. The platform layer calls this before
+     * native_sdk_appkit_create, which initializes CEF. */
+    (void)isolated;
+    (void)store_identifier;
+    if (g_cef_initialized) return;
+    @autoreleasepool {
+        g_cef_profile_root = path && path_len > 0 ? [[NSString alloc] initWithBytes:path length:path_len encoding:NSUTF8StringEncoding] : nil;
+    }
 }
 
 void native_sdk_appkit_configure_updates(native_sdk_appkit_host_t *host, const char *feed_url, size_t feed_url_len, const char *public_key, size_t public_key_len, int check_on_start, const char *target, size_t target_len) {

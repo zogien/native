@@ -950,6 +950,12 @@ struct Host {
      * shared by every window at that DPI and destroyed with the host
      * after its windows (applyWindowIcon, destroyWindowIcons). */
     std::map<UINT, WindowIconPair> window_icons;
+    /* The web profile the app resolved at startup, handed over right after
+     * create (native_sdk_windows_set_web_profile): the folder to keep
+     * WebView2 data in (UTF-8, empty for WebView2's own default), and
+     * whether it is a data-directory override's isolated profile. */
+    std::string web_profile;
+    bool web_profile_isolated = false;
     /* The WebView2 user data folder every environment in this host
      * shares, resolved once on first use (webViewUserDataFolder). Empty
      * means WebView2's own default. */
@@ -6215,42 +6221,32 @@ static std::wstring webViewLegacyUserDataFolder() {
 /* WebView2 keeps cookies, storage and caches in its user data folder.
  * Its default sits beside the executable, which is read-only under
  * Program Files and is replaced together with the program files when
- * an installed app updates. Keep it with the app's other per-user data
- * instead: %LOCALAPPDATA%\<bundle id>\WebView2, next to the Data, Cache,
- * State and Logs folders app_dirs resolves from the same variable and
- * bundle id. A folder left beside the executable by an earlier host
- * moves there once. A folder on another volume cannot be renamed there,
- * so that install keeps its old folder; when the move fails for another
- * reason (another process still has the folder open) this launch keeps
- * the old folder and the next launch tries again. Either way no data is
- * lost. Without LOCALAPPDATA or a usable bundle id, WebView2 keeps its
- * default. */
+ * an installed app updates. The app resolves the folder at startup
+ * instead (app_dirs.AppData.web_profile) and hands it over after create:
+ * by default %LOCALAPPDATA%\<bundle id>\WebView2, next to the Data,
+ * Cache, State and Logs folders, or the webview folder of a
+ * --native-data-dir root. For the default folder, one left beside the
+ * executable by an earlier host moves there once. A folder on another
+ * volume cannot be renamed there, so that install keeps its old folder;
+ * when the move fails for another reason (another process still has the
+ * folder open) this launch keeps the old folder and the next launch
+ * tries again. Either way no data is lost. An override root's profile
+ * is its own and never adopts that folder. An empty folder (no
+ * LOCALAPPDATA or no usable bundle id) leaves WebView2 its default. */
 static const wchar_t *webViewUserDataFolder(Host *host) {
     if (host->webview_user_data_folder_resolved) {
         return host->webview_user_data_folder.empty() ? nullptr : host->webview_user_data_folder.c_str();
     }
     host->webview_user_data_folder_resolved = true;
-    const std::string &bundle_id = host->bundle_id;
-    if (bundle_id.empty() || bundle_id == "." || bundle_id == ".." ||
-        bundle_id.find_first_of("\\/:*?\"<>|") != std::string::npos) return nullptr;
-    for (unsigned char ch : bundle_id) {
-        if (ch < 0x20) return nullptr;
-    }
-    const DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
-    if (needed <= 1) return nullptr;
-    std::wstring local_app_data((size_t)needed, L'\0');
-    const DWORD written = GetEnvironmentVariableW(L"LOCALAPPDATA", local_app_data.data(), needed);
-    if (written == 0 || written >= needed) return nullptr;
-    local_app_data.resize(written);
-    while (!local_app_data.empty() && (local_app_data.back() == L'\\' || local_app_data.back() == L'/')) local_app_data.pop_back();
-    if (local_app_data.empty()) return nullptr;
-
-    const std::wstring app_root = local_app_data + L"\\" + widen(bundle_id);
-    const std::wstring folder = app_root + L"\\WebView2";
+    if (host->web_profile.empty()) return nullptr;
+    const std::wstring folder = widen(host->web_profile);
+    const size_t parent_end = folder.find_last_of(L"\\/");
+    if (parent_end == std::wstring::npos || parent_end == 0) return nullptr;
+    const std::wstring app_root = folder.substr(0, parent_end);
     SHCreateDirectoryExW(nullptr, app_root.c_str(), nullptr);
     if (!webViewDirectoryExists(app_root)) return nullptr;
 
-    if (!webViewDirectoryExists(folder)) {
+    if (!host->web_profile_isolated && !webViewDirectoryExists(folder)) {
         const std::wstring legacy = webViewLegacyUserDataFolder();
         if (!legacy.empty() && webViewDirectoryExists(legacy) && !MoveFileExW(legacy.c_str(), folder.c_str(), 0)) {
             const DWORD error = GetLastError();
@@ -8142,6 +8138,15 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.policy_hidden = show_policy == 2;
     host->windows[window.id] = window;
     return host;
+}
+
+/* The web profile resolved at startup (see webViewUserDataFolder). The
+ * platform layer calls this right after create, before any WebView, and
+ * so before the folder is first resolved. */
+void native_sdk_windows_set_web_profile(Host *host, const char *path, size_t path_len, int isolated) {
+    if (!host || host->webview_user_data_folder_resolved) return;
+    host->web_profile = path_len > 0 ? slice(path, path_len) : std::string();
+    host->web_profile_isolated = isolated != 0;
 }
 
 void native_sdk_windows_destroy(Host *host) {

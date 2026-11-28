@@ -430,6 +430,12 @@ void native_sdk_appkit_set_dock_icon_rgba(native_sdk_appkit_host_t *host, const 
 // keeping the pre-masking behavior (icon shown unshaped) as the floor.
 void native_sdk_appkit_set_dock_icon_file(native_sdk_appkit_host_t *host, const char *path, size_t path_len);
 void native_sdk_appkit_configure_updates(native_sdk_appkit_host_t *host, const char *feed_url, size_t feed_url_len, const char *public_key, size_t public_key_len, int check_on_start, const char *target, size_t target_len);
+// The web profile the app resolved at startup (app_dirs.AppData),
+// process-wide and set BEFORE native_sdk_appkit_create (the Chromium host
+// initializes CEF inside create): CEF's root cache path (empty for CEF's
+// default), and for an isolated profile the 16-byte identifier of the
+// WKWebView persistent data store (macOS 14 and later).
+void native_sdk_appkit_set_web_profile(const char *path, size_t path_len, int isolated, const uint8_t *store_identifier);
 int native_sdk_appkit_check_for_updates(native_sdk_appkit_host_t *host, int user_initiated);
 // App-driven updates (src/updater/macos.zig); none of these shows UI.
 int native_sdk_macos_updates_eligibility(void);
