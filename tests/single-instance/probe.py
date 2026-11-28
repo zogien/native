@@ -88,6 +88,20 @@ def exercise(binary, work, bundle_id):
                 wait_for(other_log.exists, other)
                 assert owner.poll() is None
 
+    # Concurrent first opens of a previously absent lock file must converge
+    # on one live primary. A burst can legitimately fill the core's queue.
+    race_root = work / "concurrent"
+    log.unlink()
+    with contextlib.ExitStack() as stack:
+        contenders = [stack.enter_context(primary(binary, work, env, "--native-data-dir",
+                                                   str(race_root), str(i))) for i in range(12)]
+        deadline = time.monotonic() + 15
+        while sum(p.poll() is None for p in contenders) > 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        codes = [p.poll() for p in contenders]
+        assert codes.count(None) == 1 and all(c in (None, 0, 5) for c in codes), codes
+        wait_for(log.exists, next(p for p in contenders if p.poll() is None))
+
     # The lock holder can exit between taking the lock and binding its socket.
     # An already-started secondary must then claim the directory itself.
     log.unlink()

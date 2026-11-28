@@ -395,7 +395,17 @@ const Posix = struct {
     fn claimScope(io: std.Io, gpa: std.mem.Allocator, args: std.process.Args, scope: Scope) !Claim {
         const deadline = clock.monotonicMs() + notify_timeout_ms;
         const addr = try endpoint(io, scope, c.geteuid());
-        const lock = try openLock(io, scope);
+        // On macOS concurrent O_CREAT opens of a new lock file can transiently
+        // return ENOENT even when the parent directory is already open.
+        const lock = while (remainingMs(deadline) != null) {
+            break openLock(io, scope) catch |err| switch (err) {
+                error.FileNotFound => {
+                    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+                    continue;
+                },
+                else => return err,
+            };
+        } else return .{ .secondary = .ipc_failed };
         var held_for_process = false;
         defer if (!held_for_process) lock.close(io);
         var launch_buffer: [max_launch_bytes]u8 = undefined;
