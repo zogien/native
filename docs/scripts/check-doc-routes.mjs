@@ -112,7 +112,7 @@ async function checkRoutes(origin) {
     const slug = relative(contentDir, file).replace(/\\/g, "/").replace(/\.mdx$/, "").replace(/\/index$/, "");
     return { slug, path: `/docs/${slug}`, source: readFileSync(file, "utf8") };
   });
-  assert.equal(pages.length, 102, "Keep the full existing documentation corpus");
+  assert.equal(pages.length, 103, "Keep the full existing documentation corpus");
   const canonicalPaths = new Set(pages.map((page) => page.path));
   const request = (path, options = {}) => fetch(`${origin}${path}`, { redirect: "manual", signal: AbortSignal.timeout(20_000), ...options });
   for (const path of ["/wasm/component-preview.wasm", "/components/button-light.webp", "/Geist-Regular.ttf", "/schemas/app.schema.json"]) {

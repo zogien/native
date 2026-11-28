@@ -150,6 +150,8 @@ Override with `NATIVE_SDK_LOG_DIR`:
 NATIVE_SDK_LOG_DIR=/tmp/my-logs native dev
 ```
 
+A launch with its own [data directory](/docs/data-directory) (`--native-data-dir` or `NATIVE_SDK_DATA_DIR`) logs to that directory's `logs` folder. `NATIVE_SDK_LOG_DIR` still wins over it.
+
 ## Panic capture
 
 The Native SDK captures Zig panics before the default handler runs:
@@ -193,6 +195,10 @@ See also [native doctor](/docs/debugging/doctor) for a full diagnostic tool refe
     <tr>
       <td><code>NATIVE_SDK_LOG_DIR</code></td>
       <td>Override log output directory</td>
+    </tr>
+    <tr>
+      <td><code>NATIVE_SDK_DATA_DIR</code></td>
+      <td>Keep all the app's data under this directory (see <a href="/docs/data-directory">Data Directory</a>); the <code>--native-data-dir</code> flag wins over it</td>
     </tr>
     <tr>
       <td><code>NATIVE_SDK_LOG_FORMAT</code></td>

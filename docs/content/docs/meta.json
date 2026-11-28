@@ -17,6 +17,7 @@
     "fonts",
     "building-components",
     "---Data---",
+    "data-directory",
     "persistence",
     "record-store",
     "sqlite",

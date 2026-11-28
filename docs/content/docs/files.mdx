@@ -59,7 +59,7 @@ Write sinks report cancellation: `Cmd.cancel(key)` ends the sink through `err: c
 
 ## Filesystem permission
 
-Raw paths inside this app's resolved `data`, `config`, `cache`, `state`, `logs`, and `temp` directories need no permission. Any path outside those roots requires:
+Raw paths inside this app's resolved `data`, `config`, `cache`, `state`, `logs`, and `temp` directories need no permission (see [Data Directory](/docs/data-directory) for where they are, and how a launch moves them). Any path outside those roots requires:
 
 ```zig
 .permissions = .{ "filesystem" },
