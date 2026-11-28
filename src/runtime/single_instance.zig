@@ -1,8 +1,5 @@
 //! Single-instance ownership (manifest `single_instance`): one process per
-//! data directory owns the app's data. The
-//! default data directory is keyed by the bundle id, also when a
-//! `--native-data-dir` / `NATIVE_SDK_DATA_DIR` root reaches it; data moved
-//! under any other root is keyed by that root (`Scope`). The first launch to claim ownership becomes the
+//! data directory owns the app's data. The first launch to claim ownership becomes the
 //! primary. A later launch hands its working directory and arguments to
 //! the primary, reports the delivery through its exit code, and exits
 //! before any window exists. The primary's core receives each launch on
@@ -14,7 +11,7 @@
 //! notification endpoint. The kernel retires it with the process, so a
 //! normal exit or a crash leaves no stale ownership. macOS and Linux hold
 //! a kernel lock in the data directory and serve same-user launches on
-//! a Unix socket. A new lock holder can replace a stale socket.
+//! a Unix socket whose address the owner publishes in that lock file.
 const std = @import("std");
 const builtin = @import("builtin");
 const effects = @import("effects.zig");
@@ -94,9 +91,8 @@ pub const Claim = union(enum) {
     standalone: []const u8,
 };
 
-/// What one owner owns: the platform-neutral key material. Each host
-/// derives its endpoint from a scope and the current OS user. Windows
-/// also includes the login session in the pipe name.
+/// The data directory to claim. Windows also uses the scope to name its
+/// per-user, per-session pipe. POSIX identifies the opened lock file.
 pub const Scope = union(enum) {
     /// The default data directory, keyed by the app's bundle id. The
     /// Windows endpoint keeps the name it had before a data directory
@@ -127,20 +123,24 @@ pub const Scope = union(enum) {
     /// digest alike, even for equal strings. The Windows `.app` endpoint
     /// does not use this: it keeps its original name formula.
     pub fn digest(self: Scope, user: []const u8) [digest_len]u8 {
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update("native-sdk.instance\x00");
-        hasher.update(@tagName(self));
-        hasher.update("\x00");
-        hasher.update(switch (self) {
+        return endpointDigest(@tagName(self), switch (self) {
             .app, .root => |value| value,
-        });
-        hasher.update("\x00");
-        hasher.update(user);
-        var full: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-        hasher.final(&full);
-        return full[0..digest_len].*;
+        }, user);
     }
 };
+
+fn endpointDigest(kind: []const u8, key: []const u8, user: []const u8) [Scope.digest_len]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("native-sdk.instance\x00");
+    hasher.update(kind);
+    hasher.update("\x00");
+    hasher.update(key);
+    hasher.update("\x00");
+    hasher.update(user);
+    var full: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    hasher.final(&full);
+    return full[0..Scope.digest_len].*;
+}
 
 /// Claims ownership of `scope`. Only the first call in a process claims;
 /// every later call answers null, so a process that fell back to
@@ -323,6 +323,7 @@ const Posix = struct {
     const c = std.c;
     const Address = c.sockaddr.un;
     const lock_name = ".native-sdk-instance.lock";
+    const Digest = [Scope.digest_len]u8;
 
     fn env(name: [*:0]const u8) ?[]const u8 {
         return std.mem.span(c.getenv(name) orelse return null);
@@ -347,17 +348,37 @@ const Posix = struct {
             .NOFOLLOW = true,
             .NONBLOCK = true,
         }, 0o600);
-        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-        errdefer file.close(io);
-        if ((try file.stat(io)).kind != .file) return error.InvalidLockFile;
-        return file;
+        return .{ .handle = fd, .flags = .{ .nonblocking = true } };
     }
 
-    fn socketAddress(dir: []const u8, scope: Scope, uid: c.uid_t) !Address {
+    fn descriptorStat(fd: c_int) !if (builtin.os.tag == .linux) std.os.linux.Statx else c.Stat {
+        if (builtin.os.tag == .linux) {
+            const linux = std.os.linux;
+            var stat: linux.Statx = undefined;
+            const fields: linux.STATX = .{ .TYPE = true, .MODE = true, .UID = true, .INO = true, .NLINK = true };
+            if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, fields, &stat)) != .SUCCESS) return error.StatFailed;
+            return stat;
+        }
+        var stat: c.Stat = undefined;
+        if (c.fstat(fd, &stat) != 0) return error.StatFailed;
+        return stat;
+    }
+
+    fn lockDigest(lock: std.Io.File, uid: c.uid_t) !Digest {
+        const stat = try descriptorStat(lock.handle);
+        if (!std.posix.S.ISREG(stat.mode) or stat.nlink != 1 or stat.uid != uid or stat.mode & 0o077 != 0)
+            return error.InvalidLockFile;
+        const device: u64 = if (builtin.os.tag == .linux)
+            @as(u64, stat.dev_major) << 32 | stat.dev_minor
+        else
+            @as(u32, @bitCast(stat.dev));
+        const key = [2]u64{ device, stat.ino };
+        return endpointDigest("lock", std.mem.asBytes(&key), std.mem.asBytes(&uid));
+    }
+
+    fn socketAddress(dir: []const u8, digest: Digest) !Address {
         var addr: Address = .{ .path = @splat(0) };
-        _ = try std.fmt.bufPrintZ(&addr.path, "{s}/native-sdk-{x}.sock", .{
-            std.mem.trimEnd(u8, dir, "/"), &scope.digest(std.mem.asBytes(&uid)),
-        });
+        _ = try std.fmt.bufPrintZ(&addr.path, "{s}/native-sdk-{x}.sock", .{ std.mem.trimEnd(u8, dir, "/"), &digest });
         return addr;
     }
 
@@ -365,20 +386,14 @@ const Posix = struct {
         if (!std.fs.path.isAbsolute(path)) return false;
         var dir = std.Io.Dir.cwd().openDir(io, path, .{ .follow_symlinks = false }) catch return false;
         defer dir.close(io);
-        if (builtin.os.tag == .linux) {
-            const linux = std.os.linux;
-            var stat: linux.Statx = undefined;
-            return linux.errno(linux.statx(dir.handle, "", linux.AT.EMPTY_PATH, .{ .MODE = true, .UID = true }, &stat)) == .SUCCESS and
-                stat.uid == uid and stat.mode & 0o777 == 0o700;
-        }
-        var stat: c.Stat = undefined;
-        return c.fstat(dir.handle, &stat) == 0 and stat.uid == uid and stat.mode & 0o777 == 0o700;
+        const stat = descriptorStat(dir.handle) catch return false;
+        return stat.uid == uid and stat.mode & 0o777 == 0o700;
     }
 
-    fn endpoint(io: std.Io, scope: Scope, uid: c.uid_t) !Address {
+    fn endpoint(io: std.Io, digest: Digest, uid: c.uid_t) !Address {
         if (env(if (builtin.os.tag == .macos) "TMPDIR" else "XDG_RUNTIME_DIR")) |path| {
             if (privateDirectory(io, path, uid)) {
-                if (socketAddress(path, scope, uid)) |addr| return addr else |_| {}
+                if (socketAddress(path, digest)) |addr| return addr else |_| {}
             }
         }
         // The environment can be absent, shared, or longer than sun_path.
@@ -389,12 +404,24 @@ const Posix = struct {
             else => return err,
         };
         if (!privateDirectory(io, path, uid)) return error.UnsafeRuntimeDirectory;
-        return socketAddress(path, scope, uid);
+        return socketAddress(path, digest);
+    }
+
+    /// Only accept a complete record for this lock, including after a profile
+    /// was copied or the previous owner's runtime directory was removed.
+    fn publishedEndpoint(io: std.Io, lock: std.Io.File, digest: Digest, uid: c.uid_t) !?Address {
+        var record: Address = .{ .path = undefined };
+        if (try lock.readPositional(io, &.{&record.path}, 0) != record.path.len) return null;
+        const path = std.mem.sliceTo(&record.path, 0);
+        const dir = std.fs.path.dirname(path) orelse return null;
+        const addr = socketAddress(dir, digest) catch return null;
+        if (!std.mem.eql(u8, &addr.path, &record.path) or !privateDirectory(io, dir, uid)) return null;
+        return addr;
     }
 
     fn claimScope(io: std.Io, gpa: std.mem.Allocator, args: std.process.Args, scope: Scope) !Claim {
         const deadline = clock.monotonicMs() + notify_timeout_ms;
-        const addr = try endpoint(io, scope, c.geteuid());
+        const uid = c.geteuid();
         // On macOS concurrent O_CREAT opens of a new lock file can transiently
         // return ENOENT even when the parent directory is already open.
         const lock = while (remainingMs(deadline) != null) {
@@ -408,12 +435,22 @@ const Posix = struct {
         } else return .{ .secondary = .ipc_failed };
         var held_for_process = false;
         defer if (!held_for_process) lock.close(io);
+        const digest = try lockDigest(lock, uid);
         var launch_buffer: [max_launch_bytes]u8 = undefined;
         var launch: ?[]const u8 = null;
         while (remainingMs(deadline) != null) {
             if (try lock.tryLock(io, .exclusive)) {
+                const addr = try endpoint(io, digest, uid);
+                if (try publishedEndpoint(io, lock, digest, uid)) |old| {
+                    // A retired runtime directory need not remain writable.
+                    if (!std.mem.eql(u8, &old.path, &addr.path)) removeStaleSocket(io, &old) catch {};
+                }
+                // Publish before binding so a crash cannot strand an unrecorded socket.
+                // Contenders retry a missing listener while the kernel lock is held.
+                try lock.writePositionalAll(io, &addr.path, 0);
                 const server = try listen(io, &addr);
                 errdefer _ = c.close(server);
+                errdefer std.Io.Dir.cwd().deleteFile(io, std.mem.sliceTo(&addr.path, 0)) catch {};
                 const listener = try std.Thread.spawn(.{}, listenMain, .{server});
                 listener.detach();
                 // Never unlink the lock file: a waiting process already has
@@ -425,10 +462,13 @@ const Posix = struct {
                 return .primary;
             }
             if (launch == null) launch = encodeCurrentLaunch(io, gpa, args, &launch_buffer) orelse return .{ .secondary = .too_large };
-            switch (notifyOwner(&addr, launch.?, deadline)) {
-                .result => |result| return .{ .secondary = result },
-                .vanished => try std.Io.sleep(io, .fromMilliseconds(10), .awake),
+            if (try publishedEndpoint(io, lock, digest, uid)) |addr| {
+                switch (notifyOwner(&addr, launch.?, deadline)) {
+                    .result => |result| return .{ .secondary = result },
+                    .vanished => {},
+                }
             }
+            try std.Io.sleep(io, .fromMilliseconds(10), .awake);
         }
         return .{ .secondary = .not_responding };
     }
@@ -453,17 +493,21 @@ const Posix = struct {
     }
 
     /// Called under the data lock. Only its holder may replace a stale socket.
-    fn listen(io: std.Io, addr: *const Address) !c_int {
+    fn removeStaleSocket(io: std.Io, addr: *const Address) !void {
         const path = std.mem.sliceTo(&addr.path, 0);
         const cwd = std.Io.Dir.cwd();
         if (cwd.statFile(io, path, .{ .follow_symlinks = false })) |stat| {
             if (stat.kind != .unix_domain_socket) return error.UnexpectedEndpoint;
             try cwd.deleteFile(io, path);
         } else |err| if (err != error.FileNotFound) return err;
+    }
+
+    fn listen(io: std.Io, addr: *const Address) !c_int {
+        try removeStaleSocket(io, addr);
         const fd = try newSocket(false);
         errdefer _ = c.close(fd);
         if (c.bind(fd, @ptrCast(addr), @sizeOf(Address)) != 0) return error.BindFailed;
-        errdefer cwd.deleteFile(io, path) catch {};
+        errdefer std.Io.Dir.cwd().deleteFile(io, std.mem.sliceTo(&addr.path, 0)) catch {};
         if (c.chmod(@ptrCast(&addr.path), 0o600) != 0) return error.SocketFailed;
         if (c.listen(fd, 16) != 0) return error.SocketFailed;
         return fd;
@@ -1361,16 +1405,17 @@ test "POSIX socket names fit sun_path and never embed the data root" {
     if (comptime !is_posix_desktop) return error.SkipZigTest;
     const scope: Scope = .{ .root = &([_]u8{'x'} ** app_data.max_root_bytes) };
     const uid = Posix.c.geteuid();
-    const addr = try Posix.socketAddress("/tmp/", scope, uid);
+    const digest = scope.digest(std.mem.asBytes(&uid));
+    const addr = try Posix.socketAddress("/tmp/", digest);
     const name = std.mem.sliceTo(&addr.path, 0);
     try testing.expect(std.mem.startsWith(u8, name, "/tmp/native-sdk-"));
     try testing.expectEqual("/tmp/native-sdk-.sock".len + 2 * Scope.digest_len, name.len);
     const room = addr.path.len - 1 - (name.len - "/tmp".len);
     var dir: [108]u8 = @splat('x');
     dir[0] = '/';
-    const longest = try Posix.socketAddress(dir[0..room], scope, uid);
+    const longest = try Posix.socketAddress(dir[0..room], digest);
     try testing.expectEqual(longest.path.len - 1, std.mem.sliceTo(&longest.path, 0).len);
-    try testing.expectError(error.NoSpaceLeft, Posix.socketAddress(dir[0 .. room + 1], scope, uid));
+    try testing.expectError(error.NoSpaceLeft, Posix.socketAddress(dir[0 .. room + 1], digest));
 }
 
 test "POSIX locks survive contention and release on close without unlinking" {
@@ -1394,7 +1439,7 @@ test "POSIX locks survive contention and release on close without unlinking" {
     try testing.expect(try second.tryLock(testing.io, .exclusive));
 }
 
-test "POSIX verifies private directory ownership and socket permissions" {
+test "POSIX verifies directory ownership, published address and socket permissions" {
     if (comptime !is_posix_desktop) return error.SkipZigTest;
     const io = testing.io;
     const uid = Posix.c.geteuid();
@@ -1404,7 +1449,17 @@ test "POSIX verifies private directory ownership and socket permissions" {
     defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
     try testing.expect(Posix.privateDirectory(io, path, uid));
     try testing.expect(!Posix.privateDirectory(io, path, uid ^ 1));
-    const addr = try Posix.socketAddress(path, .{ .app = "permissions" }, uid);
+    const lock = try Posix.openLock(io, .{ .root = path });
+    defer lock.close(io);
+    const digest = try Posix.lockDigest(lock, uid);
+    const addr = try Posix.socketAddress(path, digest);
+    try lock.writePositionalAll(io, addr.path[0..1], 0);
+    try testing.expect(try Posix.publishedEndpoint(io, lock, digest, uid) == null);
+    try lock.writePositionalAll(io, &addr.path, 0);
+    const published = (try Posix.publishedEndpoint(io, lock, digest, uid)).?;
+    try testing.expectEqualSlices(u8, &addr.path, &published.path);
+    try testing.expect(try Posix.publishedEndpoint(io, lock, @splat(1), uid) == null);
+    try testing.expect(try Posix.publishedEndpoint(io, lock, digest, uid ^ 1) == null);
     const fd = try Posix.listen(io, &addr);
     defer _ = Posix.c.close(fd);
     const stat = try std.Io.Dir.cwd().statFile(io, std.mem.sliceTo(&addr.path, 0), .{});

@@ -40,6 +40,70 @@ def secondary(binary, cwd, env, *args, expect=0):
     assert code == expect, f"expected exit {expect}, got {code}"
 
 
+@contextlib.contextmanager
+def separate_session(env):
+    if sys.platform != "linux":
+        yield env
+        return
+    # Two GTK primaries with the same bundle id need independent session buses.
+    with subprocess.Popen(["dbus-daemon", "--session", "--nofork", "--print-address=1"],
+                          stdout=subprocess.PIPE, text=True) as bus:
+        try:
+            address = bus.stdout.readline().strip()
+            assert address, "private D-Bus session failed to start"
+            yield dict(env, DBUS_SESSION_BUS_ADDRESS=address)
+        finally:
+            bus.terminate()
+
+
+def exercise_routing(binary, work, *, distinct_runtime):
+    work.mkdir()
+    cwd = work / "caller"
+    cwd.mkdir()
+    logs = [work / "a.bin", work / "b.bin"]
+    envs = []
+    for name, log in zip(("a", "b"), logs):
+        home = work / f"home-{name}"
+        home.mkdir()
+        runtime = work / (f"ipc-{name}" if distinct_runtime else "ipc")
+        runtime.mkdir(mode=0o700, exist_ok=True)
+        env = dict(os.environ, HOME=str(home), TMPDIR=str(runtime), XDG_RUNTIME_DIR=str(runtime),
+                   LAUNCH_PROBE_LOG=str(log))
+        env.pop("XDG_DATA_HOME", None)
+        env.pop("NATIVE_SDK_DATA_DIR", None)
+        if distinct_runtime:
+            env["NATIVE_SDK_DATA_DIR"] = str(work / f"root-{name}")
+        envs.append(env)
+
+    def payload(arg):
+        return os.fsencode(cwd.resolve()) + b"\0" + os.fsencode(arg)
+
+    a, b = envs
+    with primary(binary, work, a) as first:
+        wait_for(logs[0].exists, first)
+        assert any(Path(a["TMPDIR"]).glob("*.sock"))
+        secondary(binary, cwd, a, "control-a")
+        wait_for(lambda: logs[0].read_bytes() == payload("control-a"), first)
+        with separate_session(b) as b, primary(binary, work, b) as second:
+            wait_for(logs[1].exists, second)
+            assert any(Path(b["TMPDIR"]).glob("*.sock"))
+            secondary(binary, cwd, b, "control-b")
+            wait_for(lambda: logs[1].read_bytes() == payload("control-b"), second)
+            caller = dict(a, TMPDIR=b["TMPDIR"], XDG_RUNTIME_DIR=b["XDG_RUNTIME_DIR"])
+            code = subprocess.run([binary, "intended-for-a"], cwd=cwd, env=caller, timeout=15).returncode
+            if code == 0:
+                wait_for(lambda: any(log.read_bytes() == payload("intended-for-a") for log in logs), first)
+            observed = [log.read_bytes() for log in logs]
+            print(f"{work.name}: exit={code}, A={observed[0]!r}, B={observed[1]!r}", flush=True)
+            assert (code, observed) == (0, [payload("intended-for-a"), payload("control-b")])
+            caller = dict(b, TMPDIR=a["TMPDIR"], XDG_RUNTIME_DIR=a["XDG_RUNTIME_DIR"])
+            secondary(binary, cwd, caller, "intended-for-b")
+            wait_for(lambda: logs[1].read_bytes() == payload("intended-for-b"), second)
+            assert logs[0].read_bytes() == payload("intended-for-a")
+            print(f"{work.name} reverse: exit=0, A={logs[0].read_bytes()!r}, B={logs[1].read_bytes()!r}", flush=True)
+            assert first.poll() is None and second.poll() is None
+
+
 def exercise(binary, work, bundle_id):
     runtime = work / "ipc"
     runtime.mkdir(mode=0o700)
@@ -145,6 +209,8 @@ def main():
         (app / "src/app.native").write_text("<column><text>Launch probe</text></column>\n")
         subprocess.run([CLI, "build"], cwd=app, check=True)
         exercise(app / "zig-out/bin/launch-probe", work, config["id"])
+        exercise_routing(app / "zig-out/bin/launch-probe", work / "different-runtime", distinct_runtime=True)
+        exercise_routing(app / "zig-out/bin/launch-probe", work / "different-home", distinct_runtime=False)
 
 
 if __name__ == "__main__":
