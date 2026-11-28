@@ -438,13 +438,20 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
 
     const info_plist = try macosInfoPlist(allocator, options.metadata, executable_name);
     defer allocator.free(info_plist);
-    try writeFile(package_dir, io, "Contents/Info.plist", info_plist);
+    const plan = resolveIconPlan(options.metadata);
     try writeFile(package_dir, io, "Contents/PkgInfo", "APPL????");
     try writeFile(package_dir, io, "Contents/Resources/README.txt", "Unsigned local Native SDK macOS app bundle.\n");
-    const assets_output = try macosAssetOutputPath(allocator, options);
-    defer allocator.free(assets_output);
-    const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
-    try copyMacosIcon(allocator, io, package_dir, options);
+    const bundle_stats = if (plan.composer) |path|
+        try bundleComposerResources(allocator, io, package_dir, options, path, plan.prebuilt_icns, info_plist)
+    else blk: {
+        const assets_output = try macosAssetOutputPath(allocator, options.output_path, options);
+        defer allocator.free(assets_output);
+        try removePreviousComposerCatalog(allocator, io, package_dir);
+        try writeFile(package_dir, io, "Contents/Info.plist", info_plist);
+        const stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
+        try copyMacosIcon(allocator, io, package_dir, plan);
+        break :blk stats;
+    };
     try copyMacosDocumentIcons(allocator, io, package_dir, options.metadata);
     try writeReport(allocator, package_dir, io, "Contents/Resources/package-manifest.zon", options, executable_name, bundle_stats.asset_count, null);
     if (options.web_engine == .chromium) {
@@ -831,12 +838,12 @@ fn assetOutputPath(allocator: std.mem.Allocator, output_path: []const u8, resour
 /// Resources. An absolute or parent-escaping --assets directory has no
 /// app-relative meaning a packaged process could resolve, so it keeps the
 /// flat Resources layout.
-fn macosAssetOutputPath(allocator: std.mem.Allocator, options: PackageOptions) ![]const u8 {
-    if (options.frontend != null) return assetOutputPath(allocator, options.output_path, "Contents/Resources", options);
+fn macosAssetOutputPath(allocator: std.mem.Allocator, output_path: []const u8, options: PackageOptions) ![]const u8 {
+    if (options.frontend != null) return assetOutputPath(allocator, output_path, "Contents/Resources", options);
     if (appRelativeAssetSubpath(options.assets_dir)) |subpath| {
-        return std.fs.path.join(allocator, &.{ options.output_path, "Contents/Resources", subpath });
+        return std.fs.path.join(allocator, &.{ output_path, "Contents/Resources", subpath });
     }
-    return std.fs.path.join(allocator, &.{ options.output_path, "Contents/Resources" });
+    return std.fs.path.join(allocator, &.{ output_path, "Contents/Resources" });
 }
 
 /// Where a Windows or Linux artifact carries the app's assets: the macOS
@@ -868,8 +875,37 @@ fn appRelativeAssetSubpath(assets_dir: []const u8) ?[]const u8 {
     return assets_dir;
 }
 
+const macos_minimum_version = "11.0";
+const macos_catalog_icon = "AppIcon";
+
+const macos_catalog_key = "  <key>CFBundleIconName</key>\n  <string>" ++ macos_catalog_icon ++ "</string>\n";
+
+/// A package may reuse an existing .app. Identify the packager's catalog
+/// before replacing Info.plist, so an unrelated Assets.car survives and
+/// the current asset tree can still supply its own catalog afterward.
+fn removePreviousComposerCatalog(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !void {
+    const catalog = "Contents/Resources/Assets.car";
+    dir.access(io, catalog, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    const previous_plist = dir.readFileAlloc(io, "Contents/Info.plist", allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer allocator.free(previous_plist);
+    if (std.mem.indexOf(u8, previous_plist, macos_catalog_key) != null) {
+        dir.deleteFile(io, catalog) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+}
+
 fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata, executable_name: []const u8) ![]const u8 {
-    const icon_name = macosIconFile(metadata);
+    const plan = resolveIconPlan(metadata);
+    const icon_name = if (plan.prebuilt_icns) |path| std.fs.path.basename(path) else "AppIcon.icns";
+    const catalog_key = if (plan.composer != null) macos_catalog_key else "";
     const bundle_id = try xmlEscapeAlloc(allocator, metadata.id);
     defer allocator.free(bundle_id);
     const display_name = try xmlEscapeAlloc(allocator, metadata.displayName());
@@ -918,10 +954,10 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\  <string>{s}</string>
         \\  <key>CFBundleIconFile</key>
         \\  <string>{s}</string>
-        \\  <key>CFBundlePackageType</key>
+        \\{s}  <key>CFBundlePackageType</key>
         \\  <string>APPL</string>
         \\  <key>LSMinimumSystemVersion</key>
-        \\  <string>11.0</string>
+        \\  <string>{s}</string>
         \\  <key>CFBundleShortVersionString</key>
         \\  <string>{s}</string>
         \\  <key>CFBundleVersion</key>
@@ -930,7 +966,7 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\</dict>
         \\</plist>
         \\
-    , .{ bundle_id, display_name, display_name, executable, icon, version, version, launch_policy, about_line, privacy_descriptions, document_types, url_types });
+    , .{ bundle_id, display_name, display_name, executable, icon, catalog_key, macos_minimum_version, version, version, launch_policy, about_line, privacy_descriptions, document_types, url_types });
 }
 
 fn metadataHasPermission(metadata: manifest_tool.Metadata, name: []const u8) bool {
@@ -1002,13 +1038,14 @@ fn artifactReadme(target: PackageTarget) []const u8 {
 // in app.zon `.icons`) generates every platform's artifacts through the
 // built-in pipeline (`app_icon`). A prebuilt container in `.icons` always
 // wins untouched for its platform: `.icns` on macOS, `.ico` on Windows.
-// Precedence on macOS: explicit .icns > generated-from-image > the SDK
-// default icon.
+// On macOS a Composer source adds a layered asset catalog and supplies
+// the legacy .icns unless the app has provided its own.
 // ---------------------------------------------------------------------------
 
 /// How `.icons` resolves for packaging: at most one prebuilt container
 /// per platform plus at most one generatable source (first of each wins).
 const IconPlan = struct {
+    composer: ?[]const u8 = null,
     prebuilt_icns: ?[]const u8 = null,
     prebuilt_ico: ?[]const u8 = null,
     source_path: ?[]const u8 = null,
@@ -1018,7 +1055,9 @@ const IconPlan = struct {
 fn resolveIconPlan(metadata: manifest_tool.Metadata) IconPlan {
     var plan: IconPlan = .{};
     for (metadata.icons) |path| {
-        if (app_icon_tool.pathHasExtension(path, ".icns")) {
+        if (app_icon_tool.pathHasExtension(path, ".icon")) {
+            if (plan.composer == null) plan.composer = path;
+        } else if (app_icon_tool.pathHasExtension(path, ".icns")) {
             if (plan.prebuilt_icns == null) plan.prebuilt_icns = path;
         } else if (app_icon_tool.pathHasExtension(path, ".ico")) {
             if (plan.prebuilt_ico == null) plan.prebuilt_ico = path;
@@ -1065,16 +1104,127 @@ fn loadIconSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, ki
     }
 }
 
-fn macosIconFile(metadata: manifest_tool.Metadata) []const u8 {
-    // Only a prebuilt .icns keeps its own name; generated and default
-    // icons always ship as AppIcon.icns.
-    const plan = resolveIconPlan(metadata);
-    if (plan.prebuilt_icns) |path| return std.fs.path.basename(path);
-    return "AppIcon.icns";
+fn bundleComposerResources(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    package_dir: std.Io.Dir,
+    options: PackageOptions,
+    path: []const u8,
+    prebuilt: ?[]const u8,
+    info_plist: []const u8,
+) !assets_tool.BundleStats {
+    if (@import("builtin").os.tag != .macos) {
+        std.debug.print("error: packaging {s} for macOS requires a macOS host with Xcode 26 or later\n", .{path});
+        return error.IconComposerRequiresMacos;
+    }
+    const source = try std.fs.path.join(allocator, &.{ options.project_dir, path });
+    defer allocator.free(source);
+    const legacy = if (prebuilt) |icns| try std.fs.path.join(allocator, &.{ options.project_dir, icns }) else "";
+    defer if (prebuilt != null) allocator.free(legacy);
+
+    // Keep the old plist and its resources together until actool has produced
+    // both new files. Stage on the bundle volume so publication uses renames.
+    var nonce: u64 = undefined;
+    io.random(std.mem.asBytes(&nonce));
+    var name_buffer: [48]u8 = undefined;
+    const temp = try std.fmt.bufPrint(&name_buffer, "Contents/.native-icon-{x}", .{nonce});
+    try package_dir.createDir(io, temp, .default_dir);
+    var remove_stage = true;
+    defer if (remove_stage) package_dir.deleteTree(io, temp) catch {};
+    var stage = try package_dir.openDir(io, temp, .{});
+    defer stage.close(io);
+    try stage.writeFile(io, .{ .sub_path = "Info.plist", .data = info_plist });
+    const destination = try package_dir.realPathFileAlloc(io, temp, allocator);
+    defer allocator.free(destination);
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/sh", "-c", @embedFile("compile_macos_icon.sh"), "compile-macos-icon", source, destination, macos_minimum_version, legacy, macos_catalog_icon },
+        .environ_map = options.env_map,
+        .stdin = .ignore,
+    });
+    const term = try child.wait(io);
+    if (term != .exited or term.exited != 0) return error.IconComposerFailed;
+
+    // Absolute --assets paths put user files at the root of Resources. Resolve
+    // collisions in staging, including when the old plist uses a different ICNS.
+    const assets_output = try macosAssetOutputPath(allocator, destination, options);
+    defer allocator.free(assets_output);
+    const stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
+    var incoming = try stage.openDir(io, "Contents/Resources", .{ .iterate = true });
+    defer incoming.close(io);
+    const icns = if (prebuilt) |file| std.fs.path.basename(file) else "AppIcon.icns";
+    try stage.rename(icns, incoming, icns, io);
+    try stage.rename("Assets.car", incoming, "Assets.car", io);
+    try publishComposerResources(allocator, io, package_dir, stage, incoming, destination, &remove_stage);
+    return stats;
 }
 
-fn copyMacosIcon(allocator: std.mem.Allocator, io: std.Io, package_dir: std.Io.Dir, options: PackageOptions) !void {
-    const plan = resolveIconPlan(options.metadata);
+fn publishComposerResources(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    package_dir: std.Io.Dir,
+    stage: std.Io.Dir,
+    incoming: std.Io.Dir,
+    stage_path: []const u8,
+    remove_stage: *bool,
+) !void {
+    var resources = try package_dir.openDir(io, "Contents/Resources", .{});
+    defer resources.close(io);
+    try stage.createDir(io, "previous", .default_dir);
+    var previous = try stage.openDir(io, "previous", .{});
+    defer previous.close(io);
+
+    // Collect the paths before moving files out of the directory being walked.
+    const File = struct { path: []const u8, saved: bool = false };
+    var files: std.ArrayList(File) = .empty;
+    defer {
+        for (files.items) |file| allocator.free(file.path);
+        files.deinit(allocator);
+    }
+    var walker = try incoming.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        try files.ensureUnusedCapacity(allocator, 1);
+        files.appendAssumeCapacity(.{ .path = try allocator.dupe(u8, entry.path) });
+    }
+
+    var touched: usize = 0;
+    errdefer while (touched != 0) {
+        touched -= 1;
+        const file = files.items[touched];
+        if (file.saved) {
+            previous.rename(file.path, resources, file.path, io) catch |err| {
+                remove_stage.* = false;
+                std.debug.print("error: restoring {s} ({t}) - recover it from {s}/previous/{s}\n", .{ file.path, err, stage_path, file.path });
+            };
+        } else {
+            resources.deleteFile(io, file.path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => std.debug.print("error: removing {s}: {t}\n", .{ file.path, err }),
+            };
+        }
+    };
+    for (files.items) |*file| {
+        if (std.fs.path.dirname(file.path)) |parent| {
+            try resources.createDirPath(io, parent);
+            try previous.createDirPath(io, parent);
+        }
+        const stat = resources.statFile(io, file.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (stat) |original| {
+            if (original.kind == .directory) return error.IsDir;
+            try resources.rename(file.path, previous, file.path, io);
+            file.saved = true;
+        }
+        touched += 1;
+        try incoming.rename(file.path, resources, file.path, io);
+    }
+    try stage.rename("Info.plist", package_dir, "Contents/Info.plist", io);
+}
+
+fn copyMacosIcon(allocator: std.mem.Allocator, io: std.Io, package_dir: std.Io.Dir, plan: IconPlan) !void {
     if (plan.prebuilt_icns) |path| {
         // Art-directed prebuilt .icns wins untouched.
         try copyMacosResourceIcon(allocator, io, package_dir, path, "configured app icon");
@@ -3323,6 +3473,34 @@ test "artifact names include metadata target and optimize mode" {
     try std.testing.expectEqualStrings("demo-1.2.3-macos-Debug.app", try artifactName(&buffer, metadata, .macos, "Debug"));
 }
 
+test "Composer plan keeps the first icon of each kind and declares both macOS icon resources" {
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.app",
+        .name = "demo",
+        .version = "1.0.0",
+        .icons = &.{ "shared.svg", "art/R&D.icon", "second.icon", "old.icns", "second.icns", "win.ico", "second.png" },
+    };
+    const plan = resolveIconPlan(metadata);
+    try std.testing.expectEqualStrings("art/R&D.icon", plan.composer.?);
+    try std.testing.expectEqualStrings("old.icns", plan.prebuilt_icns.?);
+    try std.testing.expectEqualStrings("shared.svg", plan.source_path.?);
+    try std.testing.expectEqual(app_icon_tool.SourceKind.svg, plan.source_kind);
+    try std.testing.expectEqualStrings("win.ico", plan.prebuilt_ico.?);
+
+    const plist = try macosInfoPlist(std.testing.allocator, metadata, metadata.name);
+    defer std.testing.allocator.free(plist);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "<key>CFBundleIconName</key>\n  <string>AppIcon</string>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "<key>CFBundleIconFile</key>\n  <string>old.icns</string>") != null);
+}
+
+test "Composer packaging requires macOS before trying actool" {
+    if (@import("builtin").os.tag == .macos) return error.SkipZigTest;
+    try std.testing.expectError(error.IconComposerRequiresMacos, bundleComposerResources(std.testing.allocator, std.testing.io, .cwd(), .{
+        .metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .icons = &.{"Beacon.icon"} },
+        .output_path = "Demo.app",
+    }, "Beacon.icon", null, ""));
+}
+
 test "plist template includes identity executable and version" {
     const metadata: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .display_name = "Demo App", .description = "A demo of the packaging pipeline.", .version = "1.2.3", .icons = &.{"assets/icon.icns"} };
     const plist = try macosInfoPlist(std.testing.allocator, metadata, "demo");
@@ -3339,6 +3517,7 @@ test "plist template includes identity executable and version" {
     try std.testing.expect(std.mem.indexOf(u8, plist, "icon.icns") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "LSMinimumSystemVersion") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "11.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "CFBundleIconName") == null);
     // The manifest description reaches the About panel's footer key.
     try std.testing.expect(std.mem.indexOf(u8, plist, "NSHumanReadableCopyright") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "A demo of the packaging pipeline.") != null);

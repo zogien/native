@@ -72,6 +72,17 @@ jobs:
       - name: Determinism fences fire (negative control)
         run: tests/compiled-core/fence_check.sh .zig-cache/fence-check
 
+  macos-icon-composer:
+    name: macOS Icon Composer
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - run: zig build cli
+      - run: bash .github/scripts/macos-icon-composer.sh
+
   macos-webview:
     name: macOS WebView
     # ScriptC 0.2.0's native codegen helper requires macOS 15 or newer.

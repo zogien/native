@@ -1,0 +1,11 @@
+{
+  "fill": { "solid": "srgb:0.08,0.16,0.36,1.0" },
+  "groups": [
+    {
+      "layers": [
+        { "image-name": "Beacon.svg", "name": "Beacon" }
+      ]
+    }
+  ],
+  "supported-platforms": { "squares": ["macOS"] }
+}
