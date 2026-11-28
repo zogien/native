@@ -1394,6 +1394,29 @@ pub const ViewInfo = struct {
 /// Who drives updates on macOS (the manifest's `updates.mode`).
 pub const UpdateMode = enum { host, app };
 
+/// Where the web engine keeps cookies, storage and caches, as resolved at
+/// startup (`app_dirs.AppData.web_profile`).
+pub const WebProfile = union(enum) {
+    /// No startup resolution filled this AppInfo (an app-owned runner that
+    /// predates it, or direct embedding): the platform layer derives the
+    /// platform default itself, so such apps keep their folders.
+    unresolved,
+    /// The platform default: a folder the SDK names (WebView2, macOS CEF),
+    /// or empty for the engine's own default store. WebView2 may adopt the
+    /// legacy `<exe>.WebView2` folder into it.
+    default: []const u8,
+    /// A data-directory override's `webview` folder: a profile of its own,
+    /// never shared with the default or another root, and never adopting
+    /// legacy data.
+    isolated: []const u8,
+
+    /// The profile an `app_dirs.AppData` resolved: `isOverride()` and
+    /// `web_profile`.
+    pub fn resolved(is_override: bool, path: []const u8) WebProfile {
+        return if (is_override) .{ .isolated = path } else .{ .default = path };
+    }
+};
+
 pub const AppInfo = struct {
     app_name: []const u8 = "native-sdk",
     /// The human-facing application name (app.zon `display_name`) the
@@ -1440,6 +1463,9 @@ pub const AppInfo = struct {
     /// `.app`: the app drives updates through `native-sdk.updates` and the
     /// macOS host shows no update UI of its own.
     update_mode: UpdateMode = .host,
+    /// The web engine profile; hosts receive it right after create, before
+    /// any WebView exists.
+    web_profile: WebProfile = .unresolved,
     main_window: WindowOptions = .{},
     windows: []const WindowOptions = &.{},
 

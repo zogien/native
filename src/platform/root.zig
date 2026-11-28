@@ -128,6 +128,7 @@ pub const Cursor = types.Cursor;
 pub const ViewInfo = types.ViewInfo;
 pub const AppInfo = types.AppInfo;
 pub const UpdateMode = types.UpdateMode;
+pub const WebProfile = types.WebProfile;
 pub const Surface = types.Surface;
 pub const BridgeMessage = types.BridgeMessage;
 pub const ViewFocusEvent = types.ViewFocusEvent;

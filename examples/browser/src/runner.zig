@@ -10,6 +10,10 @@ pub const RunOptions = struct {
     window_title: []const u8 = "",
     bundle_id: []const u8,
     icon_path: []const u8 = "assets/icon.png",
+    /// The app's directories, resolved once by `runWithOptions`
+    /// (`--native-data-dir` / NATIVE_SDK_DATA_DIR, else the platform
+    /// conventions). Every path the runner uses comes from it.
+    app_data: ?*const native_sdk.app_dirs.AppData = null,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     security: native_sdk.SecurityPolicy = .{},
@@ -33,6 +37,7 @@ pub const RunOptions = struct {
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
+            .web_profile = if (self.app_data) |data| .resolved(data.isOverride(), data.web_profile) else .unresolved,
         };
         const windows = manifestWindowOptions(buffers);
         if (windows.len > 0) {
@@ -179,14 +184,24 @@ fn shortcutModifiers(comptime shortcut: anytype) native_sdk.ShortcutModifiers {
 }
 
 pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
+    // The one resolution of the app's directories: the platform
+    // conventions, or a `--native-data-dir` / NATIVE_SDK_DATA_DIR root
+    // (an unusable one ends the launch here with exit code 2).
+    const data = native_sdk.app_dirs.app_data.forLaunch(init, .{
+        .bundle_id = options.bundle_id,
+        .app_name = options.app_name,
+        .web_engine = if (comptime std.mem.eql(u8, build_options.web_engine, "chromium")) .chromium else .system,
+    });
+    var resolved_options = options;
+    resolved_options.app_data = &data;
     if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
-        try runMacos(app, options, init);
+        try runMacos(app, resolved_options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
-        try runLinux(app, options, init);
+        try runLinux(app, resolved_options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
-        try runWindows(app, options, init);
+        try runWindows(app, resolved_options, init);
     } else {
-        try runNull(app, options, init);
+        try runNull(app, resolved_options, init);
     }
 }
 

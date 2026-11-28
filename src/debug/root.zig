@@ -101,12 +101,27 @@ pub fn setupLogging(io: std.Io, env_map: *std.process.Environ.Map, app_name: []c
     };
 }
 
+/// Logging into the app's resolved logs directory (`AppData.logs`, null
+/// when the platform convention could not resolve it). `NATIVE_SDK_LOG_DIR`
+/// still wins over it, data-directory override or not.
+pub fn setupLoggingIn(io: std.Io, env_map: *std.process.Environ.Map, logs_dir: ?[]const u8, buffers: *LogPathBuffers) !LogSetup {
+    _ = io;
+    const paths = try logPathsIn(buffers, env_map.get("NATIVE_SDK_LOG_DIR") orelse logs_dir orelse return error.MissingLogDir);
+    return .{
+        .paths = paths,
+        .format = if (env_map.get("NATIVE_SDK_LOG_FORMAT")) |value| LogFormat.parse(value) orelse .json_lines else .json_lines,
+    };
+}
+
 pub fn resolveLogPaths(buffers: *LogPathBuffers, app_name: []const u8, env: app_dirs.Env, override_dir: ?[]const u8) !LogPaths {
+    if (override_dir) |dir| return logPathsIn(buffers, dir);
+    var log_dir_buffer: [1024]u8 = undefined;
+    return logPathsIn(buffers, try app_dirs.resolveOne(.{ .name = app_name }, app_dirs.currentPlatform(), env, .logs, &log_dir_buffer));
+}
+
+fn logPathsIn(buffers: *LogPathBuffers, dir: []const u8) !LogPaths {
     const platform = app_dirs.currentPlatform();
-    const log_dir = if (override_dir) |dir|
-        try copyInto(&buffers.log_dir, dir)
-    else
-        try app_dirs.resolveOne(.{ .name = app_name }, platform, env, .logs, &buffers.log_dir);
+    const log_dir = try copyInto(&buffers.log_dir, dir);
     const log_file = try app_dirs.join(platform, &buffers.log_file, &.{ log_dir, "native-sdk.jsonl" });
     const panic_file = try app_dirs.join(platform, &buffers.panic_file, &.{ log_dir, "last-panic.txt" });
     return .{ .log_dir = log_dir, .log_file = log_file, .panic_file = panic_file };
@@ -130,18 +145,7 @@ pub fn parseTraceMode(value: []const u8) ?TraceMode {
 }
 
 pub fn envFromMap(env_map: *std.process.Environ.Map) app_dirs.Env {
-    return .{
-        .home = env_map.get("HOME"),
-        .xdg_config_home = env_map.get("XDG_CONFIG_HOME"),
-        .xdg_cache_home = env_map.get("XDG_CACHE_HOME"),
-        .xdg_data_home = env_map.get("XDG_DATA_HOME"),
-        .xdg_state_home = env_map.get("XDG_STATE_HOME"),
-        .local_app_data = env_map.get("LOCALAPPDATA"),
-        .app_data = env_map.get("APPDATA"),
-        .temp = env_map.get("TEMP"),
-        .tmp = env_map.get("TMP"),
-        .tmpdir = env_map.get("TMPDIR"),
-    };
+    return app_dirs.envFromMap(env_map);
 }
 
 pub fn appendTraceRecord(io: std.Io, log_dir: []const u8, path: []const u8, format: LogFormat, record: trace.Record) !void {
@@ -229,6 +233,21 @@ test "log path resolution uses platform logs directory and overrides" {
     try std.testing.expectEqualStrings("/tmp/native-sdk-logs", paths.log_dir);
     try std.testing.expect(std.mem.indexOf(u8, paths.log_file, "native-sdk.jsonl") != null);
     try std.testing.expect(std.mem.indexOf(u8, paths.panic_file, "last-panic.txt") != null);
+}
+
+test "log setup uses the resolved logs directory unless NATIVE_SDK_LOG_DIR overrides it" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var buffers: LogPathBuffers = .{};
+    const sep = std.fs.path.sep_str;
+    const resolved = try setupLoggingIn(std.testing.io, &env, "root" ++ sep ++ "logs", &buffers);
+    try std.testing.expectEqualStrings("root" ++ sep ++ "logs", resolved.paths.log_dir);
+    try std.testing.expectEqualStrings("root" ++ sep ++ "logs" ++ sep ++ "native-sdk.jsonl", resolved.paths.log_file);
+    try std.testing.expectEqualStrings("root" ++ sep ++ "logs" ++ sep ++ "last-panic.txt", resolved.paths.panic_file);
+    try std.testing.expectError(error.MissingLogDir, setupLoggingIn(std.testing.io, &env, null, &buffers));
+    try env.put("NATIVE_SDK_LOG_DIR", "elsewhere");
+    try std.testing.expectEqualStrings("elsewhere", (try setupLoggingIn(std.testing.io, &env, "root" ++ sep ++ "logs", &buffers)).paths.log_dir);
+    try std.testing.expectEqualStrings("elsewhere", (try setupLoggingIn(std.testing.io, &env, null, &buffers)).paths.log_dir);
 }
 
 test "fanout sink writes every child sink" {
