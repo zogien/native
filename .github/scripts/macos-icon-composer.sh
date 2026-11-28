@@ -68,11 +68,52 @@ PY
     check_repack zig-out/package/beacon.app
     check_repack "$work/fixed output/beacon.app" --output "$work/fixed output/beacon.app"
 
-    # A pre-existing catalog in a PNG-only bundle still belongs to its owner.
-    printf 'additional app resources' > "$work/user.car"
-    cp "$work/user.car" zig-out/package/beacon.app/Contents/Resources/Assets.car
-    "$cli" "${args[@]}"
-    cmp "$work/user.car" zig-out/package/beacon.app/Contents/Resources/Assets.car
+    # Supply a real independent catalog to the PNG bundle. A failed
+    # Composer build must not claim it or delete it on the next PNG build.
+    mkdir "$work/user-art"
+    /bin/sh "$repo/src/tooling/compile_macos_icon.sh" "$project/Beacon.icon" "$work/user-art" 11.0 "" UserBadge
+    user_catalog="$work/user-art/Assets.car"
+    check_failed_repack() {
+        local output="$1" failure="$2"
+        shift 2
+        local catalog="$output/Contents/Resources/Assets.car" plist="$output/Contents/Info.plist"
+        write_manifest '"assets/icon.png"'
+        cp "$user_catalog" "$catalog"
+        "$cli" "${args[@]}" "$@"
+        cmp "$user_catalog" "$catalog"
+        cp "$plist" "$work/before.plist"
+
+        write_manifest '"Beacon.icon","assets/icon.png"'
+        if [ "$failure" = missing-tool ]; then
+            DEVELOPER_DIR="$work/absent" expect_failure "No usable actool" "$cli" "${args[@]}" "$@"
+        else
+            printf '{' > Beacon.icon/icon.json
+            expect_failure "actool could not compile" "$cli" "${args[@]}" "$@"
+            cp "$repo/tests/fixtures/Beacon.icon/icon.json" Beacon.icon/icon.json
+        fi
+        cmp "$work/before.plist" "$plist"
+        cmp "$user_catalog" "$catalog"
+
+        write_manifest '"assets/icon.png"'
+        "$cli" "${args[@]}" "$@"
+        cmp "$user_catalog" "$catalog"
+        cmp "$work/before.plist" "$plist"
+    }
+    check_failed_repack "$work/fixed output/beacon.app" missing-tool --output "$work/fixed output/beacon.app"
+    check_failed_repack zig-out/package/beacon.app broken-source
+
+    # If publishing the staged plist fails, restore both previous resources.
+    output="$work/fixed output/beacon.app"
+    mv "$output/Contents/Info.plist" "$work/original.plist"
+    mkdir "$output/Contents/Info.plist"
+    cp "$output/Contents/Resources/AppIcon.icns" "$work/before.icns"
+    write_manifest '"Beacon.icon","assets/icon.png"'
+    if "$cli" "${args[@]}" --output "$output"; then
+        echo "Expected failure publishing Info.plist to a directory" >&2
+        exit 1
+    fi
+    cmp "$user_catalog" "$output/Contents/Resources/Assets.car"
+    cmp "$work/before.icns" "$output/Contents/Resources/AppIcon.icns"
 )
 
 bundle="$work/Signed Beacon.app"

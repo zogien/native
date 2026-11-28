@@ -438,14 +438,20 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
 
     const info_plist = try macosInfoPlist(allocator, options.metadata, executable_name);
     defer allocator.free(info_plist);
-    if (resolveIconPlan(options.metadata).composer == null) try removePreviousComposerCatalog(allocator, io, package_dir);
-    try writeFile(package_dir, io, "Contents/Info.plist", info_plist);
+    const plan = resolveIconPlan(options.metadata);
     try writeFile(package_dir, io, "Contents/PkgInfo", "APPL????");
     try writeFile(package_dir, io, "Contents/Resources/README.txt", "Unsigned local Native SDK macOS app bundle.\n");
     const assets_output = try macosAssetOutputPath(allocator, options);
     defer allocator.free(assets_output);
-    const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
-    try copyMacosIcon(allocator, io, package_dir, options);
+    const bundle_stats = if (plan.composer) |path|
+        try bundleComposerResources(allocator, io, package_dir, options, path, plan.prebuilt_icns, info_plist, assets_output)
+    else blk: {
+        try removePreviousComposerCatalog(allocator, io, package_dir);
+        try writeFile(package_dir, io, "Contents/Info.plist", info_plist);
+        const stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
+        try copyMacosIcon(allocator, io, package_dir, plan);
+        break :blk stats;
+    };
     try copyMacosDocumentIcons(allocator, io, package_dir, options.metadata);
     try writeReport(allocator, package_dir, io, "Contents/Resources/package-manifest.zon", options, executable_name, bundle_stats.asset_count, null);
     if (options.web_engine == .chromium) {
@@ -1098,28 +1104,79 @@ fn loadIconSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, ki
     }
 }
 
-fn copyMacosIcon(allocator: std.mem.Allocator, io: std.Io, package_dir: std.Io.Dir, options: PackageOptions) !void {
-    const plan = resolveIconPlan(options.metadata);
-    if (plan.composer) |path| {
-        if (@import("builtin").os.tag != .macos) {
-            std.debug.print("error: packaging {s} for macOS requires a macOS host with Xcode 26 or later\n", .{path});
-            return error.IconComposerRequiresMacos;
-        }
-        const source = try std.fs.path.join(allocator, &.{ options.project_dir, path });
-        defer allocator.free(source);
-        const legacy = if (plan.prebuilt_icns) |icns| try std.fs.path.join(allocator, &.{ options.project_dir, icns }) else "";
-        defer if (plan.prebuilt_icns != null) allocator.free(legacy);
-        const resources = try package_dir.realPathFileAlloc(io, "Contents/Resources", allocator);
-        defer allocator.free(resources);
-        var child = try std.process.spawn(io, .{
-            .argv = &.{ "/bin/sh", "-c", @embedFile("compile_macos_icon.sh"), "compile-macos-icon", source, resources, macos_minimum_version, legacy, macos_catalog_icon },
-            .environ_map = options.env_map,
-            .stdin = .ignore,
-        });
-        const term = try child.wait(io);
-        if (term != .exited or term.exited != 0) return error.IconComposerFailed;
-        return;
+fn bundleComposerResources(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    package_dir: std.Io.Dir,
+    options: PackageOptions,
+    path: []const u8,
+    prebuilt: ?[]const u8,
+    info_plist: []const u8,
+    assets_output: []const u8,
+) !assets_tool.BundleStats {
+    if (@import("builtin").os.tag != .macos) {
+        std.debug.print("error: packaging {s} for macOS requires a macOS host with Xcode 26 or later\n", .{path});
+        return error.IconComposerRequiresMacos;
     }
+    const source = try std.fs.path.join(allocator, &.{ options.project_dir, path });
+    defer allocator.free(source);
+    const legacy = if (prebuilt) |icns| try std.fs.path.join(allocator, &.{ options.project_dir, icns }) else "";
+    defer if (prebuilt != null) allocator.free(legacy);
+
+    // Keep the old plist and its resources together until actool has produced
+    // both new files. Stage on the bundle volume so publication uses renames.
+    var nonce: u64 = undefined;
+    io.random(std.mem.asBytes(&nonce));
+    var name_buffer: [48]u8 = undefined;
+    const temp = try std.fmt.bufPrint(&name_buffer, "Contents/.native-icon-{x}", .{nonce});
+    try package_dir.createDir(io, temp, .default_dir);
+    var remove_stage = true;
+    defer if (remove_stage) package_dir.deleteTree(io, temp) catch {};
+    var stage = try package_dir.openDir(io, temp, .{});
+    defer stage.close(io);
+    try stage.writeFile(io, .{ .sub_path = "Info.plist", .data = info_plist });
+    const destination = try package_dir.realPathFileAlloc(io, temp, allocator);
+    defer allocator.free(destination);
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/sh", "-c", @embedFile("compile_macos_icon.sh"), "compile-macos-icon", source, destination, macos_minimum_version, legacy, macos_catalog_icon },
+        .environ_map = options.env_map,
+        .stdin = .ignore,
+    });
+    const term = try child.wait(io);
+    if (term != .exited or term.exited != 0) return error.IconComposerFailed;
+
+    const stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
+    var resources = try package_dir.openDir(io, "Contents/Resources", .{});
+    defer resources.close(io);
+    const names = [_][]const u8{ if (prebuilt) |icns| std.fs.path.basename(icns) else "AppIcon.icns", "Assets.car" };
+    const backups = [_][]const u8{ "previous-icns", "previous-catalog" };
+    var saved = [_]bool{ false, false };
+    var installed: usize = 0;
+    errdefer for (names[0..installed], 0..) |name, i| {
+        if (saved[i]) {
+            stage.rename(backups[i], resources, name, io) catch |err| {
+                remove_stage = false;
+                std.debug.print("error: restoring {s} ({t}) - recover it from {s}/{s}/{s}\n", .{ name, err, options.output_path, temp, backups[i] });
+            };
+        } else {
+            resources.deleteFile(io, name) catch |err| std.debug.print("error: removing {s}: {t}\n", .{ name, err });
+        }
+    };
+    for (names, 0..) |name, i| {
+        if (resources.copyFile(name, stage, backups[i], io, .{})) {
+            saved[i] = true;
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+        try stage.rename(name, resources, name, io);
+        installed += 1;
+    }
+    try stage.rename("Info.plist", package_dir, "Contents/Info.plist", io);
+    return stats;
+}
+
+fn copyMacosIcon(allocator: std.mem.Allocator, io: std.Io, package_dir: std.Io.Dir, plan: IconPlan) !void {
     if (plan.prebuilt_icns) |path| {
         // Art-directed prebuilt .icns wins untouched.
         try copyMacosResourceIcon(allocator, io, package_dir, path, "configured app icon");
@@ -3390,10 +3447,10 @@ test "Composer plan keeps the first icon of each kind and declares both macOS ic
 
 test "Composer packaging requires macOS before trying actool" {
     if (@import("builtin").os.tag == .macos) return error.SkipZigTest;
-    try std.testing.expectError(error.IconComposerRequiresMacos, copyMacosIcon(std.testing.allocator, std.testing.io, .cwd(), .{
+    try std.testing.expectError(error.IconComposerRequiresMacos, bundleComposerResources(std.testing.allocator, std.testing.io, .cwd(), .{
         .metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0", .icons = &.{"Beacon.icon"} },
         .output_path = "Demo.app",
-    }));
+    }, "Beacon.icon", null, "", "."));
 }
 
 test "plist template includes identity executable and version" {
