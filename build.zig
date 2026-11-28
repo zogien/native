@@ -359,6 +359,7 @@ pub fn build(b: *std.Build) void {
         desktop_mod.linkFramework("ImageIO", .{});
         desktop_mod.linkSystemLibrary("objc", .{});
     }
+    addTestStep(b, "test-single-instance", "Run single-instance ownership and handoff tests", filteredTestArtifact(b, desktop_mod, "single-instance-tests", &.{"runtime.single_instance.test"}));
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
     // Tier-5 crash battery: a child uses the public streamed sink, signals
