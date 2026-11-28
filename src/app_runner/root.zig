@@ -706,16 +706,17 @@ fn manifestSingleInstance() bool {
     return if (comptime @hasField(@TypeOf(app_manifest), "single_instance")) app_manifest.single_instance else false;
 }
 
-/// Manifest `single_instance`: claims ownership before anything else
+/// Manifest `single_instance`: claims ownership of the launch's data
+/// directory (`data`, resolved by `resolveAppData`) before anything else
 /// starts. A later launch hands its working directory and arguments to
 /// the owner and exits here, its exit code naming the delivery result.
 /// Replay never claims. Only the first call claims, so an entry point may
 /// call it before its own startup work and the call in `runWithOptions`
 /// is then a no-op.
-pub fn enforceSingleInstance(init: std.process.Init) void {
+pub fn enforceSingleInstance(init: std.process.Init, data: *const native_sdk.app_dirs.AppData) void {
     if (comptime !manifestSingleInstance()) return;
-    if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY") != null) return;
-    const outcome = native_sdk.single_instance.claim(init.io, init.gpa, init.minimal.args, app_manifest.id) orelse return;
+    const scope = instanceScope(init.environ_map, app_manifest.id, data) orelse return;
+    const outcome = native_sdk.single_instance.claim(init.io, init.gpa, init.minimal.args, scope) orelse return;
     switch (outcome) {
         .primary => {},
         .standalone => |reason| std.log.warn("single_instance: {s}; running without instance ownership", .{reason}),
@@ -724,6 +725,16 @@ pub fn enforceSingleInstance(init: std.process.Init) void {
             std.process.exit(result.exitCode());
         },
     }
+}
+
+/// What a launch claims: nothing under session replay (the journal is the
+/// world, and a replay must never hand itself to a running copy), else
+/// the data directory it uses — the app by bundle id for the default data
+/// directory (also reached through a root at the default location), the
+/// canonical root otherwise.
+fn instanceScope(environ_map: *const std.process.Environ.Map, bundle_id: []const u8, data: *const native_sdk.app_dirs.AppData) ?native_sdk.single_instance.Scope {
+    if (environ_map.get("NATIVE_SDK_SESSION_REPLAY") != null) return null;
+    return .of(bundle_id, data);
 }
 
 fn menuItem(comptime item: anytype) native_sdk.MenuItem {
@@ -776,7 +787,7 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
         own_app_data = resolveAppData(init, options.bundle_id, options.app_name);
         break :data &own_app_data;
     };
-    enforceSingleInstance(init);
+    enforceSingleInstance(init, data);
     const RecordStoreType = if (comptime manifestDeclaresStore()) native_sdk.RecordStore else void;
     var record_store_value: RecordStoreType = undefined;
     var record_store_open = false;
@@ -1481,4 +1492,19 @@ test "runner inspection capability follows the app build mode and explicit overr
     }
     // Direct embedding stays default-deny, including inside Debug builds.
     try std.testing.expect(!(native_sdk.AppInfo{}).webview_inspection);
+}
+
+test "a launch claims its data directory, and session replay never claims" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    const default_data: native_sdk.app_dirs.AppData = .{};
+    const override_data: native_sdk.app_dirs.AppData = .{ .source = .flag, .root = "/profiles/one" };
+    try std.testing.expectEqualDeep(native_sdk.single_instance.Scope{ .app = "dev.example.app" }, instanceScope(&env, "dev.example.app", &default_data).?);
+    try std.testing.expectEqualDeep(native_sdk.single_instance.Scope{ .root = "/profiles/one" }, instanceScope(&env, "dev.example.app", &override_data).?);
+    // A root at the default location uses the default data directory.
+    const at_default: native_sdk.app_dirs.AppData = .{ .source = .env, .root = "/home/a/.local/share", .data_is_default = true };
+    try std.testing.expectEqualDeep(native_sdk.single_instance.Scope{ .app = "dev.example.app" }, instanceScope(&env, "dev.example.app", &at_default).?);
+    try env.put("NATIVE_SDK_SESSION_REPLAY", "journal.jsonl");
+    try std.testing.expect(instanceScope(&env, "dev.example.app", &default_data) == null);
+    try std.testing.expect(instanceScope(&env, "dev.example.app", &override_data) == null);
 }

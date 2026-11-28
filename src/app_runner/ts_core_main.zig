@@ -218,8 +218,9 @@ pub fn main(init: std.process.Init) !void {
     // root. Everything below and the runner take their paths from it.
     const app_data = runner.resolveAppData(init, manifest.id, manifest.name);
     // Before persistence, services, or any window: a later launch of a
-    // `single_instance` app exits here once the owner has its arguments.
-    runner.enforceSingleInstance(init);
+    // `single_instance` app exits here once the owner of its data
+    // directory has its arguments.
+    runner.enforceSingleInstance(init, &app_data);
     var options = appOptions(init.io);
     // The caches directory for this app's URL media: when the core's
     // `Cmd.audioPlay` names a URL with no cachePath, the bridge derives
