@@ -190,4 +190,15 @@ Each root gets its own web profile, so launches with different roots share no co
 
 The flag is the SDK's, not the app's. The SDK removes `--native-data-dir`, and the path that follows it in the two-argument form, everywhere it reports launch arguments to the app: in the launches a [single-instance](/docs/app-zon) app receives on `native-sdk.app.launches`, and in `NATIVE_SDK_ARG_1`. Arguments after `--` are always the app's. A Zig app that reads `init.minimal.args` itself sees the raw arguments; `native_sdk.app_dirs.app_data.ArgumentFilter` drops the flag the same way.
 
-`single_instance` ownership stays per app, not per data directory. While a copy of the app runs, a later launch with another root hands its launch to that copy.
+## Single instance
+
+An app with [`single_instance`](/docs/app-zon#single-instance) has one owner per data directory, per user and login session:
+
+- Without an override, the owner is per app, keyed by the bundle id as in earlier versions. A copy of an older version that is still running and a newly started newer version find each other during an upgrade.
+- Launches with different roots run side by side, each owning its own root.
+- A later launch with the same root, under any spelling of it, hands its launch to the process that owns that root and exits.
+- Ownership follows the data directory a launch actually uses. A root whose `data` folder is the default data directory shares the default owner. On Windows that is a root at `%LOCALAPPDATA%\<bundle-id>`, whose `data`, `cache`, `state` and `logs` folders are the default ones. Any other root never shares an owner with a launch on the default directories.
+
+The root alone keys ownership, as it keys the folders: another `single_instance` app launched on a root that an app already owns hands its launch to that app.
+
+Ownership is implemented on Windows. macOS and Linux run without it for now. On Linux, the GTK host also folds every later launch of a bundle id into the process already running it, even with a different root, so two roots of one app cannot run side by side there yet.
