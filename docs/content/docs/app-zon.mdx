@@ -175,7 +175,7 @@ A fuller manifest for an app that also [embeds web content](/docs/frontend) and 
     </tr>
     <tr>
       <td><code>single_instance</code></td>
-      <td>One owning process per data directory, user, and login session: per bundle id for the default data directory, per root for any other data directory override. Defaults to <code>false</code>. When <code>true</code>, a later launch hands its working directory and arguments to the running owner and exits before creating windows; the owner's core receives each launch on the <code>native-sdk.app.launches</code> channel source and decides what to do (see <a href="#single-instance">Single instance</a>). Windows only today; other desktop hosts log a warning and run without ownership.</td>
+      <td>One owning process per data directory on Windows, macOS, and Linux: per bundle id for the default data directory, per root for any other data directory override. Defaults to <code>false</code>. When <code>true</code>, a later launch hands its working directory and arguments to the running owner and exits before creating windows; the owner's core receives each launch on the <code>native-sdk.app.launches</code> channel source and decides what to do (see <a href="#single-instance">Single instance</a>).</td>
     </tr>
     <tr>
       <td><code>persist</code></td>
@@ -267,9 +267,9 @@ A native-only build carries the platform consequences with it: on Windows the ex
 
 ## Single instance
 
-`single_instance = true` makes one process the owner of the app's [data directory](/docs/data-directory), per user and login session. The launcher claims ownership before persistence, services, or any window start.
+`single_instance = true` makes one process the owner of the app's [data directory](/docs/data-directory), using a per-user endpoint (per login session on Windows). The launcher claims ownership before persistence, services, or any window start.
 
-- With the default data directory, the owner is per bundle id, the same key earlier versions used. A copy of an older version that is still running and a newly started newer version find each other during an upgrade.
+- With the default data directory, the owner is per bundle id, including the existing endpoint name on Windows so launches still reach an older running owner during an upgrade.
 - With a data directory override (`--native-data-dir` or `NATIVE_SDK_DATA_DIR`), the owner is per root. Launches with different roots run side by side. A later launch with the same root, under any spelling of it, hands its launch to the process that owns that root.
 - What counts is the data directory a launch actually uses. A root whose `data` folder is the default data directory (on Windows, a root at `%LOCALAPPDATA%\<bundle-id>`) shares the default owner. Any other root never shares an owner with a launch on the default directories.
 
@@ -288,7 +288,7 @@ case "launch":
   return [{ ...model, lastLaunch: msg.bytes.slice() }, Cmd.showWindow("main")];
 ```
 
-A launch is at most 4096 bytes. One that arrives before the core opens the source is held for up to 5 seconds. A process that does not own the app fails to open the source: its `started` event reports `failed` with `SingleInstanceNotOwned` (`UnsupportedChannelSource` on hosts without single-instance support). The later launch also grants the owner permission to take the foreground, so `Cmd.showWindow` can bring its window to the front.
+A launch is at most 4096 bytes. One that arrives before the core opens the source is held for up to 5 seconds. A process that does not own the app fails to open the source: its `started` event reports `failed` with `SingleInstanceNotOwned` (`UnsupportedChannelSource` on hosts without single-instance support). On Windows, the later launch also grants the owner permission to take the foreground, so `Cmd.showWindow` can bring its window to the front.
 
 A later launch's exit code reports what happened, and a failure also prints the reason to stderr:
 
@@ -309,9 +309,11 @@ A later launch's exit code reports what happened, and a failure also prints the 
   </tbody>
 </table>
 
-Windows is supported today. Debug and release builds share a bundle id, so with the default data directory they count as the same app.
+Debug and release builds share a bundle id, so with the default data directory they count as the same app. On macOS and Linux the owner holds a file lock in the data directory and receives launches over a private Unix socket. Use a local data directory for reliable locking. Network filesystems may have different lock semantics.
 
-macOS and Linux do not support ownership yet; it is planned for both. Until then the launcher logs a warning there and runs without ownership. On Linux, the GTK host also folds every later launch of a bundle id into the process already running it, whatever its data directory and whether or not the app sets `single_instance`. That later launch exits with code 0 right away, and its arguments are not delivered.
+On macOS, opening an already-running bundle normally activates the existing app through LaunchServices. Direct execution and `open -n` start a process and use the SDK handoff.
+
+On Linux the SDK hands off same-directory launches before GTK starts. GTK can still combine launches of the same bundle id that reach GTK, including launches with different data roots. Those launches exit without forwarding their arguments to the core.
 
 ## `shell`
 
