@@ -1,10 +1,13 @@
 //! Single-instance ownership (manifest `single_instance`): one process per
-//! bundle id, user, and login session owns the app. The first launch to
-//! claim ownership becomes the primary. A later launch hands its working
-//! directory and arguments to the primary, reports the delivery through
-//! its exit code, and exits before any window exists. The primary's core
-//! receives each launch on the `native-sdk.app.launches` channel source
-//! (`attach`) as one `"data"` event and decides what to do with it.
+//! data directory, user, and login session owns the app's data. The
+//! default data directory is keyed by the bundle id, also when a
+//! `--native-data-dir` / `NATIVE_SDK_DATA_DIR` root reaches it; data moved
+//! under any other root is keyed by that root (`Scope`). The first launch to claim ownership becomes the
+//! primary. A later launch hands its working directory and arguments to
+//! the primary, reports the delivery through its exit code, and exits
+//! before any window exists. The primary's core receives each launch on
+//! the `native-sdk.app.launches` channel source (`attach`) as one `"data"`
+//! event and decides what to do with it.
 //!
 //! Windows is the implemented host: a message-mode named pipe created with
 //! FILE_FLAG_FIRST_PIPE_INSTANCE is both the ownership lock and the
@@ -89,13 +92,61 @@ pub const Claim = union(enum) {
     standalone: []const u8,
 };
 
-/// Claims ownership for `bundle_id`. Only the first call in a process
-/// claims; every later call answers null, so a process that fell back to
+/// What one owner owns: the platform-neutral key material. Each host
+/// derives its endpoint from a scope and the current OS user, so one
+/// scope has one owner per user and login session.
+pub const Scope = union(enum) {
+    /// The default data directory, keyed by the app's bundle id. The
+    /// Windows endpoint keeps the name it had before a data directory
+    /// could be overridden, so a running older version of the app and a
+    /// newly started newer one still find each other.
+    app: []const u8,
+    /// A data directory moved under an override root, keyed by that
+    /// root's canonical absolute path (`AppData.root`, which is one
+    /// spelling per folder). One root has one owner; different roots of
+    /// one app run side by side.
+    root: []const u8,
+
+    /// The scope a launch claims for its resolved directories, chosen by
+    /// the data directory in use rather than by how it was named: an
+    /// override whose `data` folder is the default data directory (a
+    /// root at the default location) claims the app, like a launch with
+    /// no override, so the two never own one set of files at once.
+    pub fn of(bundle_id: []const u8, data: *const app_data.AppData) Scope {
+        return if (data.usesDefaultData()) .{ .app = bundle_id } else .{ .root = data.root };
+    }
+
+    pub const digest_len = 16;
+
+    /// A fixed-size digest of the scope for one OS user, for endpoint
+    /// names that cannot hold a whole path. `user` is any stable bytes
+    /// naming the user (the SID text on Windows). The scope's form is
+    /// hashed with its value, so an `.app` scope and a `.root` scope never
+    /// digest alike, even for equal strings. The Windows `.app` endpoint
+    /// does not use this: it keeps its original name formula.
+    pub fn digest(self: Scope, user: []const u8) [digest_len]u8 {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update("native-sdk.instance\x00");
+        hasher.update(@tagName(self));
+        hasher.update("\x00");
+        hasher.update(switch (self) {
+            .app, .root => |value| value,
+        });
+        hasher.update("\x00");
+        hasher.update(user);
+        var full: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        hasher.final(&full);
+        return full[0..digest_len].*;
+    }
+};
+
+/// Claims ownership of `scope`. Only the first call in a process claims;
+/// every later call answers null, so a process that fell back to
 /// `.standalone` never re-attempts after its startup work has begun.
-pub fn claim(io: std.Io, gpa: std.mem.Allocator, args: std.process.Args, bundle_id: []const u8) ?Claim {
+pub fn claim(io: std.Io, gpa: std.mem.Allocator, args: std.process.Args, scope: Scope) ?Claim {
     if (!beginClaim()) return null;
     if (comptime !is_windows) return .{ .standalone = "single_instance is not implemented on this platform yet" };
-    return claimWindows(io, gpa, args, bundle_id);
+    return claimWindows(io, gpa, args, scope);
 }
 
 /// True exactly once per process: for the first claim attempt.
@@ -265,12 +316,12 @@ fn remainingMs(deadline: u64) ?u64 {
     return if (now >= deadline) null else deadline - now;
 }
 
-fn claimWindows(io: std.Io, gpa: std.mem.Allocator, args: std.process.Args, bundle_id: []const u8) Claim {
+fn claimWindows(io: std.Io, gpa: std.mem.Allocator, args: std.process.Args, scope: Scope) Claim {
     if (comptime !is_windows) unreachable;
     var identity: Identity = undefined;
     if (!identity.loadCurrent()) return .{ .standalone = "the current user's identity is unavailable" };
     var name_buffer: [pipe_name_capacity:0]u16 = undefined;
-    const name = pipeName(&name_buffer, identity.session, identity.sidText(), bundle_id);
+    const name = endpointName(&name_buffer, identity.session, identity.sidText(), scope);
     var security: Security = undefined;
     if (!security.init(identity.sidText())) return .{ .standalone = "the instance endpoint's security descriptor could not be built" };
     defer security.deinit();
@@ -491,11 +542,24 @@ fn waitMs(remaining: u64) win.DWORD {
     return @intCast(std.math.clamp(remaining, 1, std.math.maxInt(win.DWORD) - 1));
 }
 
-/// `\\.\pipe\native-sdk-instance-<session>-<hash>`: pipe names are
-/// machine-wide, so the session and a hash of the bundle id and user SID
-/// keep each user's sessions apart.
+/// Pipe names are machine-wide, so every name carries the login session
+/// and a hash that includes the user SID, keeping each user's sessions
+/// apart. The two scopes have disjoint name shapes: after
+/// `native-sdk-instance-` an app name continues with the session's digits
+/// and a root name with `root-`.
 const pipe_name_capacity = 96;
 
+fn endpointName(buffer: *[pipe_name_capacity:0]u16, session: u32, sid_text: []const u16, scope: Scope) [:0]const u16 {
+    return switch (scope) {
+        .app => |bundle_id| pipeName(buffer, session, sid_text, bundle_id),
+        .root => rootPipeName(buffer, session, sid_text, scope),
+    };
+}
+
+/// `\\.\pipe\native-sdk-instance-<session>-<hash>`, the hash a Wyhash of
+/// the bundle id and user SID: the name every version has used for the
+/// default data directory. It must not change, or an installed older
+/// version and a newer one would both own the app during an upgrade.
 fn pipeName(buffer: *[pipe_name_capacity:0]u16, session: u32, sid_text: []const u16, bundle_id: []const u8) [:0]const u16 {
     var hasher = std.hash.Wyhash.init(0);
     hasher.update(bundle_id);
@@ -503,6 +567,19 @@ fn pipeName(buffer: *[pipe_name_capacity:0]u16, session: u32, sid_text: []const 
     hasher.update(std.mem.sliceAsBytes(sid_text));
     var ascii: [pipe_name_capacity]u8 = undefined;
     const text = std.fmt.bufPrint(&ascii, "\\\\.\\pipe\\native-sdk-instance-{d}-{x:0>16}", .{ session, hasher.final() }) catch unreachable;
+    return widenName(buffer, text);
+}
+
+/// `\\.\pipe\native-sdk-instance-root-<session>-<digest>`, the digest
+/// `Scope.digest` of the root for the user SID, in lowercase hex.
+fn rootPipeName(buffer: *[pipe_name_capacity:0]u16, session: u32, sid_text: []const u16, scope: Scope) [:0]const u16 {
+    const hex = std.fmt.bytesToHex(scope.digest(std.mem.sliceAsBytes(sid_text)), .lower);
+    var ascii: [pipe_name_capacity]u8 = undefined;
+    const text = std.fmt.bufPrint(&ascii, "\\\\.\\pipe\\native-sdk-instance-root-{d}-{s}", .{ session, &hex }) catch unreachable;
+    return widenName(buffer, text);
+}
+
+fn widenName(buffer: *[pipe_name_capacity:0]u16, text: []const u8) [:0]const u16 {
     for (text, 0..) |byte, index| buffer[index] = byte;
     buffer[text.len] = 0;
     return buffer[0..text.len :0];
@@ -759,7 +836,7 @@ test "only the first claim in a process claims; later calls are no-ops" {
     try testing.expect(beginClaim());
     // A later claim answers null before touching its arguments, so a
     // standalone fallback is never retried mid-startup.
-    try testing.expect(claim(testing.io, testing.allocator, undefined, "test.native_sdk.single_instance") == null);
+    try testing.expect(claim(testing.io, testing.allocator, undefined, .{ .app = "test.native_sdk.single_instance" }) == null);
     try testing.expect(!owned());
 }
 
@@ -790,6 +867,124 @@ test "the endpoint name separates bundle ids, users, and sessions" {
     try testing.expect(!std.mem.eql(u16, base, pipeName(&second, 1, sid_a, "dev.example.other")));
     try testing.expect(!std.mem.eql(u16, base, pipeName(&second, 1, sid_b, "dev.example.app")));
     try testing.expect(!std.mem.eql(u16, base, pipeName(&second, 2, sid_a, "dev.example.app")));
+}
+
+/// The pipe name as ASCII, for comparing against literals.
+fn narrowName(buffer: []u8, name: []const u16) []const u8 {
+    for (name, 0..) |unit, index| buffer[index] = @intCast(unit);
+    return buffer[0..name.len];
+}
+
+test "the default data directory keeps the endpoint name of earlier versions" {
+    // Printed by main 41fa5a00's pipeName for these inputs, before data
+    // directories keyed ownership. An installed older version and a
+    // newer one find each other only while these stay byte-identical.
+    const cases = [_]struct { u32, []const u16, []const u8, []const u8 }{
+        .{ 1, std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-1-1001"), "dev.example.app", "\\\\.\\pipe\\native-sdk-instance-1-0dbe9aa8a3a3f39b" },
+        .{ 2, std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-3623811015-3361044348-30300820-1013"), "dev.native_sdk.single_instance_probe", "\\\\.\\pipe\\native-sdk-instance-2-57fb7101749262e5" },
+    };
+    for (cases) |case| {
+        var name_buffer: [pipe_name_capacity:0]u16 = undefined;
+        var ascii: [pipe_name_capacity]u8 = undefined;
+        const name = endpointName(&name_buffer, case[0], case[1], .{ .app = case[2] });
+        try testing.expectEqualStrings(case[3], narrowName(&ascii, name));
+        // Exactly the name a default launch claims.
+        const default_data: app_data.AppData = .{};
+        var claimed_buffer: [pipe_name_capacity:0]u16 = undefined;
+        try testing.expectEqualSlices(u16, name, endpointName(&claimed_buffer, case[0], case[1], .of(case[2], &default_data)));
+    }
+}
+
+test "an overridden data directory's endpoint is keyed by its root, user, and session" {
+    const sid_a = std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-1-1001");
+    const sid_b = std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-1-1002");
+    var first: [pipe_name_capacity:0]u16 = undefined;
+    var second: [pipe_name_capacity:0]u16 = undefined;
+    const one: Scope = .{ .root = "C:\\Profiles\\One" };
+    const base = endpointName(&first, 1, sid_a, one);
+    var ascii: [pipe_name_capacity]u8 = undefined;
+    const text = narrowName(&ascii, base);
+    try testing.expect(std.mem.startsWith(u8, text, "\\\\.\\pipe\\native-sdk-instance-root-1-"));
+    try testing.expectEqual("\\\\.\\pipe\\native-sdk-instance-root-1-".len + 2 * Scope.digest_len, text.len);
+    for (text["\\\\.\\pipe\\native-sdk-instance-root-1-".len..]) |ch| try testing.expect(std.ascii.isDigit(ch) or (ch >= 'a' and ch <= 'f'));
+    try testing.expectEqualSlices(u16, base, endpointName(&second, 1, sid_a, one));
+    try testing.expect(!std.mem.eql(u16, base, endpointName(&second, 1, sid_a, .{ .root = "C:\\Profiles\\Two" })));
+    try testing.expect(!std.mem.eql(u16, base, endpointName(&second, 1, sid_b, one)));
+    try testing.expect(!std.mem.eql(u16, base, endpointName(&second, 2, sid_a, one)));
+    // The longest root and session still fit the name buffer.
+    const longest = [_]u8{'x'} ** app_data.max_root_bytes;
+    _ = endpointName(&second, std.math.maxInt(u32), sid_a, .{ .root = &longest });
+}
+
+test "a default endpoint and an override endpoint never share a name" {
+    const sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-1-1001");
+    var app_buffer: [pipe_name_capacity:0]u16 = undefined;
+    var root_buffer: [pipe_name_capacity:0]u16 = undefined;
+    var app_ascii: [pipe_name_capacity]u8 = undefined;
+    var root_ascii: [pipe_name_capacity]u8 = undefined;
+    // Even the same string as a bundle id and as a root.
+    for ([_][]const u8{ "dev.example.app", "C:\\Profiles\\One", "" }) |value| {
+        const app_name = narrowName(&app_ascii, endpointName(&app_buffer, 7, sid, .{ .app = value }));
+        const root_name = narrowName(&root_ascii, endpointName(&root_buffer, 7, sid, .{ .root = value }));
+        try testing.expect(!std.mem.eql(u8, app_name, root_name));
+        // Disjoint shapes: an app name continues with the session's
+        // digits where a root name continues with `root-`.
+        const prefix = "\\\\.\\pipe\\native-sdk-instance-";
+        try testing.expect(std.ascii.isDigit(app_name[prefix.len]));
+        try testing.expect(std.mem.startsWith(u8, root_name[prefix.len..], "root-"));
+        // The shared digest separates the forms too, for hosts that key
+        // both forms by it.
+        const user = std.mem.sliceAsBytes(sid);
+        try testing.expect(!std.mem.eql(u8, &(Scope{ .app = value }).digest(user), &(Scope{ .root = value }).digest(user)));
+    }
+}
+
+test "a launch claims by the data directory it uses, not by whether it named one" {
+    const default_data: app_data.AppData = .{};
+    try testing.expectEqualDeep(Scope{ .app = "dev.example.app" }, Scope.of("dev.example.app", &default_data));
+    const flagged: app_data.AppData = .{ .source = .flag, .root = "C:\\Profiles\\One" };
+    try testing.expectEqualDeep(Scope{ .root = "C:\\Profiles\\One" }, Scope.of("dev.example.app", &flagged));
+    const from_env: app_data.AppData = .{ .source = .env, .root = "/home/a/profile" };
+    try testing.expectEqualDeep(Scope{ .root = "/home/a/profile" }, Scope.of("dev.example.app", &from_env));
+    // A root whose data folder is the default data directory claims the
+    // app, under the very name a launch without an override claims.
+    const at_default: app_data.AppData = .{ .source = .flag, .root = "C:\\Users\\a\\AppData\\Local\\dev.example.app", .data_is_default = true };
+    try testing.expectEqualDeep(Scope{ .app = "dev.example.app" }, Scope.of("dev.example.app", &at_default));
+    const sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-1-1001");
+    var name_buffer: [pipe_name_capacity:0]u16 = undefined;
+    var ascii: [pipe_name_capacity]u8 = undefined;
+    try testing.expectEqualStrings("\\\\.\\pipe\\native-sdk-instance-1-0dbe9aa8a3a3f39b", narrowName(&ascii, endpointName(&name_buffer, 1, sid, .of("dev.example.app", &at_default))));
+}
+
+test "every spelling of one data directory claims one endpoint" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const dirs = @import("app_dirs");
+    const platform = dirs.currentPlatform();
+    const identity: app_data.Identity = .{ .bundle_id = "dev.example.app", .app_name = "example" };
+    const sep = std.fs.path.sep_str;
+    var failure: app_data.Failure = .{};
+    const spellings = [_][]const u8{
+        "Profile Folder" ++ sep ++ "Root One",
+        "Profile Folder/./Root One/../Root One/",
+        // Case-insensitive file systems resolve to the on-disk case.
+        if (is_windows or builtin.os.tag == .macos) "PROFILE FOLDER" ++ sep ++ "ROOT ONE" else "Profile Folder" ++ sep ++ "Root One",
+    };
+    const sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-1-1001");
+    var expected: [pipe_name_capacity:0]u16 = undefined;
+    const first_data = try app_data.resolveWith(allocator, testing.io, tmp.dir, platform, identity, .{ .source = .flag, .path = spellings[0] }, .{}, &failure);
+    const first = endpointName(&expected, 1, sid, .of(identity.bundle_id, &first_data));
+    for (spellings[1..]) |spelling| {
+        const data = try app_data.resolveWith(allocator, testing.io, tmp.dir, platform, identity, .{ .source = .env, .path = spelling }, .{}, &failure);
+        var name: [pipe_name_capacity:0]u16 = undefined;
+        try testing.expectEqualSlices(u16, first, endpointName(&name, 1, sid, .of(identity.bundle_id, &data)));
+    }
+    const other_data = try app_data.resolveWith(allocator, testing.io, tmp.dir, platform, identity, .{ .source = .flag, .path = "Profile Folder" ++ sep ++ "Root Two" }, .{}, &failure);
+    var other: [pipe_name_capacity:0]u16 = undefined;
+    try testing.expect(!std.mem.eql(u16, first, endpointName(&other, 1, sid, .of(identity.bundle_id, &other_data))));
 }
 
 /// A per-test endpoint name, so concurrent test runs never collide.

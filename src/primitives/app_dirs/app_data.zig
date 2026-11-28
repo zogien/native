@@ -143,6 +143,11 @@ pub const AppData = struct {
     /// The override root's canonical absolute path; empty for `.default`.
     /// Two launches name the same root exactly when these bytes match.
     root: []const u8 = "",
+    /// Under an override: whether the root's `data` folder is the very
+    /// directory the default data directory names, so the launch uses the
+    /// default data after all (a root at the default location, such as
+    /// `%LOCALAPPDATA%\<bundle id>` on Windows). False for `.default`.
+    data_is_default: bool = false,
     config: ?[]const u8 = null,
     cache: ?[]const u8 = null,
     data: ?[]const u8 = null,
@@ -162,6 +167,12 @@ pub const AppData = struct {
 
     pub fn isOverride(self: AppData) bool {
         return self.source != .default;
+    }
+
+    /// Whether the data directory in use is the default one: no override,
+    /// or an override whose `data` folder is the default data directory.
+    pub fn usesDefaultData(self: AppData) bool {
+        return !self.isOverride() or self.data_is_default;
     }
 
     pub fn get(self: AppData, kind: dirs.DirKind) ?[]const u8 {
@@ -237,7 +248,31 @@ pub fn resolveWith(
     failure: *Failure,
 ) Error!AppData {
     const wanted = request orelse return defaults(allocator, platform, identity, env);
-    return resolveOverride(allocator, io, cwd, platform, wanted, failure);
+    var result = try resolveOverride(allocator, io, cwd, platform, wanted, failure);
+    var default_buffer: [max_dir_bytes]u8 = undefined;
+    if (dirs.resolveOne(.{ .name = identity.bundle_id }, platform, env, .data, &default_buffer)) |default_data| {
+        result.data_is_default = sameDirectory(io, cwd, result.data.?, default_data);
+    } else |_| {}
+    return result;
+}
+
+/// Whether two paths name one existing directory, as the file system
+/// resolves them: each is opened and canonicalized like an override root
+/// (`canonicalPath`), so case on a case-insensitive volume, 8.3 names,
+/// `..`, and links compare as the folder they reach. A path that does not
+/// open names no directory, so it matches nothing.
+fn sameDirectory(io: std.Io, cwd: std.Io.Dir, first: []const u8, second: []const u8) bool {
+    var first_buffer: [max_dir_bytes]u8 = undefined;
+    var second_buffer: [max_dir_bytes]u8 = undefined;
+    const first_canonical = openCanonical(io, cwd, first, &first_buffer) orelse return false;
+    const second_canonical = openCanonical(io, cwd, second, &second_buffer) orelse return false;
+    return std.mem.eql(u8, first_canonical, second_canonical);
+}
+
+fn openCanonical(io: std.Io, cwd: std.Io.Dir, path: []const u8, buffer: []u8) ?[]const u8 {
+    var dir = cwd.openDir(io, path, .{}) catch return null;
+    defer dir.close(io);
+    return canonicalPath(io, dir, buffer) catch null;
 }
 
 /// The override a launch asks for: the flag before the first `--`, else
@@ -698,6 +733,56 @@ test "every spelling of one folder resolves to one root" {
             try testing.expectEqualStrings(first.root, via_short.root);
         }
     }
+}
+
+test "a root whose data folder is the default data directory uses the default data" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = testArena();
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const platform = dirs.currentPlatform();
+    const sep = std.fs.path.sep_str;
+    var base_buffer: [max_root_bytes]u8 = undefined;
+    const base = base_buffer[0..try tmp.dir.realPathFile(testing.io, ".", &base_buffer)];
+    // The default data directory under the temp dir, for an identity whose
+    // default data folder is `<parent>/data` on every platform: Windows
+    // names it `%LOCALAPPDATA%\<bundle id>\Data` for any id, the others
+    // name it after the bundle id itself.
+    const identity: Identity = if (builtin.os.tag == .windows) identity_fixture else .{ .bundle_id = "data", .app_name = "demo" };
+    const env: dirs.Env = switch (platform) {
+        .windows => .{ .local_app_data = base },
+        .macos => .{ .home = base },
+        else => .{ .xdg_data_home = base },
+    };
+    var default_buffer: [max_dir_bytes]u8 = undefined;
+    const default_data = try dirs.resolveOne(.{ .name = identity.bundle_id }, platform, env, .data, &default_buffer);
+    const default_location = std.fs.path.dirname(default_data).?;
+    var failure: Failure = .{};
+
+    // The root at the default location, before the default data folder
+    // exists, and on Windows in another case than the folders on disk.
+    const spelling = if (builtin.os.tag == .windows)
+        try std.mem.concat(allocator, u8, &.{ base, sep, "DEV.NATIVE_SDK.DEMO" })
+    else
+        default_location;
+    const at_default = try resolveWith(allocator, testing.io, tmp.dir, platform, identity, .{ .source = .flag, .path = spelling }, env, &failure);
+    try testing.expect(at_default.isOverride());
+    try testing.expect(at_default.data_is_default);
+    try testing.expect(at_default.usesDefaultData());
+
+    // Any other root keeps its own data: a sibling, and the default data
+    // folder itself (its data folder is one level further down).
+    const sibling = try resolveWith(allocator, testing.io, tmp.dir, platform, identity, .{ .source = .env, .path = try std.mem.concat(allocator, u8, &.{ base, sep, "elsewhere" }) }, env, &failure);
+    try testing.expect(!sibling.data_is_default);
+    try testing.expect(!sibling.usesDefaultData());
+    const inside = try resolveWith(allocator, testing.io, tmp.dir, platform, identity, .{ .source = .flag, .path = default_data }, env, &failure);
+    try testing.expect(!inside.usesDefaultData());
+
+    // No override is the default data, and never marked as an override's.
+    const default_dirs = try resolveWith(allocator, testing.io, tmp.dir, platform, identity, null, env, &failure);
+    try testing.expect(default_dirs.usesDefaultData());
+    try testing.expect(!default_dirs.data_is_default);
 }
 
 test "an unusable override is refused, never replaced by the default" {

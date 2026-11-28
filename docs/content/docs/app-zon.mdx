@@ -175,7 +175,7 @@ A fuller manifest for an app that also [embeds web content](/docs/frontend) and 
     </tr>
     <tr>
       <td><code>single_instance</code></td>
-      <td>One owning process per bundle id, user, and login session. Defaults to <code>false</code>. When <code>true</code>, a later launch hands its working directory and arguments to the running owner and exits before creating windows; the owner's core receives each launch on the <code>native-sdk.app.launches</code> channel source and decides what to do (see <a href="#single-instance">Single instance</a>). Windows only today; other desktop hosts log a warning and run without ownership.</td>
+      <td>One owning process per data directory, user, and login session: per bundle id for the default data directory, per root for any other data directory override. Defaults to <code>false</code>. When <code>true</code>, a later launch hands its working directory and arguments to the running owner and exits before creating windows; the owner's core receives each launch on the <code>native-sdk.app.launches</code> channel source and decides what to do (see <a href="#single-instance">Single instance</a>). Windows only today; other desktop hosts log a warning and run without ownership.</td>
     </tr>
     <tr>
       <td><code>persist</code></td>
@@ -267,7 +267,13 @@ A native-only build carries the platform consequences with it: on Windows the ex
 
 ## Single instance
 
-`single_instance = true` makes one process the owner of the app per bundle id, user, and login session. The launcher claims ownership before persistence, services, or any window start. A later launch hands its working directory and arguments to the owner and exits without creating a window. Ownership ends with the owner's process, whether it exits normally or crashes, so the next launch becomes the owner without cleanup. Session replay and test executables never claim.
+`single_instance = true` makes one process the owner of the app's [data directory](/docs/data-directory), per user and login session. The launcher claims ownership before persistence, services, or any window start.
+
+- With the default data directory, the owner is per bundle id, the same key earlier versions used. A copy of an older version that is still running and a newly started newer version find each other during an upgrade.
+- With a data directory override (`--native-data-dir` or `NATIVE_SDK_DATA_DIR`), the owner is per root. Launches with different roots run side by side. A later launch with the same root, under any spelling of it, hands its launch to the process that owns that root.
+- What counts is the data directory a launch actually uses. A root whose `data` folder is the default data directory (on Windows, a root at `%LOCALAPPDATA%\<bundle-id>`) shares the default owner. Any other root never shares an owner with a launch on the default directories.
+
+A later launch hands its working directory and arguments to the owner and exits without creating a window. Ownership ends with the owner's process, whether it exits normally or crashes, so the next launch becomes the owner without cleanup. Session replay and test executables never claim.
 
 The owner's core receives each later launch on the built-in `native-sdk.app.launches` channel source and decides what to do with it, such as showing a window or opening the files it names:
 
@@ -303,7 +309,9 @@ A later launch's exit code reports what happened, and a failure also prints the 
   </tbody>
 </table>
 
-Windows is supported today. On other desktop hosts the launcher logs a warning and runs without ownership. Debug and release builds share a bundle id, so they count as the same app.
+Windows is supported today. Debug and release builds share a bundle id, so with the default data directory they count as the same app.
+
+macOS and Linux do not support ownership yet; it is planned for both. Until then the launcher logs a warning there and runs without ownership. On Linux, the GTK host also folds every later launch of a bundle id into the process already running it, whatever its data directory and whether or not the app sets `single_instance`. That later launch exits with code 0 right away, and its arguments are not delivered.
 
 ## `shell`
 
